@@ -13,10 +13,13 @@ import urllib.request
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from local_company.cli import parser
-from local_company.core import Company, MockModel, OllamaModel, PLAYBOOKS, source_limitation_conflicts
+from local_company.core import (
+    Company, MockModel, OllamaModel, PLAYBOOKS, ReportFinalizationPending,
+    source_limitation_conflicts,
+)
 from local_company.dashboard import LocalQueueWorker, create_dashboard_server, render_dashboard
 from local_company.service import _read_state, _startup_lock, _write_state
 
@@ -87,6 +90,10 @@ class BlockingModel(MockModel):
         if not self.release.wait(timeout=5):
             raise RuntimeError("blocking model test timed out")
         return super().complete(system, prompt)
+
+
+class SimulatedProcessCrash(BaseException):
+    pass
 
 
 class ConstraintModel(MockModel):
@@ -314,6 +321,349 @@ class CompanyTests(unittest.TestCase):
             replacement_job, _ = company.run("Review local inventory")
             self.assertNotEqual(replacement_job, job_id)
 
+    def test_recovery_finishes_prepared_report_without_model_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=SimulatedProcessCrash("before report replacement"),
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    company.run("Review local inventory")
+
+            job_id = company.jobs()[0][0]
+            calls_before_recovery = model.calls
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job = db.execute(
+                    "SELECT status, output_path, report_sha256, run_token FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                intent = db.execute(
+                    "SELECT temporary_path, output_path, byte_count, length(report_content), "
+                    "run_token FROM report_finalizations WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+            self.assertEqual(job[:3], ("running", None, None))
+            self.assertIsNotNone(job[3])
+            self.assertEqual(intent[2], intent[3])
+            self.assertEqual(intent[4], job[3])
+            self.assertTrue(Path(intent[0]).is_file())
+            self.assertFalse(Path(intent[1]).exists())
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            detail = company.job_detail(job_id)
+            self.assertEqual(detail["job"][2], "complete")
+            self.assertTrue(detail["evaluation"]["passed"])
+            event_kinds = [event[0] for event in detail["events"]]
+            self.assertEqual(event_kinds.count("report_finalization_recovered"), 1)
+            self.assertEqual(event_kinds.count("report_sealed"), 1)
+            self.assertEqual(event_kinds.count("job_complete"), 1)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                intent_count = db.execute(
+                    "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                history_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(intent_count, 0)
+            self.assertEqual(history_count, 1)
+
+            self.assertEqual(company.recover_stale_jobs(0), [])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                repeated_history = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(repeated_history, 1)
+
+    def test_recovery_registers_replaced_report_after_precommit_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            real_replace = company._durable_replace_report
+
+            def replace_then_crash(source, destination):
+                real_replace(source, destination)
+                raise SimulatedProcessCrash("after report replacement")
+
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=replace_then_crash,
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    company.run("Review local inventory")
+
+            job_id = company.jobs()[0][0]
+            calls_before_recovery = model.calls
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job = db.execute(
+                    "SELECT status, output_path, report_sha256 FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                intent = db.execute(
+                    "SELECT output_path, report_sha256, byte_count FROM report_finalizations "
+                    "WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+            self.assertEqual(job, ("running", None, None))
+            report = Path(intent[0])
+            self.assertTrue(report.is_file())
+            self.assertEqual(hashlib.sha256(report.read_bytes()).hexdigest(), intent[1])
+            self.assertEqual(report.stat().st_size, intent[2])
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                sealed = db.execute(
+                    "SELECT status, output_path, report_sha256, run_token FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                evaluation_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(sealed, ("complete", str(report), intent[1], None))
+            self.assertEqual(evaluation_count, 1)
+
+    def test_pending_queue_report_recovers_before_queue_reconciliation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=PermissionError("simulated Windows sharing violation"),
+            ):
+                with self.assertRaises(ReportFinalizationPending):
+                    company.run_next_queue_item(queue_id)
+
+            calls_before_recovery = model.calls
+            running_queue = company.queue_items("running")[0]
+            job_id = running_queue[7]
+            self.assertEqual(running_queue[0], queue_id)
+            self.assertEqual(company.job_detail(job_id)["job"][2], "running")
+            with closing(sqlite3.connect(company.db_path)) as db:
+                queue_token, job_token = db.execute(
+                    "SELECT q.run_token, j.run_token FROM mission_queue q "
+                    "JOIN jobs j ON j.id=q.job_id WHERE q.id=?",
+                    (queue_id,),
+                ).fetchone()
+                intent_count = db.execute(
+                    "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(queue_token, job_token)
+            self.assertIsNotNone(job_token)
+            self.assertEqual(intent_count, 1)
+            audit_path, _, _ = company.export_audit(Path(tmp) / "exports")
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertNotIn(job_token, audit_text)
+            self.assertNotIn("report_finalizations", json.loads(audit_text))
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            evaluation = company.job_detail(job_id)["evaluation"]
+            expected_status = "complete" if evaluation["passed"] else "quality_failed"
+            reconciled = company.queue_items(expected_status)[0]
+            self.assertEqual(reconciled[0], queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                tokens = db.execute(
+                    "SELECT q.run_token, j.run_token FROM mission_queue q "
+                    "JOIN jobs j ON j.id=q.job_id WHERE q.id=?",
+                    (queue_id,),
+                ).fetchone()
+                queue_events = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_claim_recovered' "
+                    "AND detail LIKE ?",
+                    (f'%"queue_id": "{queue_id}"%',),
+                ).fetchone()[0]
+            self.assertEqual(tokens, (None, None))
+            self.assertEqual(queue_events, 1)
+
+    def test_transient_report_read_failure_preserves_recovery_intent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=SimulatedProcessCrash("leave prepared report"),
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    company.run("Review local inventory")
+
+            job_id = company.jobs()[0][0]
+            calls_before_recovery = model.calls
+            with patch.object(
+                company, "_read_local_report_bytes",
+                side_effect=PermissionError("simulated Windows sharing violation"),
+            ):
+                self.assertEqual(company.recover_stale_jobs(0), [])
+            self.assertEqual(model.calls, calls_before_recovery)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job = db.execute(
+                    "SELECT status, output_path, report_sha256, run_token FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                intent_count = db.execute(
+                    "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                deferred = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE job_id=? "
+                    "AND kind='report_finalization_recovery_deferred'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(job[0:3], ("running", None, None))
+            self.assertIsNotNone(job[3])
+            self.assertEqual(intent_count, 1)
+            self.assertEqual(deferred, 1)
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            self.assertEqual(company.job_detail(job_id)["job"][2], "complete")
+
+    @unittest.skipUnless(os.name == "nt", "Windows write-through flags")
+    def test_windows_report_replace_requests_write_through(self):
+        move_file = Mock(return_value=1)
+        kernel = Mock()
+        kernel.MoveFileExW = move_file
+        with patch("ctypes.WinDLL", return_value=kernel):
+            Company._durable_replace_report(Path("prepared.tmp"), Path("report.md"))
+        move_file.assert_called_once_with("prepared.tmp", "report.md", 0x1 | 0x8)
+
+    def test_recovery_evaluates_sealed_queue_job_after_evaluator_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+            with patch.object(
+                company, "evaluate_job",
+                side_effect=RuntimeError("after report seal"),
+            ):
+                with self.assertRaises(ReportFinalizationPending):
+                    company.run_next_queue_item(queue_id)
+
+            calls_before_recovery = model.calls
+            running_queue = company.queue_items("running")[0]
+            job_id = running_queue[7]
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job_status = db.execute(
+                    "SELECT status FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()[0]
+                evaluation_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(job_status, "complete")
+            self.assertEqual(evaluation_count, 0)
+
+            self.assertEqual(company.recover_stale_jobs(0), [])
+            self.assertEqual(model.calls, calls_before_recovery)
+            evaluation = company.job_detail(job_id)["evaluation"]
+            expected_status = "complete" if evaluation["passed"] else "quality_failed"
+            self.assertEqual(company.queue_items(expected_status)[0][0], queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(history_count, 1)
+            self.assertEqual(company.recover_stale_jobs(0), [])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                repeated_history = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(repeated_history, 1)
+
+    def test_tampered_prepared_report_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=SimulatedProcessCrash("leave prepared temp"),
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    company.run("Review local inventory")
+
+            job_id = company.jobs()[0][0]
+            with closing(sqlite3.connect(company.db_path)) as db:
+                temporary_path = Path(db.execute(
+                    "SELECT temporary_path FROM report_finalizations WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()[0])
+            temporary_path.write_bytes(b"tampered pending report")
+            calls_before_recovery = model.calls
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job = db.execute(
+                    "SELECT status, output_path, report_sha256, run_token FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                intent_count = db.execute(
+                    "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                evaluation_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                abandoned = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE job_id=? "
+                    "AND kind='report_finalization_abandoned'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(job, ("interrupted", None, None, None))
+            self.assertEqual(intent_count, 0)
+            self.assertEqual(evaluation_count, 0)
+            self.assertEqual(abandoned, 1)
+            self.assertEqual(temporary_path.read_bytes(), b"tampered pending report")
+
+    def test_superseded_report_intent_cannot_seal_under_a_new_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            with patch(
+                "local_company.core.Company._durable_replace_report",
+                side_effect=SimulatedProcessCrash("leave old report intent"),
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    company.run("Review local inventory")
+
+            job_id = company.jobs()[0][0]
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                old_token, temporary_path = db.execute(
+                    "SELECT run_token, temporary_path FROM report_finalizations WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                db.execute(
+                    "UPDATE jobs SET run_token='new-lease', heartbeat_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", job_id),
+                )
+            calls_before_recovery = model.calls
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            self.assertEqual(model.calls, calls_before_recovery)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job = db.execute(
+                    "SELECT status, output_path, report_sha256, run_token FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                intent_count = db.execute(
+                    "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                evaluation_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluations WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(job, ("interrupted", None, None, None))
+            self.assertEqual(intent_count, 0)
+            self.assertEqual(evaluation_count, 0)
+            self.assertTrue(Path(temporary_path).is_file())
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                late_seal = company._seal_report_finalization(
+                    db, job_id, old_token, datetime.now(timezone.utc).isoformat(),
+                    recovered=True,
+                )
+            self.assertFalse(late_seal)
+            self.assertEqual(company.job_detail(job_id)["job"][2], "interrupted")
+
     def test_report_outside_output_storage_is_not_reused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -502,6 +852,31 @@ class CompanyTests(unittest.TestCase):
                 )
             self.assertEqual(company.recover_stale_jobs(0), ["deadjob"])
             self.assertEqual(company.job_detail("deadjob")["job"][2], "interrupted")
+
+    def test_initialize_migrates_report_finalization_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            project_id = company.create_project("Existing State")
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute("DROP TABLE report_finalizations")
+
+            company.initialize()
+
+            with closing(sqlite3.connect(company.db_path)) as db:
+                columns = [
+                    row[1] for row in db.execute("PRAGMA table_info(report_finalizations)")
+                ]
+                retained_project = db.execute(
+                    "SELECT id FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+            self.assertEqual(
+                columns,
+                [
+                    "job_id", "run_token", "output_path", "temporary_path",
+                    "report_sha256", "byte_count", "report_content", "prepared_at",
+                ],
+            )
+            self.assertEqual(retained_project, (project_id,))
 
     def test_stale_orphaned_queue_claim_fails_closed_once_without_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:

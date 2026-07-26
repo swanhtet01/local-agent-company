@@ -399,6 +399,10 @@ class ExecutionLeaseLost(RuntimeError):
     """Raised when a recovered or superseded worker tries to persist a late result."""
 
 
+class ReportFinalizationPending(RuntimeError):
+    """Raised when a durable report intent needs local recovery before work can continue."""
+
+
 class Company:
     def __init__(self, home: Path, model: Model) -> None:
         self.home = home
@@ -489,6 +493,13 @@ class Company:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
+                CREATE TABLE IF NOT EXISTS report_finalizations (
+                    job_id TEXT PRIMARY KEY, run_token TEXT NOT NULL,
+                    output_path TEXT NOT NULL, temporary_path TEXT NOT NULL,
+                    report_sha256 TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count >= 0),
+                    report_content BLOB NOT NULL, prepared_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                );
                 CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, objective TEXT NOT NULL,
                     project_id TEXT, roles_json TEXT, playbook TEXT, priority INTEGER NOT NULL,
@@ -539,6 +550,194 @@ class Company:
             )
         return active
 
+    def _validated_report_finalization_paths(
+        self, job_id: str, output_path: str, temporary_path: str,
+    ) -> tuple[Path, Path] | None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
+            return None
+        output = Path(output_path)
+        temporary = Path(temporary_path)
+        if output.is_symlink() or temporary.is_symlink():
+            return None
+        try:
+            root = self.output_dir.resolve()
+            resolved_output = output.resolve()
+            resolved_temporary = temporary.resolve()
+        except OSError:
+            return None
+        expected_temporary = re.fullmatch(
+            rf"\.{re.escape(job_id)}\.md\.[0-9a-f]{{32}}\.tmp",
+            resolved_temporary.name,
+        )
+        if (
+            resolved_output.name != f"{job_id}.md"
+            or resolved_output.parent != resolved_temporary.parent
+            or not resolved_output.is_relative_to(root)
+            or not resolved_temporary.is_relative_to(root)
+            or expected_temporary is None
+        ):
+            return None
+        return resolved_output, resolved_temporary
+
+    @staticmethod
+    def _write_fsynced_report(path: Path, content: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _report_artifact_matches(
+        self, path: Path, expected_content: bytes, expected_sha256: str,
+        expected_bytes: int,
+    ) -> bool:
+        try:
+            content = self._read_local_report_bytes(str(path))
+        except OSError as exc:
+            raise ReportFinalizationPending(
+                f"Prepared report verification is pending local recovery: {exc}"
+            ) from exc
+        except ValueError:
+            return False
+        return (
+            content == expected_content
+            and len(content) == expected_bytes
+            and hashlib.sha256(content).hexdigest() == expected_sha256
+        )
+
+    @staticmethod
+    def _durable_replace_report(source: Path, destination: Path) -> None:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            move_file = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+            move_file.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+            move_file.restype = wintypes.BOOL
+            move_replace_existing = 0x1
+            move_write_through = 0x8
+            if not move_file(
+                str(source), str(destination),
+                move_replace_existing | move_write_through,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return
+        os.replace(source, destination)
+        directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+
+    def _seal_report_finalization(
+        self, db: sqlite3.Connection, job_id: str, observed_token: str | None,
+        completed_at: str, *, recovered: bool,
+    ) -> bool:
+        intent = db.execute(
+            "SELECT run_token, output_path, temporary_path, report_sha256, byte_count, "
+            "report_content FROM report_finalizations WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if not intent:
+            return False
+        (
+            intent_token, output_path, temporary_path, report_sha256, report_bytes,
+            report_content,
+        ) = intent
+        if not observed_token or intent_token != observed_token:
+            return False
+        try:
+            expected_bytes = int(report_bytes)
+            expected_content = bytes(report_content)
+        except (TypeError, ValueError):
+            return False
+        paths = self._validated_report_finalization_paths(
+            job_id, str(output_path), str(temporary_path),
+        )
+        if (
+            not paths or expected_bytes < 0
+            or not re.fullmatch(r"[0-9a-f]{64}", report_sha256)
+            or len(expected_content) != expected_bytes
+            or hashlib.sha256(expected_content).hexdigest() != report_sha256
+        ):
+            return False
+        output, temporary = paths
+        output_exists = output.exists() or output.is_symlink()
+        if output_exists:
+            if not self._report_artifact_matches(
+                output, expected_content, report_sha256, expected_bytes,
+            ):
+                return False
+        else:
+            temporary_exists = temporary.exists() or temporary.is_symlink()
+            if temporary_exists and not self._report_artifact_matches(
+                temporary, expected_content, report_sha256, expected_bytes,
+            ):
+                return False
+            if not temporary_exists:
+                try:
+                    self._write_fsynced_report(temporary, expected_content)
+                except OSError as exc:
+                    raise ReportFinalizationPending(
+                        f"Prepared report materialization is pending local recovery: {exc}"
+                    ) from exc
+            try:
+                self._durable_replace_report(temporary, output)
+            except OSError as exc:
+                raise ReportFinalizationPending(
+                    f"Prepared report publication is pending local recovery: {exc}"
+                ) from exc
+            if not self._report_artifact_matches(
+                output, expected_content, report_sha256, expected_bytes,
+            ):
+                return False
+        changed = db.execute(
+            "UPDATE jobs SET status='complete', output_path=?, report_sha256=?, "
+            "heartbeat_at=?, run_token=NULL WHERE id=? AND status='running' "
+            "AND run_token=?",
+            (
+                str(output), report_sha256, completed_at, job_id, observed_token,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise ExecutionLeaseLost(
+                f"Execution lease for job {job_id} changed during report finalization"
+            )
+        db.execute(
+            "DELETE FROM report_finalizations WHERE job_id=? AND run_token=?",
+            (job_id, observed_token),
+        )
+        if recovered:
+            self._event(
+                db, job_id, "report_finalization_recovered",
+                json.dumps(
+                    {
+                        "algorithm": "sha256", "bytes": expected_bytes,
+                        "path": str(output), "sha256": report_sha256,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        self._event(
+            db, job_id, "report_sealed",
+            json.dumps(
+                {
+                    "algorithm": "sha256", "bytes": expected_bytes,
+                    "path": str(output), "sha256": report_sha256,
+                },
+                sort_keys=True,
+            ),
+        )
+        self._event(db, job_id, "job_complete", str(output))
+        return True
+
     def recover_stale_jobs(self, stale_after_seconds: int = 900) -> list[str]:
         self.initialize()
         if stale_after_seconds < 0:
@@ -547,6 +746,8 @@ class Company:
         cutoff = observed_at - timedelta(seconds=stale_after_seconds)
         completed_at = observed_at.isoformat()
         recovered: list[str] = []
+        recovered_reports: list[str] = []
+        evaluation_candidates: list[str] = []
 
         def is_stale(timestamp: str | None) -> bool:
             try:
@@ -567,6 +768,19 @@ class Company:
             ).fetchall()
             for job_id, timestamp, observed_token in rows:
                 if is_stale(timestamp):
+                    try:
+                        report_sealed = self._seal_report_finalization(
+                            db, job_id, observed_token, completed_at, recovered=True,
+                        )
+                    except ReportFinalizationPending as exc:
+                        self._event(
+                            db, job_id, "report_finalization_recovery_deferred", str(exc),
+                        )
+                        continue
+                    if report_sealed:
+                        recovered.append(job_id)
+                        recovered_reports.append(job_id)
+                        continue
                     changed = db.execute(
                         "UPDATE jobs SET status='interrupted', run_token=NULL "
                         "WHERE id=? AND status='running' AND run_token IS ? "
@@ -582,8 +796,37 @@ class Company:
                         self._event(
                             db, job_id, "job_interrupted", "stale heartbeat recovered",
                         )
+                        abandoned = db.execute(
+                            "DELETE FROM report_finalizations WHERE job_id=?", (job_id,)
+                        ).rowcount
+                        if abandoned:
+                            self._event(
+                                db, job_id, "report_finalization_abandoned",
+                                "durable report intent or artifact did not validate",
+                            )
                         recovered.append(job_id)
 
+            evaluation_candidates.extend(recovered_reports)
+            for job_id, timestamp in db.execute(
+                "SELECT j.id, COALESCE(j.heartbeat_at, j.created_at) FROM jobs j "
+                "LEFT JOIN evaluations e ON e.job_id=j.id "
+                "WHERE j.status='complete' AND e.job_id IS NULL"
+            ):
+                if is_stale(timestamp) and job_id not in evaluation_candidates:
+                    evaluation_candidates.append(job_id)
+
+        for job_id in evaluation_candidates:
+            try:
+                self.evaluate_job(job_id)
+            except Exception as exc:
+                with closing(self._connect()) as db, db:
+                    self._event(
+                        db, job_id, "recovered_report_evaluation_failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             live_jobs = db.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status='running'"
             ).fetchone()[0]
@@ -602,7 +845,10 @@ class Company:
                     continue
                 if job_id and job_status == "running" and queue_token == job_token:
                     continue
-                if job_status == "complete" and not is_stale(job_observed_at):
+                if (
+                    job_status == "complete" and not is_stale(job_observed_at)
+                    and job_id not in recovered
+                ):
                     continue
                 if not job_id and live_jobs:
                     # Older claims may predate durable queue-to-job linkage. A live job could
@@ -1480,6 +1726,20 @@ class Company:
                 )
             return queue_id, job_id, output, bool(evaluation["passed"])
         except ExecutionLeaseLost:
+            raise
+        except ReportFinalizationPending as exc:
+            with closing(self._connect()) as db, db:
+                linked = db.execute(
+                    "SELECT job_id FROM mission_queue WHERE id=? AND status='running' "
+                    "AND run_token=?",
+                    (queue_id, queue_run_token),
+                ).fetchone()
+                self._event(
+                    db, linked[0] if linked else None, "queue_execution_recovery_pending",
+                    json.dumps(
+                        {"queue_id": queue_id, "error": str(exc)}, sort_keys=True,
+                    ),
+                )
             raise
         except PermissionError as exc:
             with closing(self._connect()) as db, db:
@@ -2435,53 +2695,60 @@ class Company:
         report_bytes = report.encode("utf-8")
         report_sha256 = hashlib.sha256(report_bytes).hexdigest()
         temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
-        descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(report_bytes)
-                handle.flush()
-                os.fsync(handle.fileno())
-            with closing(self._connect()) as db, db:
-                db.execute("BEGIN IMMEDIATE")
-                lease_active = db.execute(
-                    "SELECT 1 FROM jobs "
-                    "WHERE id=? AND status='running' AND run_token=?",
-                    (job_id, run_token),
-                ).fetchone() is not None
-                if lease_active:
-                    os.replace(temporary_path, output_path)
-                    completed = db.execute(
-                        "UPDATE jobs SET status='complete', output_path=?, report_sha256=?, "
-                        "heartbeat_at=?, run_token=NULL "
-                        "WHERE id=? AND status='running' AND run_token=?",
-                        (str(output_path), report_sha256, utc_now(), job_id, run_token),
-                    ).rowcount
-                    if completed != 1:
-                        raise RuntimeError("Execution lease changed during report finalization")
-                    self._event(
-                        db, job_id, "report_sealed",
-                        json.dumps(
-                            {
-                                "algorithm": "sha256", "bytes": len(report_bytes),
-                                "path": str(output_path), "sha256": report_sha256,
-                            },
-                            sort_keys=True,
-                        ),
-                    )
-                    self._event(db, job_id, "job_complete", str(output_path))
-                else:
-                    self._event(
-                        db, job_id, "late_result_discarded",
-                        json.dumps({"stage": "report-finalization"}, sort_keys=True),
-                    )
-        finally:
-            if temporary_path.exists():
-                temporary_path.unlink()
+        prepared_at = utc_now()
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            lease_active = self._renew_execution_lease(
+                db, job_id, run_token, "report-finalization:prepare",
+            )
+            if lease_active:
+                db.execute(
+                    "INSERT INTO report_finalizations("
+                    "job_id, run_token, output_path, temporary_path, report_sha256, "
+                    "byte_count, report_content, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        job_id, run_token, str(output_path), str(temporary_path),
+                        report_sha256, len(report_bytes), report_bytes, prepared_at,
+                    ),
+                )
+                self._event(
+                    db, job_id, "report_finalization_prepared",
+                    json.dumps(
+                        {
+                            "algorithm": "sha256", "bytes": len(report_bytes),
+                            "path": str(output_path), "sha256": report_sha256,
+                        },
+                        sort_keys=True,
+                    ),
+                )
         if not lease_active:
             raise ExecutionLeaseLost(
                 f"Execution lease for job {job_id} was recovered or superseded"
             )
-        self.evaluate_job(job_id)
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            sealed = self._seal_report_finalization(
+                db, job_id, run_token, utc_now(), recovered=False,
+            )
+            if not sealed:
+                current = db.execute(
+                    "SELECT 1 FROM jobs WHERE id=? AND status='running' AND run_token=?",
+                    (job_id, run_token),
+                ).fetchone()
+                if not current:
+                    raise ExecutionLeaseLost(
+                        f"Execution lease for job {job_id} was recovered or superseded"
+                    )
+                raise ReportFinalizationPending(
+                    f"Prepared report for job {job_id} failed validation and needs recovery"
+                )
+        try:
+            self.evaluate_job(job_id)
+        except Exception as exc:
+            raise ReportFinalizationPending(
+                f"Report for job {job_id} is sealed but deterministic evaluation is pending: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         return job_id, output_path
 
     def resume(self, job_id: str) -> tuple[str, Path]:
