@@ -17,7 +17,8 @@ from unittest.mock import Mock, patch
 
 from local_company.cli import parser
 from local_company.core import (
-    Company, MockModel, OllamaModel, PLAYBOOKS, ReportFinalizationPending,
+    Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
+    ReportFinalizationPending,
     source_limitation_conflicts,
 )
 from local_company.dashboard import LocalQueueWorker, create_dashboard_server, render_dashboard
@@ -450,9 +451,31 @@ class CompanyTests(unittest.TestCase):
                 intent_count = db.execute(
                     "SELECT COUNT(*) FROM report_finalizations WHERE job_id=?", (job_id,)
                 ).fetchone()[0]
+                intent_paths_and_content = db.execute(
+                    "SELECT output_path, temporary_path, report_content "
+                    "FROM report_finalizations WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
             self.assertEqual(queue_token, job_token)
             self.assertIsNotNone(job_token)
             self.assertEqual(intent_count, 1)
+            pending_health = company.health_snapshot()
+            self.assertEqual(pending_health["pending_report_finalizations"], 1)
+            self.assertEqual(pending_health["pending_evaluations"], 0)
+            self.assertEqual(len(pending_health["pending_completion"]), 1)
+            pending_item = pending_health["pending_completion"][0]
+            self.assertEqual(pending_item["job_id"], job_id)
+            self.assertEqual(pending_item["state"], "report_finalization_pending")
+            self.assertEqual(pending_item["queue_id"], queue_id)
+            self.assertTrue(pending_item["since"])
+            health_json = json.dumps(pending_health)
+            self.assertNotIn(job_token, health_json)
+            self.assertNotIn(intent_paths_and_content[0], health_json)
+            self.assertNotIn(intent_paths_and_content[1], health_json)
+            self.assertNotIn("Local Agent Company Report", health_json)
+            pending_page = render_dashboard(company, service_token="local-review")
+            self.assertIn("Mission completion pending", pending_page)
+            self.assertIn("report finalization pending", pending_page)
             audit_path, _, _ = company.export_audit(Path(tmp) / "exports")
             audit_text = audit_path.read_text(encoding="utf-8")
             self.assertNotIn(job_token, audit_text)
@@ -471,12 +494,16 @@ class CompanyTests(unittest.TestCase):
                     (queue_id,),
                 ).fetchone()
                 queue_events = db.execute(
-                    "SELECT COUNT(*) FROM events WHERE kind='queue_claim_recovered' "
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_recovery_claimed' "
                     "AND detail LIKE ?",
                     (f'%"queue_id": "{queue_id}"%',),
                 ).fetchone()[0]
             self.assertEqual(tokens, (None, None))
             self.assertEqual(queue_events, 1)
+            recovered_health = company.health_snapshot()
+            self.assertEqual(recovered_health["pending_report_finalizations"], 0)
+            self.assertEqual(recovered_health["pending_evaluations"], 0)
+            self.assertEqual(recovered_health["pending_completion"], [])
 
     def test_transient_report_read_failure_preserves_recovery_intent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -552,6 +579,17 @@ class CompanyTests(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(job_status, "complete")
             self.assertEqual(evaluation_count, 0)
+            pending_health = company.health_snapshot()
+            self.assertEqual(pending_health["pending_report_finalizations"], 0)
+            self.assertEqual(pending_health["pending_evaluations"], 1)
+            self.assertEqual(pending_health["pending_completion"][0]["job_id"], job_id)
+            self.assertEqual(
+                pending_health["pending_completion"][0]["state"], "evaluation_pending"
+            )
+            self.assertEqual(pending_health["pending_completion"][0]["queue_id"], queue_id)
+            pending_page = render_dashboard(company, service_token="local-review")
+            self.assertIn("Mission completion pending", pending_page)
+            self.assertIn("evaluation pending", pending_page)
 
             self.assertEqual(company.recover_stale_jobs(0), [])
             self.assertEqual(model.calls, calls_before_recovery)
@@ -569,6 +607,143 @@ class CompanyTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
                 ).fetchone()[0]
             self.assertEqual(repeated_history, 1)
+            self.assertEqual(company.health_snapshot()["pending_completion"], [])
+
+    def test_stale_queue_recovery_rechecks_instead_of_trusting_evaluation_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+            _, job_id, report, _ = company.run_next_queue_item(queue_id)
+            report.write_text(
+                report.read_text(encoding="utf-8") + "\nApproved and deployed immediately.\n",
+                encoding="utf-8",
+            )
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE evaluations SET passed=1, score=100 WHERE job_id=?", (job_id,)
+                )
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, completed_at=NULL, "
+                    "run_token=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", "stale-queue-token", queue_id),
+                )
+                history_before = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+
+            self.assertEqual(company.recover_stale_jobs(0), [])
+            self.assertEqual(company.queue_items("quality_failed")[0][0], queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_after = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                latest_passed = db.execute(
+                    "SELECT passed FROM evaluation_history WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(history_after, history_before + 1)
+            self.assertEqual(latest_passed, 0)
+
+    def test_recovered_queue_lease_discards_late_evaluation_without_audit_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+            original_run = company.run
+
+            def recover_after_seal(*args, **kwargs):
+                result = original_run(*args, **kwargs)
+                company.recover_stale_jobs(0)
+                return result
+
+            with patch.object(company, "run", side_effect=recover_after_seal):
+                with self.assertRaises(ExecutionLeaseLost):
+                    company.run_next_queue_item(queue_id)
+
+            completed = company.queue_items("complete")[0]
+            job_id = completed[7]
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                quality_events = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE job_id=? AND kind='quality_evaluated'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(history_count, 1)
+            self.assertEqual(quality_events, 1)
+
+    def test_recovery_does_not_finalize_from_a_stale_evaluation_return_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+            _, job_id, report, _ = company.run_next_queue_item(queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, completed_at=NULL, "
+                    "run_token=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", "old-recovery-token", queue_id),
+                )
+            real_evaluate = company.evaluate_job
+
+            def return_older_result(observed_job_id, *, _queue_claim=None):
+                older = real_evaluate(observed_job_id)
+                report.write_text(
+                    report.read_text(encoding="utf-8")
+                    + "\nApproved and deployed immediately.\n",
+                    encoding="utf-8",
+                )
+                newer = real_evaluate(observed_job_id)
+                self.assertFalse(newer["passed"])
+                return older
+
+            with patch.object(company, "evaluate_job", side_effect=return_older_result):
+                self.assertEqual(company.recover_stale_jobs(0), [])
+
+            self.assertEqual(company.queue_items("running")[0][0], queue_id)
+            self.assertEqual(company.recent_evaluations()[0][1], 0)
+
+    def test_reused_queue_evaluation_failure_remains_durably_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            job_id, _ = company.run("Review local inventory", roles=["operations"])
+            calls_after_direct = model.calls
+            queue_id = company.enqueue("Review local inventory", roles=["operations"])
+
+            with patch.object(
+                company, "evaluate_job", side_effect=RuntimeError("simulated evaluator pause"),
+            ):
+                with self.assertRaises(ReportFinalizationPending):
+                    company.run_next_queue_item(queue_id)
+
+            self.assertEqual(model.calls, calls_after_direct)
+            self.assertEqual(company.queue_items("running")[0][7], job_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM evaluations WHERE job_id=?", (job_id,)
+                    ).fetchone()[0],
+                    1,
+                )
+                queue_started_at = db.execute(
+                    "SELECT started_at FROM mission_queue WHERE id=?", (queue_id,)
+                ).fetchone()[0]
+            pending = company.health_snapshot()["pending_completion"]
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["job_id"], job_id)
+            self.assertEqual(pending[0]["queue_id"], queue_id)
+            self.assertEqual(pending[0]["state"], "evaluation_pending")
+            self.assertEqual(pending[0]["since"], queue_started_at)
+            self.assertIn(
+                "Mission completion pending",
+                render_dashboard(company, service_token="local-review"),
+            )
+
+            self.assertEqual(company.recover_stale_jobs(0), [])
+            self.assertEqual(model.calls, calls_after_direct)
+            self.assertEqual(company.health_snapshot()["pending_completion"], [])
+            self.assertEqual(company.queue_items("complete")[0][0], queue_id)
 
     def test_tampered_prepared_report_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -987,11 +1162,16 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(reconciled[7], job_id)
             self.assertEqual(reconciled[8], "")
             with closing(sqlite3.connect(company.db_path)) as db:
-                event = db.execute(
-                    "SELECT detail FROM events WHERE kind='queue_claim_recovered' "
-                    "ORDER BY id DESC LIMIT 1"
-                ).fetchone()[0]
-            self.assertEqual(json.loads(event)["resulting_status"], "complete")
+                recovery_events = list(db.execute(
+                    "SELECT kind, detail FROM events WHERE kind IN "
+                    "('queue_recovery_claimed', 'queue_execution_finished') "
+                    "ORDER BY id"
+                ))
+            self.assertEqual(
+                [event[0] for event in recovery_events[-2:]],
+                ["queue_recovery_claimed", "queue_execution_finished"],
+            )
+            self.assertTrue(json.loads(recovery_events[-1][1])["quality_passed"])
 
     def test_queue_job_is_linked_before_the_first_model_call_finishes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1625,6 +1805,28 @@ class CompanyTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertEqual(worker.snapshot()["status"], "complete")
 
+    def test_worker_exposes_durable_completion_pending_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Review completion visibility", roles=["operations"])
+            worker = LocalQueueWorker(company)
+            with patch.object(
+                company, "evaluate_job", side_effect=RuntimeError("simulated evaluator pause"),
+            ):
+                worker.start(queue_id)
+                deadline = time.monotonic() + 5
+                while worker.snapshot()["status"] == "running" and time.monotonic() < deadline:
+                    time.sleep(0.05)
+
+            worker_state = worker.snapshot()
+            self.assertEqual(worker_state["status"], "completion_pending")
+            self.assertEqual(worker_state["queue_id"], queue_id)
+            self.assertIn("simulated evaluator pause", worker_state["error"])
+            self.assertEqual(company.health_snapshot()["pending_evaluations"], 1)
+            rendered = render_dashboard(company, service_token="local-review", worker=worker)
+            self.assertIn("completion_pending", rendered)
+            self.assertIn("Mission completion pending", rendered)
+
     def test_dashboard_worker_preserves_sensitive_action_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
@@ -1685,6 +1887,16 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(report.exists())
             self.assertEqual({row[0] for row in company.queue_items("queued")}, {low_id, future_id})
             self.assertEqual(company.queue_items("complete")[0][7], job_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_count = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                quality_event_count = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE job_id=? AND kind='quality_evaluated'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(history_count, 1)
+            self.assertEqual(quality_event_count, 1)
             self.assertEqual(company.evaluate_job(job_id)["score"], 100)
             detail = company.job_detail(job_id)
             expected_roles = PLAYBOOKS["operations-improvement"]["roles"]
@@ -1748,6 +1960,9 @@ class CompanyTests(unittest.TestCase):
             self.assertGreater(health["disk_free_bytes"], 0)
             self.assertIn("database_bytes", health)
             self.assertEqual(health["active_jobs"], 0)
+            self.assertEqual(health["pending_report_finalizations"], 0)
+            self.assertEqual(health["pending_evaluations"], 0)
+            self.assertEqual(health["pending_completion"], [])
 
     def test_csv_dataset_profile_is_read_only_and_generates_project_brief(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -748,6 +748,7 @@ class Company:
         recovered: list[str] = []
         recovered_reports: list[str] = []
         evaluation_candidates: list[str] = []
+        recovery_queue_claims: list[tuple[QueueClaim, str]] = []
 
         def is_stale(timestamp: str | None) -> bool:
             try:
@@ -806,11 +807,48 @@ class Company:
                             )
                         recovered.append(job_id)
 
-            evaluation_candidates.extend(recovered_reports)
+            recovery_job_ids: set[str] = set()
+            for (
+                queue_id, objective, project_id, roles_json, observed_queue_token,
+                started_at, job_id, job_status, job_observed_at,
+            ) in db.execute(
+                "SELECT q.id, q.objective, q.project_id, q.roles_json, q.run_token, "
+                "q.started_at, q.job_id, j.status, COALESCE(j.heartbeat_at, j.created_at) "
+                "FROM mission_queue q JOIN jobs j ON j.id=q.job_id "
+                "WHERE q.status='running' AND j.status='complete'"
+            ):
+                if (
+                    job_id not in recovered
+                    and (not is_stale(started_at) or not is_stale(job_observed_at))
+                ):
+                    continue
+                recovery_token = uuid.uuid4().hex
+                claimed = db.execute(
+                    "UPDATE mission_queue SET run_token=? WHERE id=? AND status='running' "
+                    "AND job_id=? AND run_token IS ?",
+                    (recovery_token, queue_id, job_id, observed_queue_token),
+                ).rowcount
+                if claimed != 1:
+                    continue
+                recovery_queue_claims.append((
+                    QueueClaim(queue_id, objective, project_id, roles_json, recovery_token),
+                    job_id,
+                ))
+                recovery_job_ids.add(job_id)
+                self._event(
+                    db, job_id, "queue_recovery_claimed",
+                    json.dumps({"queue_id": queue_id}, sort_keys=True),
+                )
+
+            evaluation_candidates.extend(
+                job_id for job_id in recovered_reports if job_id not in recovery_job_ids
+            )
             for job_id, timestamp in db.execute(
                 "SELECT j.id, COALESCE(j.heartbeat_at, j.created_at) FROM jobs j "
                 "LEFT JOIN evaluations e ON e.job_id=j.id "
-                "WHERE j.status='complete' AND e.job_id IS NULL"
+                "WHERE j.status='complete' AND e.job_id IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM mission_queue q "
+                "WHERE q.job_id=j.id AND q.status='running')"
             ):
                 if is_stale(timestamp) and job_id not in evaluation_candidates:
                     evaluation_candidates.append(job_id)
@@ -825,6 +863,18 @@ class Company:
                         f"{type(exc).__name__}: {exc}",
                     )
 
+        for claim, job_id in recovery_queue_claims:
+            try:
+                self.evaluate_job(job_id, _queue_claim=claim)
+            except ExecutionLeaseLost:
+                continue
+            except Exception as exc:
+                with closing(self._connect()) as db, db:
+                    self._event(
+                        db, job_id, "recovered_report_evaluation_failed",
+                        f"{type(exc).__name__}: {exc}",
+                    )
+
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             live_jobs = db.execute(
@@ -832,14 +882,13 @@ class Company:
             ).fetchone()[0]
             queue_rows = db.execute(
                 "SELECT q.id, q.job_id, q.started_at, j.status, q.run_token, j.run_token, "
-                "COALESCE(j.heartbeat_at, j.created_at), e.passed "
+                "COALESCE(j.heartbeat_at, j.created_at) "
                 "FROM mission_queue q LEFT JOIN jobs j ON j.id=q.job_id "
-                "LEFT JOIN evaluations e ON e.job_id=j.id "
                 "WHERE q.status='running'"
             ).fetchall()
             for (
                 queue_id, job_id, started_at, job_status, queue_token, job_token,
-                job_observed_at, evaluation_passed,
+                job_observed_at,
             ) in queue_rows:
                 if not is_stale(started_at) and job_id not in recovered:
                     continue
@@ -854,16 +903,11 @@ class Company:
                     # Older claims may predate durable queue-to-job linkage. A live job could
                     # belong to this claim, so recovery must not guess or disrupt it.
                     continue
+                if job_status == "complete":
+                    # Completed linked work is finalized only by a token-bound evaluator above.
+                    continue
                 recovered_status = "failed"
-                if job_status == "complete" and evaluation_passed is not None:
-                    recovered_status = "complete" if evaluation_passed else "quality_failed"
-                    reason = (
-                        f"stale queue claim reconciled from completed job {job_id} evaluation; "
-                        "no model was rerun"
-                    )
-                    stored_error = None
-                    event_job_id = job_id
-                elif not job_id:
+                if not job_id:
                     reason = "stale queue claim had no linked job; no model was rerun"
                     stored_error = reason
                     event_job_id = None
@@ -880,8 +924,11 @@ class Company:
                     event_job_id = job_id
                 changed = db.execute(
                     "UPDATE mission_queue SET status=?, completed_at=?, error=?, run_token=NULL "
-                    "WHERE id=? AND status='running'",
-                    (recovered_status, completed_at, stored_error, queue_id),
+                    "WHERE id=? AND status='running' AND run_token IS ? AND job_id IS ?",
+                    (
+                        recovered_status, completed_at, stored_error, queue_id,
+                        queue_token, job_id,
+                    ),
                 ).rowcount
                 if changed == 1:
                     self._event(
@@ -1694,36 +1741,17 @@ class Company:
         try:
             job_id, output = self.run(
                 claim.objective, roles=roles, project=claim.project_id, _queue_id=queue_id,
-                _run_token=queue_run_token,
+                _run_token=queue_run_token, _defer_evaluation=True,
             )
-            evaluation = self.evaluate_job(job_id)
-            queue_status = "complete" if evaluation["passed"] else "quality_failed"
-            with closing(self._connect()) as db, db:
-                finalized = db.execute(
-                    "UPDATE mission_queue SET status=?, completed_at=?, job_id=?, run_token=NULL "
-                    "WHERE id=? AND status='running' AND job_id=? AND run_token=?",
-                    (
-                        queue_status, utc_now(), job_id, queue_id, job_id,
-                        queue_run_token,
-                    ),
-                ).rowcount
-                if finalized == 1:
-                    self._event(
-                        db, job_id, "queue_execution_finished",
-                        json.dumps(
-                            {"queue_id": queue_id, "quality_passed": bool(evaluation["passed"])},
-                            sort_keys=True,
-                        ),
-                    )
-                else:
-                    self._event(
-                        db, job_id, "queue_late_result_discarded",
-                        json.dumps({"queue_id": queue_id}, sort_keys=True),
-                    )
-            if finalized != 1:
-                raise ExecutionLeaseLost(
-                    f"Queue claim {queue_id} was recovered or superseded; late result discarded"
-                )
+            try:
+                evaluation = self.evaluate_job(job_id, _queue_claim=claim)
+            except Exception as exc:
+                if isinstance(exc, ExecutionLeaseLost):
+                    raise
+                raise ReportFinalizationPending(
+                    f"Report for job {job_id} is sealed but deterministic evaluation is pending: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
             return queue_id, job_id, output, bool(evaluation["passed"])
         except ExecutionLeaseLost:
             raise
@@ -1888,6 +1916,7 @@ class Company:
         ) if model_root.is_dir() else 0
         output_files = [path for path in self.output_dir.rglob("*.md") if path.is_file()]
         models = self.model.models() if isinstance(self.model, OllamaModel) else None
+        pending_completion = self.pending_completion_items()
         return {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -1902,7 +1931,38 @@ class Company:
             "queued_missions": len(self.queue_items("queued")),
             "pending_approvals": len(self.action_requests("pending")),
             "dataset_count": len(self.dataset_items()),
+            "pending_report_finalizations": sum(
+                item["state"] == "report_finalization_pending" for item in pending_completion
+            ),
+            "pending_evaluations": sum(
+                item["state"] == "evaluation_pending" for item in pending_completion
+            ),
+            "pending_completion": pending_completion,
         }
+
+    def pending_completion_items(self) -> list[dict[str, str | None]]:
+        """Return metadata-only durable completion phases for operator visibility."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT rf.job_id, 'report_finalization_pending', rf.prepared_at, q.id "
+                "FROM report_finalizations rf "
+                "LEFT JOIN mission_queue q ON q.job_id=rf.job_id AND q.status='running' "
+                "UNION ALL "
+                "SELECT j.id, 'evaluation_pending', "
+                "COALESCE(q.started_at, j.heartbeat_at, j.created_at), q.id "
+                "FROM jobs j "
+                "LEFT JOIN evaluations e ON e.job_id=j.id "
+                "LEFT JOIN report_finalizations rf ON rf.job_id=j.id "
+                "LEFT JOIN mission_queue q ON q.job_id=j.id AND q.status='running' "
+                "WHERE j.status='complete' AND (e.job_id IS NULL OR q.id IS NOT NULL) "
+                "AND rf.job_id IS NULL "
+                "ORDER BY 3, 1"
+            ).fetchall()
+        return [
+            {"job_id": row[0], "state": row[1], "since": row[2], "queue_id": row[3]}
+            for row in rows
+        ]
 
     def export_audit(self, destination: Path) -> tuple[Path, Path, str]:
         self.initialize()
@@ -1952,7 +2012,9 @@ class Company:
         hash_path.write_text(f"{digest}  {audit_path.name}\n", encoding="ascii")
         return audit_path, hash_path, digest
 
-    def evaluate_job(self, job_id: str) -> dict[str, object]:
+    def evaluate_job(
+        self, job_id: str, *, _queue_claim: QueueClaim | None = None,
+    ) -> dict[str, object]:
         self.initialize()
         with closing(self._connect()) as db:
             job = db.execute(
@@ -2168,6 +2230,46 @@ class Company:
         passed = all(checks.values())
         evaluated_at = utc_now()
         with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if _queue_claim:
+                linked = db.execute(
+                    "SELECT job_id FROM mission_queue WHERE id=? AND status='running' "
+                    "AND run_token=?",
+                    (_queue_claim.queue_id, _queue_claim.run_token),
+                ).fetchone()
+                if not linked or linked[0] != job_id:
+                    raise ExecutionLeaseLost(
+                        f"Queue claim {_queue_claim.queue_id} was recovered or superseded; "
+                        "late evaluation discarded"
+                    )
+                current_job = db.execute(
+                    "SELECT status, output_path, synthesis, objective, report_sha256, "
+                    "evidence_manifest_sha256 FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if current_job != job:
+                    raise ExecutionLeaseLost(
+                        f"Job {job_id} changed before its queue evaluation could commit"
+                    )
+                if passed:
+                    manifest_still_valid, _, _ = self._validate_evidence_manifest(
+                        job_id, job[5],
+                    )
+                    if not manifest_still_valid:
+                        raise ReportFinalizationPending(
+                            f"Evaluation inputs for job {job_id} changed before queue finalization"
+                        )
+                if current_report_sha256:
+                    try:
+                        current_bytes = self._read_local_report_bytes(job[1])
+                    except (OSError, ValueError) as exc:
+                        raise ReportFinalizationPending(
+                            f"Sealed report for job {job_id} could not be rechecked: {exc}"
+                        ) from exc
+                    if hashlib.sha256(current_bytes).hexdigest() != current_report_sha256:
+                        raise ReportFinalizationPending(
+                            f"Evaluation inputs for job {job_id} changed before queue finalization"
+                        )
             db.execute(
                 "INSERT INTO evaluations(job_id, passed, score, checks_json, evaluated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -2175,7 +2277,7 @@ class Company:
                 "checks_json=excluded.checks_json, evaluated_at=excluded.evaluated_at",
                 (job_id, int(passed), score, json.dumps(checks, sort_keys=True), evaluated_at),
             )
-            db.execute(
+            history_cursor = db.execute(
                 "INSERT INTO evaluation_history("
                 "job_id, passed, score, checks_json, findings_json, evaluator_version, "
                 "report_sha256, manifest_sha256, evaluated_at"
@@ -2205,11 +2307,37 @@ class Company:
                 db, job_id, "quality_evaluated",
                 json.dumps(quality_detail, sort_keys=True),
             )
+            if _queue_claim:
+                queue_status = "complete" if passed else "quality_failed"
+                finalized = db.execute(
+                    "UPDATE mission_queue SET status=?, completed_at=?, job_id=?, run_token=NULL "
+                    "WHERE id=? AND status='running' AND job_id=? AND run_token=?",
+                    (
+                        queue_status, evaluated_at, job_id, _queue_claim.queue_id, job_id,
+                        _queue_claim.run_token,
+                    ),
+                ).rowcount
+                if finalized != 1:
+                    raise ExecutionLeaseLost(
+                        f"Queue claim {_queue_claim.queue_id} was recovered or superseded; "
+                        "late evaluation discarded"
+                    )
+                self._event(
+                    db, job_id, "queue_execution_finished",
+                    json.dumps(
+                        {
+                            "queue_id": _queue_claim.queue_id,
+                            "quality_passed": bool(passed),
+                        },
+                        sort_keys=True,
+                    ),
+                )
         return {
             "job_id": job_id, "passed": passed, "score": score, "checks": checks,
             "source_conflicts": source_conflicts, "evaluator_version": EVALUATOR_VERSION,
             "report_sha256": current_report_sha256, "manifest_sha256": job[5],
-            "manifest_reason": manifest_reason,
+            "manifest_reason": manifest_reason, "evaluated_at": evaluated_at,
+            "evaluation_history_id": history_cursor.lastrowid,
         }
 
     def recent_evaluations(self) -> list[tuple[str, int, int, str]]:
@@ -2223,6 +2351,7 @@ class Company:
         self, objective: str, roles: list[str] | None = None,
         parent_job_id: str | None = None, project: str | None = None,
         *, _queue_id: str | None = None, _run_token: str | None = None,
+        _defer_evaluation: bool = False,
     ) -> tuple[str, Path]:
         self.initialize()
         objective = " ".join(objective.split())
@@ -2381,13 +2510,14 @@ class Company:
             )
         return self._execute_job(
             job_id, objective, assignments, sources, project_id, project_name, [],
-            evidence_manifest_sha256, run_token,
+            evidence_manifest_sha256, run_token, defer_evaluation=_defer_evaluation,
         )
 
     def _execute_job(
         self, job_id: str, objective: str, assignments: list[Assignment], sources: list[SourceHit],
         project_id: str | None, project_name: str | None, results: list[tuple[Assignment, str]],
-        evidence_manifest_sha256: str | None, run_token: str,
+        evidence_manifest_sha256: str | None, run_token: str, *,
+        defer_evaluation: bool = False,
     ) -> tuple[str, Path]:
         source_context = "\n\n".join(
             f"[EVIDENCE:{hit.evidence_id}] SOURCE {hit.path} lines {hit.line_start}-{hit.line_end} "
@@ -2742,13 +2872,14 @@ class Company:
                 raise ReportFinalizationPending(
                     f"Prepared report for job {job_id} failed validation and needs recovery"
                 )
-        try:
-            self.evaluate_job(job_id)
-        except Exception as exc:
-            raise ReportFinalizationPending(
-                f"Report for job {job_id} is sealed but deterministic evaluation is pending: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        if not defer_evaluation:
+            try:
+                self.evaluate_job(job_id)
+            except Exception as exc:
+                raise ReportFinalizationPending(
+                    f"Report for job {job_id} is sealed but deterministic evaluation is pending: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
         return job_id, output_path
 
     def resume(self, job_id: str) -> tuple[str, Path]:

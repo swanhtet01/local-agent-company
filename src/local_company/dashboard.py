@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from .core import Company, PLAYBOOKS, QueueClaim
+from .core import Company, PLAYBOOKS, QueueClaim, ReportFinalizationPending
 
 
 MAX_FORM_BYTES = 16 * 1024
@@ -74,9 +74,29 @@ class LocalQueueWorker:
             )
         except PermissionError as exc:
             self._set_state(status="needs_approval", error=str(exc), finished_at=_utc_now())
+        except ReportFinalizationPending as exc:
+            job_id = None
+            try:
+                job_id = next(
+                    (
+                        item["job_id"] for item in self.company.pending_completion_items()
+                        if item["queue_id"] == claim.queue_id
+                    ),
+                    None,
+                )
+            except Exception:
+                pass
+            state: dict[str, object] = {
+                "status": "completion_pending", "queue_id": claim.queue_id,
+                "error": str(exc), "finished_at": _utc_now(),
+            }
+            if job_id:
+                state["job_id"] = job_id
+            self._set_state(**state)
         except Exception as exc:
             self._set_state(
-                status="failed", error=f"{type(exc).__name__}: {exc}", finished_at=_utc_now()
+                status="failed", queue_id=claim.queue_id,
+                error=f"{type(exc).__name__}: {exc}", finished_at=_utc_now()
             )
         finally:
             self._run_lock.release()
@@ -110,6 +130,15 @@ def render_dashboard(
     def cell(value: object) -> str:
         return html.escape(str(value))
 
+    completion_items = snapshot["health"]["pending_completion"]
+    completion_by_job = {item["job_id"]: item["state"] for item in completion_items}
+    completion_by_queue = {
+        item["queue_id"]: item["state"] for item in completion_items if item["queue_id"]
+    }
+
+    def completion_label(state: object) -> str:
+        return str(state).replace("_", " ")
+
     project_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td><td>{cell(row[3])}</td></tr>"
         for row in snapshot["projects"]
@@ -133,7 +162,12 @@ def render_dashboard(
         )
 
     job_rows = "".join(
-        f'<tr><td>{mission_link(row[0])}</td><td><span class="status {cell(row[1])}">{cell(row[1])}</span></td>'
+        f'<tr><td>{mission_link(row[0])}</td><td><span class="status {cell(row[1])}">{cell(row[1])}</span>'
+        + (
+            f'<br><span class="completion-pending">{cell(completion_label(completion_by_job[row[0]]))}</span>'
+            if row[0] in completion_by_job else ""
+        )
+        + '</td>'
         f"<td>{cell(quality_by_job.get(row[0], ('-', '-'))[0])} {cell(quality_by_job.get(row[0], ('-', '-'))[1])}</td>"
         f"<td>{cell(row[3])}</td><td>{cell(row[2])}</td><td>{job_action(row)}</td></tr>"
         for row in snapshot["jobs"][:30]
@@ -155,7 +189,12 @@ def render_dashboard(
         )
 
     queue_rows = "".join(
-        f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td><td>{cell(row[2])}</td>"
+        f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}"
+        + (
+            f'<br><span class="completion-pending">{cell(completion_label(completion_by_queue[row[0]]))}</span>'
+            if row[0] in completion_by_queue else ""
+        )
+        + f"</td><td>{cell(row[2])}</td>"
         f"<td>{cell(row[3])}</td><td>{cell(row[4] or '-')}</td><td>{cell(row[6])}</td>"
         f"<td>{mission_link(row[7])}</td><td>{cell(row[8] or '-')}</td><td>{queue_action(row)}</td></tr>"
         for row in snapshot["queue"][:30]
@@ -186,7 +225,9 @@ def render_dashboard(
     if service_token:
         worker_status = str(snapshot["worker"].get("status", "idle"))
         next_due = snapshot["next_due_queue_item"]
-        run_disabled = " disabled" if worker_status == "running" or not next_due else ""
+        run_disabled = (
+            " disabled" if worker_status == "running" or completion_items or not next_due else ""
+        )
         reviewed_queue_id = str(next_due[0]) if next_due else ""
         objective_preview = ""
         if next_due:
@@ -195,6 +236,8 @@ def render_dashboard(
                 objective_preview = objective_preview[:237] + "..."
         run_hint = (
             "A local mission is running." if worker_status == "running" else
+            "Mission completion is pending; wait for the worker or recover it after its heartbeat is stale."
+            if completion_items else
             "No queued mission is due." if not next_due else
             f"Reviewed next mission {reviewed_queue_id} at priority {next_due[2]}, "
             f"project {next_due[4] or 'Unscoped'}, due {next_due[3]}: "
@@ -218,6 +261,20 @@ def render_dashboard(
 <input type="hidden" name="queue_id" value="{cell(reviewed_queue_id)}">
 <button type="submit"{run_disabled}>{cell(run_label)}</button></form></section>"""
     notice_html = f'<p class="notice">{cell(notice)}</p>' if notice else ""
+    completion_html = ""
+    if completion_items:
+        completion_rows = "".join(
+            f"<li>{mission_link(item['job_id'])}: {cell(completion_label(item['state']))}"
+            f"{f' (queue {cell(item['queue_id'])})' if item['queue_id'] else ''} "
+            f"since {cell(item['since'])}</li>"
+            for item in completion_items
+        )
+        completion_html = (
+            '<section class="completion-banner"><h2>Mission completion pending</h2>'
+            '<p>The durable local state is preserved. No external action is involved. '
+            'Wait for an active worker; use stale recovery only after its heartbeat ages out.</p>'
+            f"<ul>{completion_rows}</ul></section>"
+        )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -236,8 +293,9 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ font-siz
 code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }}
 .status {{ padding:3px 8px; border-radius:999px; background:#26324a; }}
 .complete {{ color:#87e6a8; }} .failed,.interrupted {{ color:#ff9b9b; }} .running {{ color:#ffd479; }}
-.empty {{ color:#6f7d95; text-align:center; }} .gate {{ color:#ffd479; }}
+.empty {{ color:#6f7d95; text-align:center; }} .gate,.completion-pending {{ color:#ffd479; }}
 .notice {{ padding:12px 14px; background:#143520; border:1px solid #27693d; border-radius:9px; color:#a7f3bd; }}
+.completion-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
 .hint {{ color:#9aa7bd; margin-top:-6px; }} label {{ display:block; color:#cbd5e1; font-size:13px; }}
 textarea,input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
 textarea {{ min-height:108px; resize:vertical; }} .form-grid {{ display:grid; grid-template-columns:2fr 2fr 1fr; gap:12px; margin:12px 0; }}
@@ -247,7 +305,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 @media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} th:nth-child(4),td:nth-child(4) {{ display:none; }} }}
 </style></head><body>
 <h1>Local Agent Company</h1><p class="sub">Owner-controlled task intake &middot; localhost only <a class="refresh" href="/">Refresh</a><br>Scores are automated format, safety, and evidence-consistency checks—not factual or production verification.</p>
-{notice_html}{intake}
+{notice_html}{completion_html}{intake}
 <div class="grid">
 <div class="card"><div class="metric">{len(snapshot['projects'])}</div><div class="label">Projects</div></div>
 <div class="card"><div class="metric">{len(snapshot['jobs'])}</div><div class="label">Missions</div></div>
