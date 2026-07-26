@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local_company.cli import parser
-from local_company.core import Company, MockModel, OllamaModel, PLAYBOOKS
+from local_company.core import Company, MockModel, OllamaModel, PLAYBOOKS, source_limitation_conflicts
 from local_company.dashboard import create_dashboard_server, render_dashboard
 
 
@@ -27,6 +27,33 @@ class RecordingModel:
     def complete(self, system, prompt):
         self.prompts.append((system, prompt))
         return f"result-{len(self.prompts)}"
+
+
+class CountingMockModel(MockModel):
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, system, prompt):
+        self.calls += 1
+        return super().complete(system, prompt)
+
+
+class UncacheableMockModel:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, system, prompt):
+        self.calls += 1
+        return MockModel().complete(system, prompt)
+
+
+class VersionedMockModel(CountingMockModel):
+    def __init__(self, runtime_version):
+        super().__init__()
+        self.runtime_version = runtime_version
+
+    def cache_identity(self):
+        return {**super().cache_identity(), "runtime_version": self.runtime_version}
 
 
 class FailOnceModel(RecordingModel):
@@ -135,6 +162,13 @@ class ContradictingSourceModel(MockModel):
 
 
 class CompanyTests(unittest.TestCase):
+    def test_negative_evidence_claim_is_not_misclassified_as_completion(self):
+        findings = source_limitation_conflicts(
+            "Verified facts: No telemetry or hosted activation is ready in the current evidence.",
+            [("activation.md", "This is a local release gate, not hosted activation.")],
+        )
+        self.assertEqual(findings, [])
+
     def test_default_local_runtime_releases_idle_model_memory(self):
         with patch.dict(os.environ, {}, clear=True):
             service_args = parser().parse_args(["service", "start"])
@@ -159,18 +193,91 @@ class CompanyTests(unittest.TestCase):
 
     def test_recent_identical_direct_mission_reuses_output_without_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:
-            model = RecordingModel()
+            model = CountingMockModel()
             company = Company(Path(tmp), model)
             first_job, first_report = company.run("Review  local inventory")
-            calls_after_first = len(model.prompts)
+            calls_after_first = model.calls
 
             second_job, second_report = company.run(" Review local inventory ")
 
             self.assertEqual(second_job, first_job)
             self.assertEqual(second_report, first_report)
-            self.assertEqual(len(model.prompts), calls_after_first)
+            self.assertEqual(model.calls, calls_after_first)
             detail = company.job_detail(first_job)
             self.assertEqual(sum(1 for event in detail["events"] if event[0] == "job_reused"), 1)
+
+    def test_quality_failed_report_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), TruncatedModel())
+            first_job, _ = company.run("Review  local inventory")
+            second_job, _ = company.run(" Review local inventory ")
+            self.assertNotEqual(second_job, first_job)
+
+    def test_uncacheable_model_and_runtime_identity_change_disable_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uncacheable = UncacheableMockModel()
+            company = Company(root / "uncacheable", uncacheable)
+            first_job, _ = company.run("Review local inventory")
+            second_job, _ = company.run("Review local inventory")
+            self.assertNotEqual(second_job, first_job)
+
+            company = Company(root / "versioned", VersionedMockModel("v1"))
+            first_job, _ = company.run("Review local inventory")
+            company.model = VersionedMockModel("v2")
+            second_job, _ = company.run("Review local inventory")
+            self.assertNotEqual(second_job, first_job)
+
+    def test_report_integrity_tampering_fails_and_evaluations_are_append_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, report = company.run("Review local inventory")
+            initial = company.job_detail(job_id)["evaluation"]
+            self.assertTrue(initial["passed"])
+            self.assertTrue(initial["checks"]["report_integrity_valid"])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                sealed_hash = db.execute(
+                    "SELECT report_sha256 FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()[0]
+            self.assertEqual(hashlib.sha256(report.read_bytes()).hexdigest(), sealed_hash)
+            self.assertEqual(list(report.parent.glob(".*.tmp")), [])
+
+            report.write_text(
+                report.read_text(encoding="utf-8") + "\nApproved and deployed immediately.\n",
+                encoding="utf-8",
+            )
+            rechecked = company.evaluate_job(job_id)
+
+            self.assertFalse(rechecked["passed"])
+            self.assertFalse(rechecked["checks"]["report_integrity_valid"])
+            self.assertFalse(rechecked["checks"]["unperformed_action_claims_absent"])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history = list(db.execute(
+                    "SELECT passed, evaluator_version, report_sha256 FROM evaluation_history "
+                    "WHERE job_id=? ORDER BY id", (job_id,),
+                ))
+            self.assertEqual([row[0] for row in history], [1, 0])
+            self.assertEqual(len({row[1] for row in history}), 1)
+            self.assertNotEqual(history[0][2], history[1][2])
+            replacement_job, _ = company.run("Review local inventory")
+            self.assertNotEqual(replacement_job, job_id)
+
+    def test_report_outside_output_storage_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingMockModel()
+            company = Company(root / "state", model)
+            job_id, report = company.run("Review local inventory")
+            outside = root / "moved-report.md"
+            outside.write_bytes(report.read_bytes())
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute("UPDATE jobs SET output_path=? WHERE id=?", (str(outside), job_id))
+
+            replacement_job, _ = company.run("Review local inventory")
+
+            self.assertNotEqual(replacement_job, job_id)
+            events = company.job_detail(job_id)["events"]
+            self.assertTrue(any(event[0] == "job_reuse_rejected" for event in events))
 
     def test_changed_retrieved_source_invalidates_recent_job_reuse(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,7 +795,10 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(audit_path.read_bytes()).hexdigest(), digest)
             self.assertIn(digest, hash_path.read_text(encoding="ascii"))
             payload = json.loads(audit_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["format"], "local-agent-company-audit-v1")
+            self.assertEqual(payload["format"], "local-agent-company-audit-v2")
+            self.assertRegex(payload["jobs"][0]["report_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(payload["evaluation_history"][0]["report_sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(payload["evaluation_history"][0]["evaluator_version"])
             self.assertNotIn("content", payload["knowledge_index"][0])
             self.assertNotIn("private local reference body", audit_path.read_text(encoding="utf-8"))
 

@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import platform
 import re
 import shutil
@@ -82,6 +83,8 @@ MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RECENT_JOB_REUSE_SECONDS = 86_400
+EVALUATOR_VERSION = "local-quality-2026-07-27.2"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.1"
 
 
 def count_words(text: str) -> int:
@@ -117,7 +120,7 @@ def extract_labeled_sections(text: str, labels: list[str]) -> dict[str, str]:
 
 
 _LIMITATION_PATTERN = re.compile(
-    r"\b(?:not|never|without|until|before|still|pending|incomplete|unavailable|"
+    r"\b(?:no|not|never|without|until|before|still|pending|incomplete|unavailable|"
     r"missing|blocked|should|must\s+not|does\s+not|do\s+not|cannot|can't)\b",
     flags=re.IGNORECASE,
 )
@@ -239,6 +242,11 @@ class Model(Protocol):
 
 
 class MockModel:
+    def cache_identity(self) -> dict[str, object]:
+        return {
+            "provider": "mock", "implementation": type(self).__qualname__, "version": 1,
+        }
+
     def complete(self, system: str, prompt: str) -> str:
         assignment = " ".join(prompt.split())[:280]
         return (
@@ -281,6 +289,28 @@ class OllamaModel:
                 )
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
             return None
+
+    def cache_identity(self) -> dict[str, object] | None:
+        try:
+            with self.opener.open(f"{self.host}/api/tags", timeout=3) as response:
+                payload = json.load(response)
+        except (
+            urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException,
+            json.JSONDecodeError,
+        ):
+            return None
+        for installed in payload.get("models", []):
+            if installed.get("name") not in {self.model, f"{self.model}:latest"}:
+                continue
+            digest = installed.get("digest")
+            if not isinstance(digest, str) or not digest:
+                return None
+            return {
+                "provider": "ollama", "model": self.model, "digest": digest,
+                "host": self.host, "num_ctx": self.num_ctx, "num_predict": self.num_predict,
+                "keep_alive": self.keep_alive, "think": False,
+            }
+        return None
 
     def complete(self, system: str, prompt: str) -> str:
         body = json.dumps({
@@ -331,6 +361,17 @@ class Company:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    def _read_local_report_bytes(self, output_path: str | None) -> bytes:
+        if not output_path:
+            raise ValueError("job has no report path")
+        candidate = Path(output_path)
+        if candidate.is_symlink():
+            raise ValueError("report path cannot be a symlink")
+        report_path = candidate.resolve(strict=True)
+        if not report_path.is_relative_to(self.output_dir.resolve()) or not report_path.is_file():
+            raise ValueError("report path is outside local company output storage")
+        return report_path.read_bytes()
+
     def initialize(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db, db:
@@ -342,7 +383,8 @@ class Company:
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL, output_path TEXT, parent_job_id TEXT,
-                    project_id TEXT, synthesis TEXT, heartbeat_at TEXT, input_fingerprint TEXT
+                    project_id TEXT, synthesis TEXT, heartbeat_at TEXT, input_fingerprint TEXT,
+                    report_sha256 TEXT
                 );
                 CREATE TABLE IF NOT EXISTS assignments (
                     job_id TEXT NOT NULL, role TEXT NOT NULL, brief TEXT NOT NULL,
@@ -382,6 +424,14 @@ class Company:
                     checks_json TEXT NOT NULL, evaluated_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
+                CREATE TABLE IF NOT EXISTS evaluation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
+                    passed INTEGER NOT NULL, score INTEGER NOT NULL,
+                    checks_json TEXT NOT NULL, findings_json TEXT NOT NULL,
+                    evaluator_version TEXT NOT NULL, report_sha256 TEXT,
+                    evaluated_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                );
                 CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, objective TEXT NOT NULL,
                     project_id TEXT, roles_json TEXT, playbook TEXT, priority INTEGER NOT NULL,
@@ -403,6 +453,7 @@ class Company:
             self._ensure_column(db, "jobs", "synthesis", "TEXT")
             self._ensure_column(db, "jobs", "heartbeat_at", "TEXT")
             self._ensure_column(db, "jobs", "input_fingerprint", "TEXT")
+            self._ensure_column(db, "jobs", "report_sha256", "TEXT")
             self._ensure_column(db, "assignments", "deliverable", "TEXT")
             self._ensure_column(db, "assignments", "sequence", "INTEGER")
 
@@ -1168,7 +1219,7 @@ class Company:
                 return [dict(zip(names, row)) for row in cursor.fetchall()]
 
             payload = {
-                "format": "local-agent-company-audit-v1",
+                "format": "local-agent-company-audit-v2",
                 "exported_at": utc_now(),
                 "projects": rows("SELECT * FROM projects ORDER BY created_at"),
                 "jobs": rows("SELECT * FROM jobs ORDER BY created_at"),
@@ -1179,6 +1230,7 @@ class Company:
                 "events": rows("SELECT * FROM events ORDER BY id"),
                 "queue": rows("SELECT * FROM mission_queue ORDER BY created_at"),
                 "evaluations": rows("SELECT * FROM evaluations ORDER BY evaluated_at"),
+                "evaluation_history": rows("SELECT * FROM evaluation_history ORDER BY id"),
                 "schedules": rows("SELECT * FROM schedules ORDER BY created_at"),
                 "datasets": rows("SELECT * FROM datasets ORDER BY added_at"),
             }
@@ -1196,7 +1248,8 @@ class Company:
         self.initialize()
         with closing(self._connect()) as db:
             job = db.execute(
-                "SELECT status, output_path, synthesis, objective FROM jobs WHERE id=?", (job_id,)
+                "SELECT status, output_path, synthesis, objective, report_sha256 FROM jobs WHERE id=?",
+                (job_id,),
             ).fetchone()
             if not job:
                 raise ValueError(f"Unknown job: {job_id}")
@@ -1210,8 +1263,18 @@ class Company:
             metric_details = [row[0] for row in db.execute(
                 "SELECT detail FROM events WHERE job_id=? AND kind='model_metrics'", (job_id,)
             )]
-        output_path = Path(job[1]) if job[1] else None
-        report = output_path.read_text(encoding="utf-8") if output_path and output_path.is_file() else ""
+        report_bytes = b""
+        report_path_local = False
+        try:
+            report_bytes = self._read_local_report_bytes(job[1])
+            report_path_local = True
+        except (OSError, ValueError):
+            pass
+        try:
+            report = report_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            report = ""
+        current_report_sha256 = hashlib.sha256(report_bytes).hexdigest() if report_bytes else None
         source_paths = re.findall(r"(?m)^- `([^`]+)`\s*$", report)
         source_documents: list[tuple[str, str]] = []
         if source_paths:
@@ -1226,6 +1289,10 @@ class Company:
             "assignments_complete": bool(assignment_statuses) and all(status == "complete" for status in assignment_statuses),
             "synthesis_present": bool(job[2] and len(job[2].strip()) >= 80),
             "report_present": bool(report),
+            "report_path_local": report_path_local,
+            "report_integrity_valid": bool(
+                job[4] and current_report_sha256 and job[4] == current_report_sha256
+            ),
             "team_plan_present": "## Team plan" in report,
             "executive_synthesis_present": "## Executive synthesis" in report,
             "owner_gate_present": "## Owner gate" in report and "No external action was performed" in report,
@@ -1307,7 +1374,9 @@ class Company:
                 name in verified_facts for name in source_names
             )
 
-        combined_model_output = "\n".join(result for _, result in assignment_rows) + "\n" + synthesis
+        combined_model_output = (
+            "\n".join(result for _, result in assignment_rows) + "\n" + synthesis + "\n" + report
+        )
         source_conflicts = source_limitation_conflicts(combined_model_output, source_documents)
         checks["source_limitations_respected"] = not source_conflicts
         checks["placeholder_artifacts_absent"] = not re.search(
@@ -1344,12 +1413,24 @@ class Company:
         passed_count = sum(checks.values())
         score = round(passed_count * 100 / len(checks))
         passed = all(checks.values())
+        evaluated_at = utc_now()
         with closing(self._connect()) as db, db:
             db.execute(
-                "INSERT INTO evaluations VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO evaluations(job_id, passed, score, checks_json, evaluated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(job_id) DO UPDATE SET passed=excluded.passed, score=excluded.score, "
                 "checks_json=excluded.checks_json, evaluated_at=excluded.evaluated_at",
-                (job_id, int(passed), score, json.dumps(checks, sort_keys=True), utc_now()),
+                (job_id, int(passed), score, json.dumps(checks, sort_keys=True), evaluated_at),
+            )
+            db.execute(
+                "INSERT INTO evaluation_history("
+                "job_id, passed, score, checks_json, findings_json, evaluator_version, report_sha256, evaluated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id, int(passed), score, json.dumps(checks, sort_keys=True),
+                    json.dumps({"source_conflicts": source_conflicts}, sort_keys=True),
+                    EVALUATOR_VERSION, current_report_sha256, evaluated_at,
+                ),
             )
             db.execute(
                 "UPDATE mission_queue SET status=? WHERE job_id=? AND status IN ('complete', 'quality_failed')",
@@ -1357,6 +1438,8 @@ class Company:
             )
             quality_detail: dict[str, object] = {
                 "passed": passed, "score": score, "checks": checks,
+                "evaluator_version": EVALUATOR_VERSION,
+                "report_sha256": current_report_sha256,
             }
             if source_conflicts:
                 quality_detail["source_conflicts"] = source_conflicts
@@ -1366,7 +1449,8 @@ class Company:
             )
         return {
             "job_id": job_id, "passed": passed, "score": score, "checks": checks,
-            "source_conflicts": source_conflicts,
+            "source_conflicts": source_conflicts, "evaluator_version": EVALUATOR_VERSION,
+            "report_sha256": current_report_sha256,
         }
 
     def recent_evaluations(self) -> list[tuple[str, int, int, str]]:
@@ -1396,10 +1480,24 @@ class Company:
         job_id = uuid.uuid4().hex[:12]
         assignments = self.plan(objective, roles)
         sources = self.search_knowledge(objective, project=project)
+        runtime_identity = None
+        cache_identity = getattr(self.model, "cache_identity", None)
+        if callable(cache_identity):
+            try:
+                candidate_identity = cache_identity()
+            except Exception:
+                candidate_identity = None
+            if isinstance(candidate_identity, dict) and candidate_identity:
+                runtime_identity = candidate_identity
         input_fingerprint = hashlib.sha256(json.dumps(
             {
                 "objective": objective,
                 "project_id": project_id,
+                "execution_fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
+                "runtime": runtime_identity or {
+                    "uncacheable": f"{type(self.model).__module__}.{type(self.model).__qualname__}"
+                },
+                "evaluator_version": EVALUATOR_VERSION,
                 "assignments": [
                     [item.role, item.brief, item.deliverable, item.sequence]
                     for item in assignments
@@ -1414,25 +1512,48 @@ class Company:
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure_no_active_job(db)
-            if parent_job_id is None:
+            if parent_job_id is None and runtime_identity is not None:
                 cutoff = (
                     datetime.now(timezone.utc) - timedelta(seconds=RECENT_JOB_REUSE_SECONDS)
                 ).isoformat()
                 reusable = db.execute(
-                    "SELECT id, output_path FROM jobs "
-                    "WHERE input_fingerprint=? AND status='complete' AND output_path IS NOT NULL "
-                    "AND created_at>=? ORDER BY created_at DESC LIMIT 1",
-                    (input_fingerprint, cutoff),
+                    "SELECT j.id, j.output_path, j.report_sha256, h.id FROM jobs j "
+                    "JOIN evaluation_history h ON h.id=("
+                    "SELECT MAX(latest.id) FROM evaluation_history latest WHERE latest.job_id=j.id) "
+                    "WHERE j.input_fingerprint=? AND j.status='complete' "
+                    "AND j.output_path IS NOT NULL AND j.report_sha256 IS NOT NULL "
+                    "AND h.passed=1 AND h.evaluator_version=? AND h.report_sha256=j.report_sha256 "
+                    "AND j.created_at>=? ORDER BY j.created_at DESC LIMIT 1",
+                    (input_fingerprint, EVALUATOR_VERSION, cutoff),
                 ).fetchone()
-                if reusable and Path(reusable[1]).is_file():
+                if reusable:
+                    try:
+                        report_bytes = self._read_local_report_bytes(reusable[1])
+                    except (OSError, ValueError):
+                        report_bytes = b""
+                    if report_bytes and hashlib.sha256(report_bytes).hexdigest() == reusable[2]:
+                        self._event(
+                            db, reusable[0], "job_reused",
+                            json.dumps(
+                                {
+                                    "cooldown_seconds": RECENT_JOB_REUSE_SECONDS,
+                                    "execution_fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
+                                    "input_fingerprint": input_fingerprint,
+                                    "evaluator_version": EVALUATOR_VERSION,
+                                    "evaluation_history_id": reusable[3],
+                                    "report_sha256": reusable[2],
+                                },
+                                sort_keys=True,
+                            ),
+                        )
+                        return reusable[0], Path(reusable[1])
                     self._event(
-                        db, reusable[0], "job_reused",
+                        db, reusable[0], "job_reuse_rejected",
                         json.dumps(
-                            {"cooldown_seconds": RECENT_JOB_REUSE_SECONDS, "input_fingerprint": input_fingerprint},
+                            {"candidate_job_id": reusable[0], "reason": "report_integrity_failed"},
                             sort_keys=True,
                         ),
                     )
-                    return reusable[0], Path(reusable[1])
             db.execute(
                 "INSERT INTO jobs(id, objective, status, created_at, output_path, parent_job_id, project_id, synthesis, heartbeat_at, input_fingerprint) "
                 "VALUES (?, ?, 'running', ?, NULL, ?, ?, NULL, ?, ?)",
@@ -1666,11 +1787,33 @@ class Company:
         job_output_dir = self.output_dir / project_id if project_id else self.output_dir
         job_output_dir.mkdir(parents=True, exist_ok=True)
         output_path = job_output_dir / f"{job_id}.md"
-        output_path.write_text(report, encoding="utf-8")
+        report_bytes = report.encode("utf-8")
+        report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+        temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(report_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, output_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
         with closing(self._connect()) as db, db:
             db.execute(
-                "UPDATE jobs SET status='complete', output_path=?, heartbeat_at=? WHERE id=?",
-                (str(output_path), utc_now(), job_id),
+                "UPDATE jobs SET status='complete', output_path=?, report_sha256=?, heartbeat_at=? WHERE id=?",
+                (str(output_path), report_sha256, utc_now(), job_id),
+            )
+            self._event(
+                db, job_id, "report_sealed",
+                json.dumps(
+                    {
+                        "algorithm": "sha256", "bytes": len(report_bytes),
+                        "path": str(output_path), "sha256": report_sha256,
+                    },
+                    sort_keys=True,
+                ),
             )
             self._event(db, job_id, "job_complete", str(output_path))
         self.evaluate_job(job_id)
@@ -1738,7 +1881,8 @@ class Company:
         with closing(self._connect()) as db:
             job = db.execute(
                 "SELECT j.id, j.objective, j.status, j.created_at, j.output_path, j.parent_job_id, "
-                "p.name, j.synthesis FROM jobs j LEFT JOIN projects p ON p.id=j.project_id WHERE j.id=?", (job_id,)
+                "p.name, j.synthesis, j.report_sha256 FROM jobs j "
+                "LEFT JOIN projects p ON p.id=j.project_id WHERE j.id=?", (job_id,)
             ).fetchone()
             if not job:
                 raise ValueError(f"Unknown job: {job_id}")
@@ -1752,12 +1896,19 @@ class Company:
                 "SELECT passed, score, checks_json, evaluated_at FROM evaluations WHERE job_id=?",
                 (job_id,),
             ).fetchone()
+            evaluation_history = list(db.execute(
+                "SELECT passed, score, evaluator_version, report_sha256, evaluated_at "
+                "FROM evaluation_history WHERE job_id=? ORDER BY id DESC LIMIT 20", (job_id,),
+            ))
         evaluation = None
         if evaluation_row:
             evaluation = {
                 "passed": bool(evaluation_row[0]), "score": evaluation_row[1],
                 "checks": json.loads(evaluation_row[2]), "evaluated_at": evaluation_row[3],
             }
+            if evaluation_history:
+                evaluation["evaluator_version"] = evaluation_history[0][2]
+                evaluation["report_sha256"] = evaluation_history[0][3]
             for kind, detail, _ in reversed(events):
                 if kind != "quality_evaluated":
                     continue
@@ -1772,13 +1923,11 @@ class Company:
         report_error = ""
         if job[4]:
             try:
-                report_path = Path(job[4]).resolve(strict=True)
-                if not report_path.is_relative_to(self.output_dir.resolve()) or not report_path.is_file():
-                    raise ValueError("report path is outside local company output storage")
-                report = report_path.read_text(encoding="utf-8")
+                report = self._read_local_report_bytes(job[4]).decode("utf-8")
             except (OSError, UnicodeError, ValueError) as exc:
                 report_error = str(exc)
         return {
             "job": job, "assignments": assignments, "events": events,
-            "evaluation": evaluation, "report": report, "report_error": report_error,
+            "evaluation": evaluation, "evaluation_history": evaluation_history,
+            "report": report, "report_error": report_error,
         }

@@ -256,6 +256,11 @@ def render_mission_detail(company: Company, job_id: str) -> str:
         f"<tr><td>{cell(row[2])}</td><td>{cell(row[0])}</td><td><code>{cell(row[1])}</code></td></tr>"
         for row in detail["events"][-80:]
     ) or '<tr><td colspan="3" class="muted">No audit events recorded.</td></tr>'
+    history_rows = "".join(
+        f"<tr><td>{cell(row[4])}</td><td>{'pass' if row[0] else 'fail'}</td><td>{cell(row[1])}</td>"
+        f"<td><code>{cell(row[2])}</code></td><td><code>{cell(row[3] or '-')}</code></td></tr>"
+        for row in detail["evaluation_history"]
+    ) or '<tr><td colspan="5" class="muted">No append-only evaluation runs recorded.</td></tr>'
 
     if evaluation:
         outcome = "PASSED" if evaluation["passed"] else "FAILED"
@@ -277,6 +282,8 @@ def render_mission_detail(company: Company, job_id: str) -> str:
         quality_html = (
             f'<p class="outcome {"pass" if evaluation["passed"] else "fail"}">Automated checks {outcome}: '
             f'{cell(evaluation["score"])}/100</p>'
+            f'<p class="meta">Evaluator: <code>{cell(evaluation.get("evaluator_version", "legacy"))}</code> · '
+            f'Evaluated report SHA-256: <code>{cell(evaluation.get("report_sha256", "unsealed"))}</code></p>'
             '<p class="warning">This is a deterministic format, safety, and evidence-consistency screen. '
             'It is not factual, customer, production, or revenue verification.</p>'
             f"<h3>Failed gates</h3>{failed_html}{conflict_html}"
@@ -306,7 +313,8 @@ th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; ve
 <p class="meta">Report state: {cell(job[2])} · Project: {cell(job[6] or 'unscoped')} · Created UTC: {cell(job[3])}</p>
 <p>{cell(job[1])}</p>
 <section><h2>Automated acceptance</h2>{quality_html}</section>
-<section><h2>Report</h2><p class="meta">Local output: <code>{cell(job[4] or '-')}</code></p>{report_html}</section>
+<section><h2>Report</h2><p class="meta">Local output: <code>{cell(job[4] or '-')}</code><br>Sealed SHA-256: <code>{cell(job[8] or 'legacy-unsealed')}</code></p>{report_html}</section>
+<section><h2>Evaluation history</h2><table><thead><tr><th>UTC</th><th>Outcome</th><th>Score</th><th>Evaluator</th><th>Report SHA-256</th></tr></thead><tbody>{history_rows}</tbody></table></section>
 <section><h2>Assignments</h2><table><thead><tr><th>#</th><th>Role</th><th>Status</th><th>Deliverable</th></tr></thead><tbody>{assignment_rows}</tbody></table></section>
 <section><h2>Audit events</h2><table><thead><tr><th>UTC</th><th>Event</th><th>Detail</th></tr></thead><tbody>{event_rows}</tbody></table></section>
 </body></html>"""

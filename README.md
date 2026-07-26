@@ -32,7 +32,7 @@ ollama pull qwen3.5:0.8b
 
 After the model download, inference is local and does not use a paid API. The installed 0.8B model is the reliable bootstrap model. `qwen3.5:4b` remains the planned quality upgrade for this machine's roughly 12 GB of shared memory once its larger download succeeds.
 
-An identical direct mission with the same routed team, project, and retrieved evidence reuses its recent report for 24 hours instead of spending another model run. Change the objective or evidence when the work genuinely changed; use the explicit retry command when a failed result needs another attempt.
+An identical direct mission reuses a report for 24 hours only when the routed team, project, retrieved evidence, evaluator version, stable model identity/configuration, latest passing evaluation, and sealed report SHA-256 all match. Uncacheable models, changed/tampered reports, and failed or legacy evaluations always run fresh. Change the objective or evidence when the work genuinely changed; use the explicit retry command when a failed result needs another attempt.
 
 You may set defaults for the current terminal:
 
@@ -115,7 +115,7 @@ After every completed mission, deterministic gates verify that all assignments c
 .\local-company.cmd quality JOB_ID
 ```
 
-A queue item becomes `quality_failed` instead of `complete` when these gates fail. Use the dashboard **Recheck** control or `quality JOB_ID` after evaluator improvements. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`; queued items can be stopped with `queue cancel QUEUE_ID`.
+A report is written through a same-directory atomic replacement and sealed with SHA-256 before evaluation. Every recheck appends a versioned evaluation-history record; the latest result remains the dashboard projection. The evaluator reads and scans the exact sealed report bytes, so edits, moved paths, symlinks, and appended action claims fail closed. A queue item becomes `quality_failed` instead of `complete` when these gates fail. Use the dashboard **Recheck** control or `quality JOB_ID` after evaluator improvements. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`; queued items can be stopped with `queue cancel QUEUE_ID`.
 
 ## Recurring local schedules
 
@@ -136,7 +136,7 @@ Each due schedule produces at most one occurrence per tick and advances beyond t
 .\local-company.cmd export "C:\path\to\approved-export-directory"
 ```
 
-Health reports local disk, database, reports, Ollama model storage, active work, queue depth, and approvals. Export writes a timestamped JSON audit plus a `.sha256` manifest. It includes source paths and content hashes but deliberately excludes imported source bodies.
+Health reports local disk, database, reports, Ollama model storage, active work, queue depth, and approvals. Export writes a version-2 timestamped JSON audit plus a `.sha256` manifest, including report seals and append-only evaluation history. It includes source paths and content hashes but deliberately excludes imported source bodies.
 
 ## Inspect and recover work
 

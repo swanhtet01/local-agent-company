@@ -7,14 +7,14 @@
 3. Select or create a project, then add or refresh only its relevant source files.
 4. Queue one concrete objective with a measurable outcome, project, playbook, priority, and optional schedule. Use the localhost service form or `queue add`; both record work without running it.
 5. Run one due mission with the dashboard's **Run next locally** button or `queue run-next`; the single-mission lease protects local memory.
-6. Open the mission ID in the dashboard, inspect every failed gate and source conflict, then read the Markdown report and verify its assumptions yourself. Use **Recheck** after quality-rule changes; a prior score is not permanent proof. Use **Retry** only after the failed constraint or model problem is corrected.
+6. Open the mission ID in the dashboard, compare its sealed and evaluated SHA-256 values, inspect every failed gate and source conflict, then read the Markdown report and verify its assumptions yourself. Use **Recheck** after quality-rule changes; each run is appended to evaluation history and a prior score is not permanent proof. Use **Retry** only after the failed constraint or model problem is corrected.
 7. Record sensitive proposed actions in the approval inbox.
 8. Periodically write an audit export to an approved local or removable destination and verify its SHA-256 manifest.
 9. Perform approved real-world actions yourself until a separately audited executor exists.
 
 The default 4K context and 30-second model keep-alive are the Ally-safe profile. Increase either only for one measured mission, then return to the defaults so an idle local team does not reserve shared memory.
 
-Repeated direct runs with the same objective, routed team, project, and retrieved evidence reuse the prior 24-hour report. Use `retry JOB_ID` deliberately when the prior result—not the inputs—needs another model attempt.
+Repeated direct runs reuse a prior 24-hour report only when its inputs, stable model identity/configuration, current evaluator pass, and sealed bytes all match. Legacy, failed, changed, moved, or uncacheable work runs fresh. Use `retry JOB_ID` deliberately when the prior result—not the inputs—needs another model attempt.
 
 ## Good objectives
 
