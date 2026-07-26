@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from .core import Company, PLAYBOOKS
+from .core import Company, PLAYBOOKS, QueueClaim
 
 
 MAX_FORM_BYTES = 16 * 1024
@@ -35,21 +35,35 @@ class LocalQueueWorker:
         with self._state_lock:
             self._state = dict(values)
 
-    def start(self) -> None:
+    def start(self, queue_id: str) -> None:
         if not self._run_lock.acquire(blocking=False):
             raise RuntimeError("A local queue mission is already running")
+        claim: QueueClaim | None = None
         try:
-            if not self.company.has_due_queue_item():
-                raise ValueError("No queued mission is due")
-            self._set_state(status="running", started_at=_utc_now())
-            threading.Thread(target=self._run, name="local-company-worker", daemon=False).start()
-        except Exception:
-            self._run_lock.release()
+            if not queue_id:
+                raise ValueError("Reviewed queue mission ID is required")
+            claim = self.company.claim_next_queue_item(queue_id)
+            self._set_state(status="running", queue_id=queue_id, started_at=_utc_now())
+            threading.Thread(
+                target=self._run, args=(claim,), name="local-company-worker", daemon=False,
+            ).start()
+        except Exception as exc:
+            try:
+                if claim is not None:
+                    self.company.abandon_queue_claim(
+                        claim, f"Local worker thread did not start: {type(exc).__name__}: {exc}",
+                    )
+                    self._set_state(
+                        status="failed", queue_id=claim.queue_id,
+                        error=f"{type(exc).__name__}: {exc}", finished_at=_utc_now(),
+                    )
+            finally:
+                self._run_lock.release()
             raise
 
-    def _run(self) -> None:
+    def _run(self, claim: QueueClaim) -> None:
         try:
-            queue_id, job_id, output, passed = self.company.run_next_queue_item()
+            queue_id, job_id, output, passed = self.company.execute_queue_claim(claim)
             self._set_state(
                 status="complete" if passed else "quality_failed",
                 queue_id=queue_id,
@@ -71,6 +85,7 @@ class LocalQueueWorker:
 def dashboard_snapshot(
     company: Company, worker: LocalQueueWorker | None = None
 ) -> dict[str, object]:
+    next_due = company.next_due_queue_item()
     return {
         "projects": company.projects(),
         "jobs": company.jobs(),
@@ -79,7 +94,8 @@ def dashboard_snapshot(
         "datasets": company.dataset_items(),
         "evaluations": company.recent_evaluations(),
         "pending_approvals": company.action_requests("pending"),
-        "due_queue_item": company.has_due_queue_item(),
+        "due_queue_item": bool(next_due),
+        "next_due_queue_item": next_due,
         "worker": worker.snapshot() if worker else {"status": "disabled"},
         "health": company.health_snapshot(),
     }
@@ -169,12 +185,22 @@ def render_dashboard(
     intake = ""
     if service_token:
         worker_status = str(snapshot["worker"].get("status", "idle"))
-        run_disabled = " disabled" if worker_status == "running" or not snapshot["due_queue_item"] else ""
+        next_due = snapshot["next_due_queue_item"]
+        run_disabled = " disabled" if worker_status == "running" or not next_due else ""
+        reviewed_queue_id = str(next_due[0]) if next_due else ""
+        objective_preview = ""
+        if next_due:
+            objective_preview = str(next_due[6])
+            if len(objective_preview) > 240:
+                objective_preview = objective_preview[:237] + "..."
         run_hint = (
             "A local mission is running." if worker_status == "running" else
-            "No queued mission is due." if not snapshot["due_queue_item"] else
-            "Starts exactly one due mission with the configured local Ollama model."
+            "No queued mission is due." if not next_due else
+            f"Reviewed next mission {reviewed_queue_id} at priority {next_due[2]}, "
+            f"project {next_due[4] or 'Unscoped'}, due {next_due[3]}: "
+            f"{objective_preview}"
         )
+        run_label = f"Run {reviewed_queue_id} locally" if next_due else "Run reviewed mission locally"
         intake = f"""
 <section class="intake"><h2>Queue a SuperMega task</h2>
 <p class="hint">This records work only. It does not run a model or perform an external action.</p>
@@ -189,7 +215,8 @@ def render_dashboard(
 <h3>Run one local mission</h3><p class="hint">{cell(run_hint)}</p>
 <form method="post" action="/queue/run-next">
 <input type="hidden" name="service_token" value="{cell(service_token)}">
-<button type="submit"{run_disabled}>Run next locally</button></form></section>"""
+<input type="hidden" name="queue_id" value="{cell(reviewed_queue_id)}">
+<button type="submit"{run_disabled}>{cell(run_label)}</button></form></section>"""
     notice_html = f'<p class="notice">{cell(notice)}</p>' if notice else ""
 
     return f"""<!doctype html>
@@ -497,8 +524,9 @@ def create_dashboard_server(
                     elif self.path == "/queue/run-next":
                         if worker is None:
                             raise RuntimeError("Local queue worker is unavailable")
-                        worker.start()
-                        self._redirect("Started one local queued mission.")
+                        queue_id = fields.get("queue_id", "")
+                        worker.start(queue_id)
+                        self._redirect(f"Started reviewed local mission {queue_id}.")
                     else:
                         job_id = fields.get("job_id", "")
                         evaluation = company.evaluate_job(job_id)

@@ -266,6 +266,15 @@ class SourceHit:
     evidence_id: str
 
 
+@dataclass(frozen=True)
+class QueueClaim:
+    queue_id: str
+    objective: str
+    project_id: str | None
+    roles_json: str | None
+    run_token: str
+
+
 class Model(Protocol):
     def complete(self, system: str, prompt: str) -> str: ...
 
@@ -653,6 +662,27 @@ class Company:
         if row:
             raise RuntimeError(
                 f"Mission {row[0]} is already running. Wait for it, or use recover after its heartbeat is stale."
+            )
+
+    @staticmethod
+    def _ensure_no_active_queue_claim(
+        db: sqlite3.Connection, exclude_queue_id: str | None = None,
+    ) -> None:
+        if exclude_queue_id:
+            row = db.execute(
+                "SELECT id FROM mission_queue WHERE status='running' AND id<>? "
+                "ORDER BY started_at LIMIT 1",
+                (exclude_queue_id,),
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT id FROM mission_queue WHERE status='running' "
+                "ORDER BY started_at LIMIT 1"
+            ).fetchone()
+        if row:
+            raise RuntimeError(
+                f"Queue mission {row[0]} is already running. Wait for it, or recover it "
+                "after its heartbeat is stale."
             )
 
     @staticmethod
@@ -1305,12 +1335,20 @@ class Company:
             return list(db.execute(sql, params))
 
     def has_due_queue_item(self) -> bool:
+        return self.next_due_queue_item() is not None
+
+    def next_due_queue_item(self) -> tuple[object, ...] | None:
         self.initialize()
         with closing(self._connect()) as db:
             return db.execute(
-                "SELECT 1 FROM mission_queue WHERE status='queued' AND scheduled_at<=? LIMIT 1",
+                "SELECT q.id, q.status, q.priority, q.scheduled_at, COALESCE(p.name, ''), "
+                "COALESCE(q.playbook, ''), q.objective, COALESCE(q.job_id, ''), "
+                "COALESCE(q.error, '') FROM mission_queue q "
+                "LEFT JOIN projects p ON p.id=q.project_id "
+                "WHERE q.status='queued' AND q.scheduled_at<=? "
+                "ORDER BY q.priority DESC, q.scheduled_at, q.created_at LIMIT 1",
                 (utc_now(),),
-            ).fetchone() is not None
+            ).fetchone()
 
     def reset_queue_item(self, queue_id: str, source: str = "cli") -> None:
         self.initialize()
@@ -1350,11 +1388,13 @@ class Company:
                 json.dumps({"queue_id": queue_id, "source": source}, sort_keys=True),
             )
 
-    def run_next_queue_item(self) -> tuple[str, str, Path, bool]:
+    def claim_next_queue_item(self, expected_queue_id: str | None = None) -> QueueClaim:
         self.initialize()
         queue_run_token = uuid.uuid4().hex
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            self._ensure_no_active_job(db)
+            self._ensure_no_active_queue_claim(db)
             row = db.execute(
                 "SELECT id, objective, project_id, roles_json FROM mission_queue "
                 "WHERE status='queued' AND scheduled_at<=? "
@@ -1363,6 +1403,11 @@ class Company:
             if not row:
                 raise ValueError("No queued mission is due")
             queue_id, objective, project_id, roles_json = row
+            if expected_queue_id is not None and queue_id != expected_queue_id:
+                raise RuntimeError(
+                    f"Queue changed; reviewed mission {expected_queue_id} is no longer next. "
+                    "Refresh before running anything."
+                )
             claimed = db.execute(
                 "UPDATE mission_queue SET status='running', started_at=?, error=NULL, run_token=? "
                 "WHERE id=? AND status='queued'",
@@ -1372,12 +1417,37 @@ class Company:
                 raise RuntimeError("Queue claim changed before execution could start")
             self._event(
                 db, None, "queue_execution_started",
-                json.dumps({"queue_id": queue_id}, sort_keys=True),
+                json.dumps(
+                    {"queue_id": queue_id, "reviewed": expected_queue_id is not None},
+                    sort_keys=True,
+                ),
             )
-        roles = json.loads(roles_json) if roles_json else None
+        return QueueClaim(queue_id, objective, project_id, roles_json, queue_run_token)
+
+    def abandon_queue_claim(self, claim: QueueClaim, reason: str) -> None:
+        self.initialize()
+        error = " ".join(reason.split()) or "local worker could not start"
+        with closing(self._connect()) as db, db:
+            changed = db.execute(
+                "UPDATE mission_queue SET status='failed', completed_at=?, error=?, run_token=NULL "
+                "WHERE id=? AND status='running' AND run_token=?",
+                (utc_now(), error, claim.queue_id, claim.run_token),
+            ).rowcount
+            if changed == 1:
+                self._event(
+                    db, None, "queue_execution_failed",
+                    json.dumps(
+                        {"queue_id": claim.queue_id, "error": error}, sort_keys=True,
+                    ),
+                )
+
+    def execute_queue_claim(self, claim: QueueClaim) -> tuple[str, str, Path, bool]:
+        queue_id = claim.queue_id
+        queue_run_token = claim.run_token
+        roles = json.loads(claim.roles_json) if claim.roles_json else None
         try:
             job_id, output = self.run(
-                objective, roles=roles, project=project_id, _queue_id=queue_id,
+                claim.objective, roles=roles, project=claim.project_id, _queue_id=queue_id,
                 _run_token=queue_run_token,
             )
             evaluation = self.evaluate_job(job_id)
@@ -1424,6 +1494,7 @@ class Company:
                         json.dumps({"queue_id": queue_id, "error": str(exc)}, sort_keys=True),
                     )
             raise
+
         except Exception as exc:
             with closing(self._connect()) as db, db:
                 changed = db.execute(
@@ -1443,6 +1514,12 @@ class Company:
                         ),
                     )
             raise
+
+    def run_next_queue_item(
+        self, expected_queue_id: str | None = None,
+    ) -> tuple[str, str, Path, bool]:
+        claim = self.claim_next_queue_item(expected_queue_id)
+        return self.execute_queue_claim(claim)
 
     def create_schedule(
         self, name: str, objective: str, cadence_days: int, next_run_at: str,
@@ -1942,6 +2019,7 @@ class Company:
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure_no_active_job(db)
+            self._ensure_no_active_queue_claim(db, _queue_id)
             if parent_job_id is None and runtime_identity is not None:
                 cutoff = (
                     datetime.now(timezone.utc) - timedelta(seconds=RECENT_JOB_REUSE_SECONDS)
@@ -2432,6 +2510,7 @@ class Company:
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure_no_active_job(db, job_id)
+            self._ensure_no_active_queue_claim(db)
             resumed = db.execute(
                 "UPDATE jobs SET status='running', heartbeat_at=?, run_token=? "
                 "WHERE id=? AND status IN ('failed', 'interrupted')",

@@ -63,7 +63,12 @@ def parser() -> argparse.ArgumentParser:
     queue_add.add_argument("--scheduled-at", help="ISO-8601 timestamp; naive values are treated as UTC")
     queue_list = queue_sub.add_parser("list", help="List queued mission records")
     queue_list.add_argument("--status")
-    queue_run = queue_sub.add_parser("run-next", help="Run the highest-priority due mission")
+    queue_run = queue_sub.add_parser(
+        "run-next", help="Run the highest-priority due mission, optionally by reviewed ID"
+    )
+    queue_run.add_argument(
+        "--queue-id", help="Fail unless this exact reviewed mission is still next"
+    )
     add_runtime_args(queue_run)
     queue_reset = queue_sub.add_parser("reset", help="Return an incomplete queue item to queued")
     queue_reset.add_argument("queue_id")
@@ -229,7 +234,7 @@ def main() -> int:
                         f"{objective}{error_text}"
                     )
             elif args.queue_command == "run-next":
-                queue_id, job_id, output, passed = company.run_next_queue_item()
+                queue_id, job_id, output, passed = company.run_next_queue_item(args.queue_id)
                 print(
                     f"Queue item {queue_id} completed as job {job_id}; "
                     f"quality={'passed' if passed else 'failed'}\nReport: {output}"

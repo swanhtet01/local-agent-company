@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from local_company.cli import parser
 from local_company.core import Company, MockModel, OllamaModel, PLAYBOOKS, source_limitation_conflicts
-from local_company.dashboard import create_dashboard_server, render_dashboard
+from local_company.dashboard import LocalQueueWorker, create_dashboard_server, render_dashboard
 from local_company.service import _read_state, _startup_lock, _write_state
 
 
@@ -733,6 +733,104 @@ class CompanyTests(unittest.TestCase):
             ]
             self.assertEqual(linked_events[-1], {"queue_id": queue_id, "reused": True})
 
+    def test_reviewed_queue_id_rejects_priority_change_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            reviewed_id = company.enqueue("Reviewed work", priority=20)
+            self.assertEqual(company.next_due_queue_item()[0], reviewed_id)
+            urgent_id = company.enqueue("New urgent work", priority=90)
+
+            with self.assertRaisesRegex(RuntimeError, "Queue changed"):
+                company.run_next_queue_item(reviewed_id)
+
+            self.assertEqual(
+                {row[0] for row in company.queue_items("queued")},
+                {reviewed_id, urgent_id},
+            )
+            self.assertEqual(company.jobs(), [])
+            self.assertEqual(model.calls, 0)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                started = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_execution_started'"
+                ).fetchone()[0]
+            self.assertEqual(started, 0)
+
+    def test_running_queue_claim_does_not_consume_a_second_queue_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = BlockingModel()
+            company = Company(Path(tmp), model)
+            first_id = company.enqueue("First reviewed work", roles=["operations"], priority=90)
+            second_id = company.enqueue("Second reviewed work", roles=["operations"], priority=10)
+            outcome = {}
+
+            def run_first():
+                try:
+                    outcome["result"] = company.run_next_queue_item(first_id)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=run_first)
+            thread.start()
+            self.assertTrue(model.started.wait(timeout=3))
+
+            with self.assertRaisesRegex(RuntimeError, "already running"):
+                company.run_next_queue_item(second_id)
+            self.assertEqual(company.queue_items("queued")[0][0], second_id)
+
+            model.release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertEqual(outcome["result"][0], first_id)
+
+    def test_running_direct_job_does_not_consume_queue_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = BlockingModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Queued work remains untouched", priority=80)
+            outcome = {}
+
+            def run_direct():
+                try:
+                    outcome["result"] = company.run("Active direct work", roles=["operations"])
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=run_direct)
+            thread.start()
+            self.assertTrue(model.started.wait(timeout=3))
+
+            with self.assertRaisesRegex(RuntimeError, "Mission .* is already running"):
+                company.run_next_queue_item(queue_id)
+            self.assertEqual(company.queue_items("queued")[0][0], queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                started = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_execution_started'"
+                ).fetchone()[0]
+            self.assertEqual(started, 0)
+
+            model.release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertIn("result", outcome)
+
+    def test_orphan_running_queue_claim_blocks_a_direct_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Claimed queue work")
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, run_token=? "
+                    "WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(), "active-queue", queue_id),
+                )
+
+            with self.assertRaisesRegex(RuntimeError, f"Queue mission {queue_id} is already running"):
+                company.run("Unrelated direct work")
+            self.assertEqual(company.jobs(), [])
+
     def test_ollama_metrics_are_isolated_per_worker_thread(self):
         model = OllamaModel("qwen3.5:0.8b")
         observed = {}
@@ -1031,7 +1129,7 @@ class CompanyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             model = BlockingModel()
             company = Company(Path(tmp), model)
-            company.enqueue("Review local inventory", priority=80)
+            queue_id = company.enqueue("Review local inventory", priority=80)
             server = create_dashboard_server(company, 0, service_token="worker-secret")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -1041,14 +1139,18 @@ class CompanyTests(unittest.TestCase):
             def run_request():
                 return urllib.request.Request(
                     base + "/queue/run-next",
-                    data=urllib.parse.urlencode({"service_token": "worker-secret"}).encode(),
+                    data=urllib.parse.urlencode({
+                        "service_token": "worker-secret", "queue_id": queue_id,
+                    }).encode(),
                     method="POST",
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
 
             try:
                 with opener.open(run_request(), timeout=3) as response:
-                    self.assertIn(b"Started one local queued mission", response.read())
+                    self.assertIn(
+                        f"Started reviewed local mission {queue_id}".encode(), response.read(),
+                    )
                 self.assertTrue(model.started.wait(timeout=3))
 
                 with self.assertRaises(urllib.error.HTTPError) as duplicate:
@@ -1082,10 +1184,76 @@ class CompanyTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_dashboard_runs_only_the_exact_reviewed_next_queue_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            project_id = company.create_project("Reviewed Project")
+            reviewed_id = company.enqueue(
+                "Reviewed dashboard work", project=project_id, priority=20,
+            )
+            rendered = render_dashboard(company, service_token="review-secret")
+            self.assertIn(
+                f'name="queue_id" value="{reviewed_id}"', rendered,
+            )
+            self.assertIn(f"Run {reviewed_id} locally", rendered)
+            self.assertIn("Reviewed dashboard work", rendered)
+            self.assertIn("project Reviewed Project, due", rendered)
+
+            server = create_dashboard_server(company, 0, service_token="review-secret")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            urgent_id = company.enqueue("New higher-priority work", priority=90)
+            request = urllib.request.Request(
+                base + "/queue/run-next",
+                data=urllib.parse.urlencode({
+                    "service_token": "review-secret", "queue_id": reviewed_id,
+                }).encode(),
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as changed:
+                    opener.open(request, timeout=3)
+                self.assertEqual(changed.exception.code, 409)
+                changed.exception.close()
+                self.assertEqual(
+                    {row[0] for row in company.queue_items("queued")},
+                    {reviewed_id, urgent_id},
+                )
+                self.assertEqual(company.jobs(), [])
+                self.assertEqual(model.calls, 0)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_worker_thread_start_failure_fails_claim_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Recover worker startup")
+            worker = LocalQueueWorker(company)
+
+            with patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")):
+                with self.assertRaisesRegex(RuntimeError, "no thread"):
+                    worker.start(queue_id)
+
+            failed = company.queue_items("failed")[0]
+            self.assertEqual(failed[0], queue_id)
+            self.assertIn("did not start", failed[8])
+            company.reset_queue_item(queue_id)
+            worker.start(queue_id)
+            deadline = time.monotonic() + 5
+            while worker.snapshot()["status"] == "running" and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(worker.snapshot()["status"], "complete")
+
     def test_dashboard_worker_preserves_sensitive_action_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
-            company.enqueue("Send email to every prospect", priority=90)
+            queue_id = company.enqueue("Send email to every prospect", priority=90)
             server = create_dashboard_server(company, 0, service_token="gate-secret")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -1093,7 +1261,9 @@ class CompanyTests(unittest.TestCase):
             base = f"http://127.0.0.1:{server.server_address[1]}"
             request = urllib.request.Request(
                 base + "/queue/run-next",
-                data=urllib.parse.urlencode({"service_token": "gate-secret"}).encode(),
+                data=urllib.parse.urlencode({
+                    "service_token": "gate-secret", "queue_id": queue_id,
+                }).encode(),
                 method="POST",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
