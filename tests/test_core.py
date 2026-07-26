@@ -142,8 +142,15 @@ class CitationModel(MockModel):
 
     def complete(self, system, prompt):
         if "executive chair" not in system and "report editor" not in system:
-            return "Review the supplied local evidence and preserve every owner gate."
-        citation = "notes.md confirms the imported operating fields" if self.cited else "Local evidence exists"
+            evidence = re.search(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)
+            suffix = f" {evidence.group(0)}" if self.cited and evidence else ""
+            return "Review the supplied local evidence and preserve every owner gate." + suffix
+        evidence = re.search(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)
+        evidence_tag = f" {evidence.group(0)}" if self.cited and evidence else ""
+        citation = (
+            f"notes.md confirms the imported operating fields{evidence_tag}"
+            if self.cited else "Local evidence exists"
+        )
         return (
             f"Verified facts: {citation}. Assumptions: adoption remains unmeasured. "
             "Task templates: intake review and audit. Daily review cadence: inspect work every day. "
@@ -159,6 +166,33 @@ class ContradictingSourceModel(MockModel):
             "templates. Assumptions: operator adoption remains unmeasured and requires owner review. "
             "Proposed work stays internal and reversible. Owner review required."
         )
+
+
+class EvidenceCitingModel(MockModel):
+    def complete(self, system, prompt):
+        evidence = re.search(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)
+        evidence_tag = evidence.group(0) if evidence else "[EVIDENCE:missing]"
+        if "executive chair" in system or "report editor" in system:
+            return (
+                f"Verified facts: notes.md records the local inventory baseline {evidence_tag}. "
+                "Assumptions: future demand remains unknown and requires owner review. "
+                "Recommendations remain local, reversible, and unexecuted. Owner review required."
+            )
+        return (
+            f"Verified local evidence in notes.md records the inventory baseline {evidence_tag}. "
+            "Future demand is an assumption, and all recommendations remain local and reversible."
+        )
+
+
+class FilenameOnlyCitationModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            return (
+                "Verified facts: notes.md records the local inventory baseline [EVIDENCE:not-a-real-id]. "
+                "Assumptions: future demand remains unknown and requires owner review. "
+                "Recommendations remain local and reversible. Owner review required."
+            )
+        return "Review notes.md as local evidence, label assumptions, and preserve owner review."
 
 
 class CompanyTests(unittest.TestCase):
@@ -295,6 +329,81 @@ class CompanyTests(unittest.TestCase):
             second_job, _ = company.run("Review inventory baseline", project=project_id)
 
             self.assertNotEqual(second_job, first_job)
+
+    def test_evidence_manifest_freezes_exact_excerpt_and_detects_stale_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "notes.md"
+            source.write_text(
+                "Inventory baseline is 10 local units. Future demand is unknown.", encoding="utf-8"
+            )
+            company = Company(root / "state", EvidenceCitingModel())
+            project_id = company.create_project("Evidence")
+            company.add_knowledge(source, project=project_id)
+
+            job_id, report = company.run(
+                "Using imported notes about inventory, separate verified facts from assumptions.",
+                project=project_id,
+            )
+            detail = company.job_detail(job_id)
+            evaluation = detail["evaluation"]
+            manifest = detail["evidence_manifest"]
+
+            self.assertTrue(evaluation["passed"])
+            self.assertTrue(evaluation["checks"]["evidence_manifest_valid"])
+            self.assertTrue(evaluation["checks"]["verified_facts_evidence_cited"])
+            self.assertTrue(evaluation["checks"]["verification_claims_evidence_bound"])
+            evidence = manifest["evidence"][0]
+            self.assertEqual(
+                evidence["quote"], source.read_text(encoding="utf-8")[
+                    evidence["char_start"]:evidence["char_end"]
+                ],
+            )
+            self.assertIn(f"[EVIDENCE:{evidence['evidence_id']}]", report.read_text(encoding="utf-8"))
+            basis = dict(manifest)
+            recorded_digest = basis.pop("manifest_sha256")
+            self.assertEqual(
+                hashlib.sha256(company._canonical_json(basis).encode("utf-8")).hexdigest(),
+                recorded_digest,
+            )
+
+            source.write_text("Inventory baseline changed after capture.", encoding="utf-8")
+            rechecked = company.evaluate_job(job_id)
+            self.assertFalse(rechecked["passed"])
+            self.assertFalse(rechecked["checks"]["evidence_manifest_valid"])
+            self.assertEqual(rechecked["manifest_reason"], "source_stale")
+
+    def test_filename_only_verification_and_forged_manifest_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "notes.md"
+            source.write_text("Inventory baseline is local and current.", encoding="utf-8")
+            company = Company(root / "state", FilenameOnlyCitationModel())
+            project_id = company.create_project("Evidence")
+            company.add_knowledge(source, project=project_id)
+            job_id, _ = company.run(
+                "Using imported notes about inventory, separate verified facts from assumptions.",
+                project=project_id,
+            )
+            evaluation = company.job_detail(job_id)["evaluation"]
+            self.assertTrue(evaluation["checks"]["verified_facts_cited"])
+            self.assertFalse(evaluation["checks"]["verified_facts_evidence_cited"])
+            self.assertFalse(evaluation["checks"]["verification_claims_evidence_bound"])
+            self.assertFalse(evaluation["checks"]["evidence_ids_valid"])
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                raw = db.execute(
+                    "SELECT manifest_json FROM evidence_manifests WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+                forged = json.loads(raw)
+                forged["generator"] = "forged"
+                db.execute(
+                    "UPDATE evidence_manifests SET manifest_json=? WHERE job_id=?",
+                    (json.dumps(forged, sort_keys=True), job_id),
+                )
+            rechecked = company.evaluate_job(job_id)
+            self.assertFalse(rechecked["checks"]["evidence_manifest_valid"])
+            self.assertEqual(rechecked["manifest_reason"], "digest_mismatch")
 
     def test_quality_rejects_completion_claim_that_conflicts_with_retrieved_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -795,10 +904,12 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(audit_path.read_bytes()).hexdigest(), digest)
             self.assertIn(digest, hash_path.read_text(encoding="ascii"))
             payload = json.loads(audit_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["format"], "local-agent-company-audit-v2")
+            self.assertEqual(payload["format"], "local-agent-company-audit-v3")
             self.assertRegex(payload["jobs"][0]["report_sha256"], r"^[0-9a-f]{64}$")
             self.assertRegex(payload["evaluation_history"][0]["report_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(payload["evaluation_history"][0]["evaluator_version"])
+            self.assertRegex(payload["evaluation_history"][0]["manifest_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(payload["evidence_manifests"][0]["manifest_sha256"], r"^[0-9a-f]{64}$")
             self.assertNotIn("content", payload["knowledge_index"][0])
             self.assertNotIn("private local reference body", audit_path.read_text(encoding="utf-8"))
 

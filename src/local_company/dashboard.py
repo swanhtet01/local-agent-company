@@ -257,10 +257,23 @@ def render_mission_detail(company: Company, job_id: str) -> str:
         for row in detail["events"][-80:]
     ) or '<tr><td colspan="3" class="muted">No audit events recorded.</td></tr>'
     history_rows = "".join(
-        f"<tr><td>{cell(row[4])}</td><td>{'pass' if row[0] else 'fail'}</td><td>{cell(row[1])}</td>"
-        f"<td><code>{cell(row[2])}</code></td><td><code>{cell(row[3] or '-')}</code></td></tr>"
+        f"<tr><td>{cell(row[5])}</td><td>{'pass' if row[0] else 'fail'}</td><td>{cell(row[1])}</td>"
+        f"<td><code>{cell(row[2])}</code></td><td><code>{cell(row[3] or '-')}</code></td>"
+        f"<td><code>{cell(row[4] or '-')}</code></td></tr>"
         for row in detail["evaluation_history"]
-    ) or '<tr><td colspan="5" class="muted">No append-only evaluation runs recorded.</td></tr>'
+    ) or '<tr><td colspan="6" class="muted">No append-only evaluation runs recorded.</td></tr>'
+    manifest = detail["evidence_manifest"] or {}
+    manifest_sources = {
+        item.get("source_id"): item for item in manifest.get("sources", [])
+        if isinstance(item, dict)
+    }
+    evidence_rows = "".join(
+        f"<tr><td><code>[EVIDENCE:{cell(item.get('evidence_id', ''))}]</code></td>"
+        f"<td><code>{cell(manifest_sources.get(item.get('source_id'), {}).get('path', '-'))}</code></td>"
+        f"<td>{cell(item.get('line_start', '-'))}-{cell(item.get('line_end', '-'))}</td>"
+        f"<td><pre class=\"quote\">{cell(item.get('quote', ''))}</pre></td></tr>"
+        for item in manifest.get("evidence", []) if isinstance(item, dict)
+    ) or '<tr><td colspan="4" class="muted">Legacy mission: no frozen evidence manifest.</td></tr>'
 
     if evaluation:
         outcome = "PASSED" if evaluation["passed"] else "FAILED"
@@ -283,7 +296,8 @@ def render_mission_detail(company: Company, job_id: str) -> str:
             f'<p class="outcome {"pass" if evaluation["passed"] else "fail"}">Automated checks {outcome}: '
             f'{cell(evaluation["score"])}/100</p>'
             f'<p class="meta">Evaluator: <code>{cell(evaluation.get("evaluator_version", "legacy"))}</code> · '
-            f'Evaluated report SHA-256: <code>{cell(evaluation.get("report_sha256", "unsealed"))}</code></p>'
+            f'Evaluated report SHA-256: <code>{cell(evaluation.get("report_sha256", "unsealed"))}</code><br>'
+            f'Evidence manifest SHA-256: <code>{cell(evaluation.get("manifest_sha256", "legacy-unmanifested"))}</code></p>'
             '<p class="warning">This is a deterministic format, safety, and evidence-consistency screen. '
             'It is not factual, customer, production, or revenue verification.</p>'
             f"<h3>Failed gates</h3>{failed_html}{conflict_html}"
@@ -308,13 +322,15 @@ body {{ max-width:1100px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ co
 section {{ margin-top:26px; }} table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
 th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
 .report {{ white-space:pre-wrap; overflow-wrap:anywhere; padding:18px; background:#121a2d; border:1px solid #26324a; border-radius:10px; line-height:1.5; }}
+.quote {{ white-space:pre-wrap; overflow-wrap:anywhere; max-width:520px; margin:0; font:12px/1.4 ui-monospace,monospace; }}
 </style></head><body><p><a href="/">← Dashboard</a></p>
 <h1>Mission <code>{cell(job[0])}</code></h1>
 <p class="meta">Report state: {cell(job[2])} · Project: {cell(job[6] or 'unscoped')} · Created UTC: {cell(job[3])}</p>
 <p>{cell(job[1])}</p>
 <section><h2>Automated acceptance</h2>{quality_html}</section>
 <section><h2>Report</h2><p class="meta">Local output: <code>{cell(job[4] or '-')}</code><br>Sealed SHA-256: <code>{cell(job[8] or 'legacy-unsealed')}</code></p>{report_html}</section>
-<section><h2>Evaluation history</h2><table><thead><tr><th>UTC</th><th>Outcome</th><th>Score</th><th>Evaluator</th><th>Report SHA-256</th></tr></thead><tbody>{history_rows}</tbody></table></section>
+<section><h2>Frozen evidence</h2><p class="meta">Manifest SHA-256: <code>{cell(job[9] or 'legacy-unmanifested')}</code></p><table><thead><tr><th>Evidence ID</th><th>Source</th><th>Lines</th><th>Exact captured excerpt</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
+<section><h2>Evaluation history</h2><table><thead><tr><th>UTC</th><th>Outcome</th><th>Score</th><th>Evaluator</th><th>Report SHA-256</th><th>Manifest SHA-256</th></tr></thead><tbody>{history_rows}</tbody></table></section>
 <section><h2>Assignments</h2><table><thead><tr><th>#</th><th>Role</th><th>Status</th><th>Deliverable</th></tr></thead><tbody>{assignment_rows}</tbody></table></section>
 <section><h2>Audit events</h2><table><thead><tr><th>UTC</th><th>Event</th><th>Detail</th></tr></thead><tbody>{event_rows}</tbody></table></section>
 </body></html>"""

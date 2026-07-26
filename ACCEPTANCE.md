@@ -19,7 +19,7 @@ Validated model: `qwen3.5:0.8b`
 - Health telemetry reported zero active jobs, one queued mission, zero pending approvals, two reports, and approximately 40.4 GB free disk.
 - Report `outputs\d8b2fac7ec0f\f81ba29b42c2.md` contains the project, team plan, three role outputs, executive synthesis, local source record, and owner gate.
 - Dashboard integration binds to `127.0.0.1`, returns its health snapshot, and rejects POST with HTTP 405.
-- The 39-test offline regression suite covers routing, knowledge isolation, approvals, recovery, resume, concurrency, synthesis, queue priority/scheduling, playbooks, recurring materialization, source-limitation gates, atomic report sealing, tamper/path detection, append-only evaluations, safe model-aware reuse, audit-v2 integrity, health telemetry, report escaping, Host/origin rejection, and dashboard HTTP behavior.
+- The 42-test offline regression suite covers routing, knowledge isolation, approvals, recovery, resume, concurrency, synthesis, queue priority/scheduling, playbooks, recurring materialization, source-limitation gates, frozen evidence manifests, stale/forged evidence rejection, evidence-ID claim binding, atomic report sealing, tamper/path detection, append-only evaluations, safe model-aware reuse, audit-v3 integrity, health telemetry, report escaping, Host/origin rejection, and dashboard HTTP behavior.
 
 ## Operational defaults
 
