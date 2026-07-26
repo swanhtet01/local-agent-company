@@ -10,6 +10,7 @@ import platform
 import re
 import shutil
 import sqlite3
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -302,8 +303,16 @@ class OllamaModel:
         self.num_ctx = num_ctx
         self.num_predict = num_predict
         self.keep_alive = keep_alive
-        self.last_metrics: dict[str, float | int | str] = {}
+        self._metrics_local = threading.local()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    @property
+    def last_metrics(self) -> dict[str, float | int | str]:
+        return getattr(self._metrics_local, "value", {})
+
+    @last_metrics.setter
+    def last_metrics(self, value: dict[str, float | int | str]) -> None:
+        self._metrics_local.value = value
 
     def ping(self) -> bool:
         return self.models() is not None
@@ -377,6 +386,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class ExecutionLeaseLost(RuntimeError):
+    """Raised when a recovered or superseded worker tries to persist a late result."""
+
+
 class Company:
     def __init__(self, home: Path, model: Model) -> None:
         self.home = home
@@ -412,7 +425,7 @@ class Company:
                     id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL, output_path TEXT, parent_job_id TEXT,
                     project_id TEXT, synthesis TEXT, heartbeat_at TEXT, input_fingerprint TEXT,
-                    report_sha256 TEXT, evidence_manifest_sha256 TEXT
+                    report_sha256 TEXT, evidence_manifest_sha256 TEXT, run_token TEXT
                 );
                 CREATE TABLE IF NOT EXISTS assignments (
                     job_id TEXT NOT NULL, role TEXT NOT NULL, brief TEXT NOT NULL,
@@ -443,7 +456,7 @@ class Company:
                     id TEXT PRIMARY KEY, objective TEXT NOT NULL, project_id TEXT,
                     roles_json TEXT, playbook TEXT, priority INTEGER NOT NULL,
                     status TEXT NOT NULL, scheduled_at TEXT NOT NULL, created_at TEXT NOT NULL,
-                    started_at TEXT, completed_at TEXT, job_id TEXT, error TEXT,
+                    started_at TEXT, completed_at TEXT, job_id TEXT, error TEXT, run_token TEXT,
                     FOREIGN KEY(project_id) REFERENCES projects(id),
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
@@ -490,6 +503,8 @@ class Company:
             self._ensure_column(db, "jobs", "input_fingerprint", "TEXT")
             self._ensure_column(db, "jobs", "report_sha256", "TEXT")
             self._ensure_column(db, "jobs", "evidence_manifest_sha256", "TEXT")
+            self._ensure_column(db, "jobs", "run_token", "TEXT")
+            self._ensure_column(db, "mission_queue", "run_token", "TEXT")
             self._ensure_column(db, "assignments", "deliverable", "TEXT")
             self._ensure_column(db, "assignments", "sequence", "INTEGER")
             self._ensure_column(db, "evaluation_history", "manifest_sha256", "TEXT")
@@ -500,28 +515,130 @@ class Company:
         if name not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
+    def _renew_execution_lease(
+        self, db: sqlite3.Connection, job_id: str, run_token: str, stage: str,
+    ) -> bool:
+        active = db.execute(
+            "UPDATE jobs SET heartbeat_at=? "
+            "WHERE id=? AND status='running' AND run_token=?",
+            (utc_now(), job_id, run_token),
+        ).rowcount == 1
+        if not active:
+            self._event(
+                db, job_id, "late_result_discarded",
+                json.dumps({"stage": stage}, sort_keys=True),
+            )
+        return active
+
     def recover_stale_jobs(self, stale_after_seconds: int = 900) -> list[str]:
         self.initialize()
         if stale_after_seconds < 0:
             raise ValueError("stale_after_seconds cannot be negative")
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
+        observed_at = datetime.now(timezone.utc)
+        cutoff = observed_at - timedelta(seconds=stale_after_seconds)
+        completed_at = observed_at.isoformat()
         recovered: list[str] = []
+
+        def is_stale(timestamp: str | None) -> bool:
+            try:
+                observed = datetime.fromisoformat(timestamp) if timestamp else None
+            except (TypeError, ValueError):
+                observed = None
+            if observed is None:
+                return True
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            return observed <= cutoff
+
         with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
-                "SELECT id, COALESCE(heartbeat_at, created_at) FROM jobs WHERE status='running'"
+                "SELECT id, COALESCE(heartbeat_at, created_at), run_token "
+                "FROM jobs WHERE status='running'"
             ).fetchall()
-            for job_id, timestamp in rows:
-                try:
-                    observed = datetime.fromisoformat(timestamp)
-                except (TypeError, ValueError):
-                    observed = datetime.min.replace(tzinfo=timezone.utc)
-                if observed.tzinfo is None:
-                    observed = observed.replace(tzinfo=timezone.utc)
-                if observed <= cutoff:
-                    db.execute("UPDATE jobs SET status='interrupted' WHERE id=?", (job_id,))
-                    db.execute("UPDATE assignments SET status='failed' WHERE job_id=? AND status='running'", (job_id,))
-                    self._event(db, job_id, "job_interrupted", "stale heartbeat recovered")
-                    recovered.append(job_id)
+            for job_id, timestamp, observed_token in rows:
+                if is_stale(timestamp):
+                    changed = db.execute(
+                        "UPDATE jobs SET status='interrupted', run_token=NULL "
+                        "WHERE id=? AND status='running' AND run_token IS ? "
+                        "AND COALESCE(heartbeat_at, created_at)=?",
+                        (job_id, observed_token, timestamp),
+                    ).rowcount
+                    if changed == 1:
+                        db.execute(
+                            "UPDATE assignments SET status='failed' "
+                            "WHERE job_id=? AND status='running'",
+                            (job_id,),
+                        )
+                        self._event(
+                            db, job_id, "job_interrupted", "stale heartbeat recovered",
+                        )
+                        recovered.append(job_id)
+
+            live_jobs = db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='running'"
+            ).fetchone()[0]
+            queue_rows = db.execute(
+                "SELECT q.id, q.job_id, q.started_at, j.status, q.run_token, j.run_token, "
+                "COALESCE(j.heartbeat_at, j.created_at), e.passed "
+                "FROM mission_queue q LEFT JOIN jobs j ON j.id=q.job_id "
+                "LEFT JOIN evaluations e ON e.job_id=j.id "
+                "WHERE q.status='running'"
+            ).fetchall()
+            for (
+                queue_id, job_id, started_at, job_status, queue_token, job_token,
+                job_observed_at, evaluation_passed,
+            ) in queue_rows:
+                if not is_stale(started_at) and job_id not in recovered:
+                    continue
+                if job_id and job_status == "running" and queue_token == job_token:
+                    continue
+                if job_status == "complete" and not is_stale(job_observed_at):
+                    continue
+                if not job_id and live_jobs:
+                    # Older claims may predate durable queue-to-job linkage. A live job could
+                    # belong to this claim, so recovery must not guess or disrupt it.
+                    continue
+                recovered_status = "failed"
+                if job_status == "complete" and evaluation_passed is not None:
+                    recovered_status = "complete" if evaluation_passed else "quality_failed"
+                    reason = (
+                        f"stale queue claim reconciled from completed job {job_id} evaluation; "
+                        "no model was rerun"
+                    )
+                    stored_error = None
+                    event_job_id = job_id
+                elif not job_id:
+                    reason = "stale queue claim had no linked job; no model was rerun"
+                    stored_error = reason
+                    event_job_id = None
+                elif job_status is None:
+                    reason = "stale queue claim referenced a missing job; no model was rerun"
+                    stored_error = reason
+                    event_job_id = None
+                else:
+                    reason = (
+                        f"stale queue claim linked to {job_status} job {job_id}; "
+                        "no model was rerun"
+                    )
+                    stored_error = reason
+                    event_job_id = job_id
+                changed = db.execute(
+                    "UPDATE mission_queue SET status=?, completed_at=?, error=?, run_token=NULL "
+                    "WHERE id=? AND status='running'",
+                    (recovered_status, completed_at, stored_error, queue_id),
+                ).rowcount
+                if changed == 1:
+                    self._event(
+                        db, event_job_id, "queue_claim_recovered",
+                        json.dumps(
+                            {
+                                "automatic_rerun": False, "queue_id": queue_id,
+                                "reason": reason, "resulting_status": recovered_status,
+                            },
+                            sort_keys=True,
+                        ),
+                    )
         return recovered
 
     @staticmethod
@@ -1154,7 +1271,9 @@ class Company:
         queue_id = uuid.uuid4().hex[:12]
         with closing(self._connect()) as db, db:
             db.execute(
-                "INSERT INTO mission_queue VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)",
+                "INSERT INTO mission_queue("
+                "id, objective, project_id, roles_json, playbook, priority, status, scheduled_at, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
                 (queue_id, objective, project_id, json.dumps(roles) if roles else None,
                  playbook, priority, scheduled_text, utc_now()),
             )
@@ -1205,7 +1324,8 @@ class Company:
             if row[0] not in {"failed", "quality_failed"}:
                 raise ValueError("Only failed or quality-failed queue items can be reset")
             db.execute(
-                "UPDATE mission_queue SET status='queued', started_at=NULL, completed_at=NULL, job_id=NULL, error=NULL "
+                "UPDATE mission_queue SET status='queued', started_at=NULL, completed_at=NULL, "
+                "job_id=NULL, error=NULL, run_token=NULL "
                 "WHERE id=?", (queue_id,),
             )
             self._event(
@@ -1232,6 +1352,7 @@ class Company:
 
     def run_next_queue_item(self) -> tuple[str, str, Path, bool]:
         self.initialize()
+        queue_run_token = uuid.uuid4().hex
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -1242,56 +1363,85 @@ class Company:
             if not row:
                 raise ValueError("No queued mission is due")
             queue_id, objective, project_id, roles_json = row
-            db.execute(
-                "UPDATE mission_queue SET status='running', started_at=?, error=NULL WHERE id=?",
-                (utc_now(), queue_id),
-            )
+            claimed = db.execute(
+                "UPDATE mission_queue SET status='running', started_at=?, error=NULL, run_token=? "
+                "WHERE id=? AND status='queued'",
+                (utc_now(), queue_run_token, queue_id),
+            ).rowcount
+            if claimed != 1:
+                raise RuntimeError("Queue claim changed before execution could start")
             self._event(
                 db, None, "queue_execution_started",
                 json.dumps({"queue_id": queue_id}, sort_keys=True),
             )
         roles = json.loads(roles_json) if roles_json else None
         try:
-            job_id, output = self.run(objective, roles=roles, project=project_id)
+            job_id, output = self.run(
+                objective, roles=roles, project=project_id, _queue_id=queue_id,
+                _run_token=queue_run_token,
+            )
             evaluation = self.evaluate_job(job_id)
             queue_status = "complete" if evaluation["passed"] else "quality_failed"
             with closing(self._connect()) as db, db:
-                db.execute(
-                    "UPDATE mission_queue SET status=?, completed_at=?, job_id=? WHERE id=?",
-                    (queue_status, utc_now(), job_id, queue_id),
-                )
-                self._event(
-                    db, job_id, "queue_execution_finished",
-                    json.dumps(
-                        {"queue_id": queue_id, "quality_passed": bool(evaluation["passed"])},
-                        sort_keys=True,
+                finalized = db.execute(
+                    "UPDATE mission_queue SET status=?, completed_at=?, job_id=?, run_token=NULL "
+                    "WHERE id=? AND status='running' AND job_id=? AND run_token=?",
+                    (
+                        queue_status, utc_now(), job_id, queue_id, job_id,
+                        queue_run_token,
                     ),
+                ).rowcount
+                if finalized == 1:
+                    self._event(
+                        db, job_id, "queue_execution_finished",
+                        json.dumps(
+                            {"queue_id": queue_id, "quality_passed": bool(evaluation["passed"])},
+                            sort_keys=True,
+                        ),
+                    )
+                else:
+                    self._event(
+                        db, job_id, "queue_late_result_discarded",
+                        json.dumps({"queue_id": queue_id}, sort_keys=True),
+                    )
+            if finalized != 1:
+                raise ExecutionLeaseLost(
+                    f"Queue claim {queue_id} was recovered or superseded; late result discarded"
                 )
             return queue_id, job_id, output, bool(evaluation["passed"])
+        except ExecutionLeaseLost:
+            raise
         except PermissionError as exc:
             with closing(self._connect()) as db, db:
-                db.execute(
-                    "UPDATE mission_queue SET status='needs_approval', completed_at=?, error=? WHERE id=?",
-                    (utc_now(), str(exc), queue_id),
-                )
-                self._event(
-                    db, None, "queue_execution_needs_approval",
-                    json.dumps({"queue_id": queue_id, "error": str(exc)}, sort_keys=True),
-                )
+                changed = db.execute(
+                    "UPDATE mission_queue SET status='needs_approval', completed_at=?, error=?, "
+                    "run_token=NULL WHERE id=? AND status='running' AND run_token=?",
+                    (utc_now(), str(exc), queue_id, queue_run_token),
+                ).rowcount
+                if changed == 1:
+                    self._event(
+                        db, None, "queue_execution_needs_approval",
+                        json.dumps({"queue_id": queue_id, "error": str(exc)}, sort_keys=True),
+                    )
             raise
         except Exception as exc:
             with closing(self._connect()) as db, db:
-                db.execute(
-                    "UPDATE mission_queue SET status='failed', completed_at=?, error=? WHERE id=?",
-                    (utc_now(), f"{type(exc).__name__}: {exc}", queue_id),
-                )
-                self._event(
-                    db, None, "queue_execution_failed",
-                    json.dumps(
-                        {"queue_id": queue_id, "error": f"{type(exc).__name__}: {exc}"},
-                        sort_keys=True,
+                changed = db.execute(
+                    "UPDATE mission_queue SET status='failed', completed_at=?, error=?, run_token=NULL "
+                    "WHERE id=? AND status='running' AND run_token=?",
+                    (
+                        utc_now(), f"{type(exc).__name__}: {exc}", queue_id,
+                        queue_run_token,
                     ),
-                )
+                ).rowcount
+                if changed == 1:
+                    self._event(
+                        db, None, "queue_execution_failed",
+                        json.dumps(
+                            {"queue_id": queue_id, "error": f"{type(exc).__name__}: {exc}"},
+                            sort_keys=True,
+                        ),
+                    )
             raise
 
     def create_schedule(
@@ -1374,7 +1524,9 @@ class Company:
             for schedule_id, objective, project_id, roles_json, playbook, priority, cadence_days, next_text in rows:
                 queue_id = uuid.uuid4().hex[:12]
                 db.execute(
-                    "INSERT INTO mission_queue VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL)",
+                    "INSERT INTO mission_queue("
+                    "id, objective, project_id, roles_json, playbook, priority, status, scheduled_at, created_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
                     (queue_id, objective, project_id, roles_json, playbook, priority,
                      observed.isoformat(), utc_now()),
                 )
@@ -1429,13 +1581,21 @@ class Company:
                 "format": "local-agent-company-audit-v3",
                 "exported_at": utc_now(),
                 "projects": rows("SELECT * FROM projects ORDER BY created_at"),
-                "jobs": rows("SELECT * FROM jobs ORDER BY created_at"),
+                "jobs": rows(
+                    "SELECT id, objective, status, created_at, output_path, parent_job_id, "
+                    "project_id, synthesis, heartbeat_at, input_fingerprint, report_sha256, "
+                    "evidence_manifest_sha256 FROM jobs ORDER BY created_at"
+                ),
                 "assignments": rows("SELECT * FROM assignments ORDER BY job_id, sequence"),
                 "knowledge_index": rows("SELECT id, path, sha256, added_at FROM knowledge ORDER BY path"),
                 "project_knowledge": rows("SELECT * FROM project_knowledge ORDER BY project_id, knowledge_id"),
                 "action_requests": rows("SELECT * FROM action_requests ORDER BY created_at"),
                 "events": rows("SELECT * FROM events ORDER BY id"),
-                "queue": rows("SELECT * FROM mission_queue ORDER BY created_at"),
+                "queue": rows(
+                    "SELECT id, objective, project_id, roles_json, playbook, priority, status, "
+                    "scheduled_at, created_at, started_at, completed_at, job_id, error "
+                    "FROM mission_queue ORDER BY created_at"
+                ),
                 "evaluations": rows("SELECT * FROM evaluations ORDER BY evaluated_at"),
                 "evaluation_history": rows("SELECT * FROM evaluation_history ORDER BY id"),
                 "evidence_manifests": rows(
@@ -1725,6 +1885,7 @@ class Company:
     def run(
         self, objective: str, roles: list[str] | None = None,
         parent_job_id: str | None = None, project: str | None = None,
+        *, _queue_id: str | None = None, _run_token: str | None = None,
     ) -> tuple[str, Path]:
         self.initialize()
         objective = " ".join(objective.split())
@@ -1740,6 +1901,7 @@ class Company:
                 f"Sensitive action was not executed. Approval request {request_id} is pending for: {', '.join(blocked)}"
             )
         job_id = uuid.uuid4().hex[:12]
+        run_token = _run_token or uuid.uuid4().hex
         assignments = self.plan(objective, roles)
         sources = self.search_knowledge(objective, project=project)
         heartbeat = utc_now()
@@ -1803,6 +1965,20 @@ class Company:
                     except (OSError, ValueError):
                         report_bytes = b""
                     if report_bytes and hashlib.sha256(report_bytes).hexdigest() == reusable[2]:
+                        if _queue_id:
+                            linked = db.execute(
+                                "UPDATE mission_queue SET job_id=? "
+                                "WHERE id=? AND status='running' AND run_token=? AND job_id IS NULL",
+                                (reusable[0], _queue_id, run_token),
+                            ).rowcount
+                            if linked != 1:
+                                raise RuntimeError("Queue claim is no longer active")
+                            self._event(
+                                db, reusable[0], "queue_job_linked",
+                                json.dumps(
+                                    {"queue_id": _queue_id, "reused": True}, sort_keys=True,
+                                ),
+                            )
                         self._event(
                             db, reusable[0], "job_reused",
                             json.dumps(
@@ -1828,13 +2004,25 @@ class Company:
                     )
             db.execute(
                 "INSERT INTO jobs(id, objective, status, created_at, output_path, parent_job_id, "
-                "project_id, synthesis, heartbeat_at, input_fingerprint, evidence_manifest_sha256) "
-                "VALUES (?, ?, 'running', ?, NULL, ?, ?, NULL, ?, ?, ?)",
+                "project_id, synthesis, heartbeat_at, input_fingerprint, evidence_manifest_sha256, "
+                "run_token) VALUES (?, ?, 'running', ?, NULL, ?, ?, NULL, ?, ?, ?, ?)",
                 (
                     job_id, objective, heartbeat, parent_job_id, project_id, heartbeat,
-                    input_fingerprint, evidence_manifest_sha256,
+                    input_fingerprint, evidence_manifest_sha256, run_token,
                 ),
             )
+            if _queue_id:
+                linked = db.execute(
+                    "UPDATE mission_queue SET job_id=? "
+                    "WHERE id=? AND status='running' AND run_token=? AND job_id IS NULL",
+                    (job_id, _queue_id, run_token),
+                ).rowcount
+                if linked != 1:
+                    raise RuntimeError("Queue claim is no longer active")
+                self._event(
+                    db, job_id, "queue_job_linked",
+                    json.dumps({"queue_id": _queue_id, "reused": False}, sort_keys=True),
+                )
             db.execute(
                 "INSERT INTO evidence_manifests VALUES (?, ?, ?, ?, ?)",
                 (
@@ -1855,13 +2043,13 @@ class Company:
             )
         return self._execute_job(
             job_id, objective, assignments, sources, project_id, project_name, [],
-            evidence_manifest_sha256,
+            evidence_manifest_sha256, run_token,
         )
 
     def _execute_job(
         self, job_id: str, objective: str, assignments: list[Assignment], sources: list[SourceHit],
         project_id: str | None, project_name: str | None, results: list[tuple[Assignment, str]],
-        evidence_manifest_sha256: str | None,
+        evidence_manifest_sha256: str | None, run_token: str,
     ) -> tuple[str, Path]:
         source_context = "\n\n".join(
             f"[EVIDENCE:{hit.evidence_id}] SOURCE {hit.path} lines {hit.line_start}-{hit.line_end} "
@@ -1887,12 +2075,19 @@ class Company:
                     continue
                 current_role = item.role
                 with closing(self._connect()) as db, db:
-                    db.execute(
-                        "UPDATE assignments SET status='running' WHERE job_id=? AND role=?",
-                        (job_id, item.role),
+                    lease_active = self._renew_execution_lease(
+                        db, job_id, run_token, f"{item.role}:start",
                     )
-                    db.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (utc_now(), job_id))
-                    self._event(db, job_id, "assignment_started", item.role)
+                    if lease_active:
+                        db.execute(
+                            "UPDATE assignments SET status='running' WHERE job_id=? AND role=?",
+                            (job_id, item.role),
+                        )
+                        self._event(db, job_id, "assignment_started", item.role)
+                if not lease_active:
+                    raise ExecutionLeaseLost(
+                        f"Execution lease for job {job_id} was recovered or superseded"
+                    )
                 system = (
                     f"You are the {item.role} function in a fully local AI company. {ROLES[item.role]} "
                     "Work only on the supplied objective. Do not claim actions you did not perform. "
@@ -1922,23 +2117,41 @@ class Company:
                 result_trimmed = False
                 if specialist_word_limit:
                     result, result_trimmed = truncate_words(result, specialist_word_limit)
-                results.append((item, result))
                 with closing(self._connect()) as db, db:
-                    db.execute("UPDATE assignments SET result=?, status='complete' WHERE job_id=? AND role=?",
-                               (result, job_id, item.role))
-                    db.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (utc_now(), job_id))
-                    self._event(db, job_id, "assignment_complete", item.role)
-                    if result_trimmed:
-                        self._event(
-                            db, job_id, "objective_constraint_applied",
-                            f"{item.role} word limit: {original_word_count}->{specialist_word_limit}",
+                    lease_active = self._renew_execution_lease(
+                        db, job_id, run_token, f"{item.role}:result",
+                    )
+                    if lease_active:
+                        db.execute(
+                            "UPDATE assignments SET result=?, status='complete' "
+                            "WHERE job_id=? AND role=?",
+                            (result, job_id, item.role),
                         )
-                    self._record_model_metrics(db, job_id, item.role)
+                        self._event(db, job_id, "assignment_complete", item.role)
+                        if result_trimmed:
+                            self._event(
+                                db, job_id, "objective_constraint_applied",
+                                f"{item.role} word limit: "
+                                f"{original_word_count}->{specialist_word_limit}",
+                            )
+                        self._record_model_metrics(db, job_id, item.role)
+                if not lease_active:
+                    raise ExecutionLeaseLost(
+                        f"Execution lease for job {job_id} was recovered or superseded"
+                    )
+                results.append((item, result))
 
             current_role = "executive-synthesis"
             with closing(self._connect()) as db, db:
-                db.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (utc_now(), job_id))
-                self._event(db, job_id, "synthesis_started", "executive-chair")
+                lease_active = self._renew_execution_lease(
+                    db, job_id, run_token, "executive-synthesis:start",
+                )
+                if lease_active:
+                    self._event(db, job_id, "synthesis_started", "executive-chair")
+            if not lease_active:
+                raise ExecutionLeaseLost(
+                    f"Execution lease for job {job_id} was recovered or superseded"
+                )
             team_work = "\n\n".join(f"{item.role.upper()}\n{result}" for item, result in results)
             chair_system = (
                 "You are the executive chair of a fully local, owner-controlled AI company. "
@@ -2021,8 +2234,19 @@ class Company:
             )
             if needs_revision:
                 with closing(self._connect()) as db, db:
-                    self._record_model_metrics(db, job_id, "executive-synthesis-draft")
-                    self._event(db, job_id, "synthesis_revision_started", "explicit objective constraints")
+                    lease_active = self._renew_execution_lease(
+                        db, job_id, run_token, "executive-synthesis:draft",
+                    )
+                    if lease_active:
+                        self._record_model_metrics(db, job_id, "executive-synthesis-draft")
+                        self._event(
+                            db, job_id, "synthesis_revision_started",
+                            "explicit objective constraints",
+                        )
+                if not lease_active:
+                    raise ExecutionLeaseLost(
+                        f"Execution lease for job {job_id} was recovered or superseded"
+                    )
                 format_rules = "\n".join(f"- Include the exact label `{label}:`." for label in required_labels)
                 if source_citation_required:
                     format_rules += (
@@ -2080,20 +2304,47 @@ class Company:
                     f"executive-synthesis word limit: {original_words}->{synthesis_word_limit}"
                 )
             with closing(self._connect()) as db, db:
-                db.execute("UPDATE jobs SET synthesis=?, heartbeat_at=? WHERE id=?", (synthesis, utc_now(), job_id))
-                self._event(db, job_id, "synthesis_complete", "executive-chair")
-                if constraint_applied:
-                    self._event(db, job_id, "objective_constraint_applied", "; ".join(constraint_notes))
-                self._record_model_metrics(db, job_id, "executive-synthesis")
+                lease_active = self._renew_execution_lease(
+                    db, job_id, run_token, "executive-synthesis:result",
+                )
+                if lease_active:
+                    db.execute(
+                        "UPDATE jobs SET synthesis=? WHERE id=? AND run_token=?",
+                        (synthesis, job_id, run_token),
+                    )
+                    self._event(db, job_id, "synthesis_complete", "executive-chair")
+                    if constraint_applied:
+                        self._event(
+                            db, job_id, "objective_constraint_applied",
+                            "; ".join(constraint_notes),
+                        )
+                    self._record_model_metrics(db, job_id, "executive-synthesis")
+            if not lease_active:
+                raise ExecutionLeaseLost(
+                    f"Execution lease for job {job_id} was recovered or superseded"
+                )
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             with closing(self._connect()) as db, db:
-                db.execute("UPDATE jobs SET status='failed', heartbeat_at=? WHERE id=?", (utc_now(), job_id))
-                if current_role and current_role != "executive-synthesis":
-                    db.execute(
-                        "UPDATE assignments SET status='failed' WHERE job_id=? AND role=?",
-                        (job_id, current_role),
+                failed = db.execute(
+                    "UPDATE jobs SET status='failed', heartbeat_at=?, run_token=NULL "
+                    "WHERE id=? AND status='running' AND run_token=?",
+                    (utc_now(), job_id, run_token),
+                ).rowcount
+                if failed == 1:
+                    if current_role and current_role != "executive-synthesis":
+                        db.execute(
+                            "UPDATE assignments SET status='failed' "
+                            "WHERE job_id=? AND role=?",
+                            (job_id, current_role),
+                        )
+                    self._event(db, job_id, "job_failed", f"{type(exc).__name__}: {exc}")
+                else:
+                    self._event(
+                        db, job_id, "late_result_discarded",
+                        json.dumps({"stage": "execution-error"}, sort_keys=True),
                     )
-                self._event(db, job_id, "job_failed", f"{type(exc).__name__}: {exc}")
             raise
 
         report = self._report(
@@ -2112,26 +2363,46 @@ class Company:
                 handle.write(report_bytes)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary_path, output_path)
+            with closing(self._connect()) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                lease_active = db.execute(
+                    "SELECT 1 FROM jobs "
+                    "WHERE id=? AND status='running' AND run_token=?",
+                    (job_id, run_token),
+                ).fetchone() is not None
+                if lease_active:
+                    os.replace(temporary_path, output_path)
+                    completed = db.execute(
+                        "UPDATE jobs SET status='complete', output_path=?, report_sha256=?, "
+                        "heartbeat_at=?, run_token=NULL "
+                        "WHERE id=? AND status='running' AND run_token=?",
+                        (str(output_path), report_sha256, utc_now(), job_id, run_token),
+                    ).rowcount
+                    if completed != 1:
+                        raise RuntimeError("Execution lease changed during report finalization")
+                    self._event(
+                        db, job_id, "report_sealed",
+                        json.dumps(
+                            {
+                                "algorithm": "sha256", "bytes": len(report_bytes),
+                                "path": str(output_path), "sha256": report_sha256,
+                            },
+                            sort_keys=True,
+                        ),
+                    )
+                    self._event(db, job_id, "job_complete", str(output_path))
+                else:
+                    self._event(
+                        db, job_id, "late_result_discarded",
+                        json.dumps({"stage": "report-finalization"}, sort_keys=True),
+                    )
         finally:
             if temporary_path.exists():
                 temporary_path.unlink()
-        with closing(self._connect()) as db, db:
-            db.execute(
-                "UPDATE jobs SET status='complete', output_path=?, report_sha256=?, heartbeat_at=? WHERE id=?",
-                (str(output_path), report_sha256, utc_now(), job_id),
+        if not lease_active:
+            raise ExecutionLeaseLost(
+                f"Execution lease for job {job_id} was recovered or superseded"
             )
-            self._event(
-                db, job_id, "report_sealed",
-                json.dumps(
-                    {
-                        "algorithm": "sha256", "bytes": len(report_bytes),
-                        "path": str(output_path), "sha256": report_sha256,
-                    },
-                    sort_keys=True,
-                ),
-            )
-            self._event(db, job_id, "job_complete", str(output_path))
         self.evaluate_job(job_id)
         return job_id, output_path
 
@@ -2157,14 +2428,22 @@ class Company:
             self._source_hits_from_manifest(frozen_manifest)
             if frozen_manifest else self.search_knowledge(job[0], project=job[2])
         )
+        run_token = uuid.uuid4().hex
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             self._ensure_no_active_job(db, job_id)
-            db.execute("UPDATE jobs SET status='running', heartbeat_at=? WHERE id=?", (utc_now(), job_id))
+            resumed = db.execute(
+                "UPDATE jobs SET status='running', heartbeat_at=?, run_token=? "
+                "WHERE id=? AND status IN ('failed', 'interrupted')",
+                (utc_now(), run_token, job_id),
+            ).rowcount
+            if resumed != 1:
+                raise RuntimeError("Job state changed before resume could acquire its lease")
             db.execute("UPDATE assignments SET status='queued' WHERE job_id=? AND status='failed'", (job_id,))
             self._event(db, job_id, "job_resumed", f"completed_assignments={len(results)}")
         return self._execute_job(
             job_id, job[0], assignments, sources, job[2], job[3], results, job[4],
+            run_token,
         )
 
     def retry(self, job_id: str) -> tuple[str, Path]:

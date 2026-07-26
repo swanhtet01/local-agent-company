@@ -503,6 +503,256 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(company.recover_stale_jobs(0), ["deadjob"])
             self.assertEqual(company.job_detail("deadjob")["job"][2], "interrupted")
 
+    def test_stale_orphaned_queue_claim_fails_closed_once_without_model_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local queue health")
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", queue_id),
+                )
+
+            self.assertEqual(company.recover_stale_jobs(60), [])
+            recovered = company.queue_items("failed")[0]
+            self.assertEqual(recovered[0], queue_id)
+            self.assertEqual(recovered[7], "")
+            self.assertIn("no linked job", recovered[8])
+            self.assertEqual(model.calls, 0)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                event_count = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_claim_recovered'"
+                ).fetchone()[0]
+            self.assertEqual(event_count, 1)
+
+            self.assertEqual(company.recover_stale_jobs(60), [])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                repeated_count = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='queue_claim_recovered'"
+                ).fetchone()[0]
+            self.assertEqual(repeated_count, 1)
+            self.assertEqual(company.jobs(), [])
+
+    def test_stale_linked_queue_and_job_are_recovered_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Review interrupted work")
+            queue_started_at = datetime.now(timezone.utc).isoformat()
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "INSERT INTO jobs(id, objective, status, created_at, heartbeat_at) "
+                    "VALUES ('linkedjob', 'x', 'running', ?, ?)",
+                    ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00"),
+                )
+                db.execute(
+                    "INSERT INTO assignments(job_id, role, brief, status) "
+                    "VALUES ('linkedjob', 'operations', 'x', 'running')"
+                )
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, job_id='linkedjob' "
+                    "WHERE id=?",
+                    (queue_started_at, queue_id),
+                )
+
+            self.assertEqual(company.recover_stale_jobs(60), ["linkedjob"])
+            self.assertEqual(company.job_detail("linkedjob")["job"][2], "interrupted")
+            recovered = company.queue_items("failed")[0]
+            self.assertEqual(recovered[7], "linkedjob")
+            self.assertIn("interrupted job linkedjob", recovered[8])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                assignment_status = db.execute(
+                    "SELECT status FROM assignments WHERE job_id='linkedjob'"
+                ).fetchone()[0]
+            self.assertEqual(assignment_status, "failed")
+
+    def test_stale_unlinked_queue_is_not_guessed_while_a_job_is_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            queue_id = company.enqueue("Review ambiguous work")
+            company.initialize()
+            observed_at = datetime.now(timezone.utc).isoformat()
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "INSERT INTO jobs(id, objective, status, created_at, heartbeat_at) "
+                    "VALUES ('livejob', 'other work', 'running', ?, ?)",
+                    (observed_at, observed_at),
+                )
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", queue_id),
+                )
+
+            self.assertEqual(company.recover_stale_jobs(60), [])
+            self.assertEqual(company.queue_items("running")[0][0], queue_id)
+
+    def test_completed_job_queue_recovery_waits_for_fresh_finalization_then_reconciles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, _ = company.run("Review finalization recovery", roles=["operations"])
+            queue_id = company.enqueue("Review finalization recovery", roles=["operations"])
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, job_id=?, run_token=? "
+                    "WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", job_id, "queue-lease", queue_id),
+                )
+
+            self.assertEqual(company.recover_stale_jobs(60), [])
+            self.assertEqual(company.queue_items("running")[0][0], queue_id)
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE jobs SET heartbeat_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", job_id),
+                )
+            self.assertEqual(company.recover_stale_jobs(60), [])
+            reconciled = company.queue_items("complete")[0]
+            self.assertEqual(reconciled[0], queue_id)
+            self.assertEqual(reconciled[7], job_id)
+            self.assertEqual(reconciled[8], "")
+            with closing(sqlite3.connect(company.db_path)) as db:
+                event = db.execute(
+                    "SELECT detail FROM events WHERE kind='queue_claim_recovered' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()[0]
+            self.assertEqual(json.loads(event)["resulting_status"], "complete")
+
+    def test_queue_job_is_linked_before_the_first_model_call_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = BlockingModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local queue health", roles=["operations"])
+            outcome = {}
+
+            def run_queue():
+                try:
+                    outcome["result"] = company.run_next_queue_item()
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=run_queue)
+            thread.start()
+            self.assertTrue(model.started.wait(timeout=3))
+            with closing(sqlite3.connect(company.db_path)) as db:
+                queue_status, job_id, queue_token = db.execute(
+                    "SELECT status, job_id, run_token FROM mission_queue WHERE id=?",
+                    (queue_id,),
+                ).fetchone()
+                job_status, job_token = db.execute(
+                    "SELECT status, run_token FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+            self.assertEqual(queue_status, "running")
+            self.assertRegex(job_id, r"^[0-9a-f]{12}$")
+            self.assertEqual(job_status, "running")
+            self.assertRegex(queue_token, r"^[0-9a-f]{32}$")
+            self.assertEqual(job_token, queue_token)
+
+            model.release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertEqual(outcome["result"][0], queue_id)
+            self.assertEqual(outcome["result"][1], job_id)
+
+    def test_recovery_revokes_worker_lease_and_discards_its_late_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = BlockingModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review revocable work", roles=["operations"])
+            outcome = {}
+
+            def run_queue():
+                try:
+                    outcome["result"] = company.run_next_queue_item()
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=run_queue)
+            thread.start()
+            self.assertTrue(model.started.wait(timeout=3))
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job_id = db.execute(
+                    "SELECT job_id FROM mission_queue WHERE id=?", (queue_id,)
+                ).fetchone()[0]
+
+            self.assertEqual(company.recover_stale_jobs(0), [job_id])
+            model.release.set()
+            thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("result", outcome)
+            self.assertRegex(str(outcome["error"]), "recovered or superseded")
+            self.assertEqual(company.job_detail(job_id)["job"][2], "interrupted")
+            recovered_queue = company.queue_items("failed")[0]
+            self.assertEqual(recovered_queue[0], queue_id)
+            self.assertEqual(recovered_queue[7], job_id)
+            self.assertFalse((company.output_dir / f"{job_id}.md").exists())
+            with closing(sqlite3.connect(company.db_path)) as db:
+                job_token = db.execute(
+                    "SELECT run_token FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()[0]
+                queue_token = db.execute(
+                    "SELECT run_token FROM mission_queue WHERE id=?", (queue_id,)
+                ).fetchone()[0]
+                discarded = db.execute(
+                    "SELECT COUNT(*) FROM events "
+                    "WHERE job_id=? AND kind='late_result_discarded'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertIsNone(job_token)
+            self.assertIsNone(queue_token)
+            self.assertEqual(discarded, 1)
+
+    def test_queue_reuse_is_linked_without_repeating_model_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            job_id, report = company.run(
+                "Review local inventory", roles=["operations", "quality"],
+            )
+            calls_after_direct_run = model.calls
+            queue_id = company.enqueue(
+                "Review local inventory", roles=["operations", "quality"],
+            )
+
+            observed_queue, observed_job, observed_report, passed = (
+                company.run_next_queue_item()
+            )
+
+            self.assertEqual(observed_queue, queue_id)
+            self.assertEqual(observed_job, job_id)
+            self.assertEqual(observed_report, report)
+            self.assertTrue(passed)
+            self.assertEqual(model.calls, calls_after_direct_run)
+            self.assertEqual(company.queue_items("complete")[0][7], job_id)
+            linked_events = [
+                json.loads(detail)
+                for kind, detail, _ in company.job_detail(job_id)["events"]
+                if kind == "queue_job_linked"
+            ]
+            self.assertEqual(linked_events[-1], {"queue_id": queue_id, "reused": True})
+
+    def test_ollama_metrics_are_isolated_per_worker_thread(self):
+        model = OllamaModel("qwen3.5:0.8b")
+        observed = {}
+        ready = threading.Barrier(2)
+
+        def record(name, output_tokens):
+            model.last_metrics = {"output_tokens": output_tokens}
+            ready.wait(timeout=3)
+            observed[name] = model.last_metrics["output_tokens"]
+
+        first = threading.Thread(target=record, args=("first", 11))
+        second = threading.Thread(target=record, args=("second", 22))
+        first.start()
+        second.start()
+        first.join(timeout=3)
+        second.join(timeout=3)
+
+        self.assertEqual(observed, {"first": 11, "second": 22})
+        self.assertEqual(model.last_metrics, {})
+
     def test_project_directory_ingestion_is_scoped(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -930,6 +1180,7 @@ class CompanyTests(unittest.TestCase):
             company = Company(root / "state", MockModel())
             company.add_knowledge(source)
             company.run("Plan inventory", roles=["operations", "quality"])
+            company.enqueue("Queued audit record")
             audit_path, hash_path, digest = company.export_audit(root / "exports")
             self.assertEqual(hashlib.sha256(audit_path.read_bytes()).hexdigest(), digest)
             self.assertIn(digest, hash_path.read_text(encoding="ascii"))
@@ -940,6 +1191,8 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(payload["evaluation_history"][0]["evaluator_version"])
             self.assertRegex(payload["evaluation_history"][0]["manifest_sha256"], r"^[0-9a-f]{64}$")
             self.assertRegex(payload["evidence_manifests"][0]["manifest_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("run_token", payload["jobs"][0])
+            self.assertNotIn("run_token", payload["queue"][0])
             self.assertNotIn("content", payload["knowledge_index"][0])
             self.assertNotIn("private local reference body", audit_path.read_text(encoding="utf-8"))
 

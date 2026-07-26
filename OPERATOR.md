@@ -28,8 +28,9 @@ Avoid vague instructions such as `run everything`. The coordinator can recruit s
 
 - Ollama unavailable: run `doctor`, confirm Ollama is running, and confirm the requested model has been pulled.
 - Model call fails: the job becomes `failed`; inspect it with `show`, fix the local runtime, then use `retry`.
-- Process stops: use `recover --stale-minutes 60`, then `resume JOB_ID` to preserve completed assignments.
+- Process stops: use `recover --stale-minutes 60`. It interrupts stale jobs, revokes their execution leases, and marks stale queue claims failed without a model rerun; late responses are discarded. Then use `resume JOB_ID` deliberately to issue a new lease and preserve completed assignments, or reset the failed queue item after review.
 - Another mission is running: wait for it. Only use `recover` when its heartbeat is genuinely stale.
+- Stale queue claim: inspect its preserved job ID and error in `queue list`. Recovery never guesses an unlinked legacy claim while another job is live and is safe to repeat.
 - Bad source: refresh it with `knowledge add`; the path is updated by content hash.
 - Source leaked across projects: project runs retrieve only sources explicitly attached to that project; inspect with `projects show`.
 - Wrong approval: decisions are immutable in the CLI. Create a new request documenting the correction instead of erasing history.

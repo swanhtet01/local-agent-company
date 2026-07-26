@@ -19,7 +19,7 @@ Validated model: `qwen3.5:0.8b`
 - Health telemetry reported zero active jobs, one queued mission, zero pending approvals, two reports, and approximately 40.4 GB free disk.
 - Report `outputs\d8b2fac7ec0f\f81ba29b42c2.md` contains the project, team plan, three role outputs, executive synthesis, local source record, and owner gate.
 - Dashboard integration binds to `127.0.0.1`, returns its health snapshot, and rejects POST with HTTP 405.
-- The 44-test offline regression suite covers routing, knowledge isolation, normalized sensitive-action gating, approvals, recovery, resume, concurrency, synthesis, queue priority/scheduling, playbooks, recurring materialization, source-limitation gates, frozen evidence manifests, stale/forged evidence rejection, evidence-ID claim binding, atomic report sealing, tamper/path detection, append-only evaluations, safe model-aware reuse, audit-v3 integrity, atomic service state/startup locking, health telemetry, report escaping, Host/origin rejection, and dashboard HTTP behavior.
+- The 52-test offline regression suite covers routing, knowledge isolation, normalized sensitive-action gating, approvals, idempotent stale job/queue recovery, completed-job queue reconciliation, durable pre-inference queue-to-job linkage, revocable execution leases and late-result rejection, thread-local model metrics, linked no-work queue reuse, ambiguous-claim protection, resume, concurrency, synthesis, queue priority/scheduling, playbooks, recurring materialization, source-limitation gates, frozen evidence manifests, stale/forged evidence rejection, evidence-ID claim binding, atomic report sealing, tamper/path detection, append-only evaluations, safe model-aware reuse, audit-v3 integrity, atomic service state/startup locking, health telemetry, report escaping, Host/origin rejection, and dashboard HTTP behavior.
 
 ## Operational defaults
 
@@ -38,6 +38,7 @@ Validated model: `qwen3.5:0.8b`
 - A direct `dashboard` process is intentionally read-only. The detached service uses a local bearer for mutations and additionally rejects non-loopback Host authorities and cross-site mutation origins.
 - Automated scores are format, safety, and conservative evidence-consistency checks. They are not complete factual verification; important claims still require owner review and stronger evidence manifests.
 - Historical reports are deliberately not backfilled with seals because their current bytes cannot prove their original bytes. Re-run them to produce a current sealed artifact.
+- Report replacement and SQLite sealing are serialized under one local write transaction. A machine-level crash between the file replacement and database commit can leave an unregistered report file; recovery remains fail closed, and a deliberate resume can replace it.
 - No external connector, browser, payment, credential, publishing, deployment, or destructive tool exists.
 
 This evidence proves local execution and workflow behavior on this machine. It does not prove unattended business outcomes or authorize external actions.

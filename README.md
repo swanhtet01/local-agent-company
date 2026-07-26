@@ -105,7 +105,7 @@ Queue work without executing it, then manually run the highest-priority mission 
 .\local-company.cmd queue run-next --num-predict 128
 ```
 
-Priorities range from 0 to 100. `--scheduled-at` accepts an ISO-8601 timestamp; values without a timezone are treated as UTC. There is no autonomous daemon: queue execution is an explicit local operator command. Sensitive objectives become `needs_approval` and are not executed.
+Priorities range from 0 to 100. `--scheduled-at` accepts an ISO-8601 timestamp; values without a timezone are treated as UTC. There is no autonomous daemon: queue execution is an explicit local operator command. Sensitive objectives become `needs_approval` and are not executed. When execution begins, the queue claim and job ID are linked in the same database transaction before the first model response and share a revocable execution lease, so interrupted work remains attributable and a superseded worker cannot persist a late result.
 
 Available playbooks are `business-launch`, `decision-brief`, `operations-improvement`, `product-build`, and `growth-plan`.
 
@@ -150,7 +150,7 @@ Health reports local disk, database, reports, Ollama model storage, active work,
 .\local-company.cmd retry JOB_ID --provider ollama
 ```
 
-Each completed assignment is checkpointed. If a process stops, `recover` marks only stale-heartbeat jobs interrupted and `resume` continues their remaining assignments in the same job. `retry` instead creates a new auditable child job. Only one mission may run at a time, protecting shared RAM from competing local generations.
+Each completed assignment is checkpointed. If a process stops, `recover` marks only stale-heartbeat jobs interrupted, revokes their execution leases, and reconciles stale queue claims to `failed` without resuming or rerunning a model. Linked job IDs are preserved; ambiguous legacy claims are never guessed while any job is still live. Recovery is idempotent, and any old model response arriving afterward is audited and discarded. Use `resume` to issue a new lease and continue an interrupted job deliberately, or `queue reset` to make a failed queue item eligible for an explicit later run. Lease tokens are excluded from portable audit exports. `retry` instead creates a new auditable child job. Only one mission may run at a time, protecting shared RAM from competing local generations.
 
 ## Local operator dashboard and task intake
 

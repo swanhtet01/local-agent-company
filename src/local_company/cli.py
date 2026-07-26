@@ -96,7 +96,9 @@ def parser() -> argparse.ArgumentParser:
     resume = sub.add_parser("resume", help="Continue incomplete assignments in a failed or interrupted job")
     resume.add_argument("job_id")
     add_runtime_args(resume)
-    recover = sub.add_parser("recover", help="Mark stale running jobs interrupted so they can resume")
+    recover = sub.add_parser(
+        "recover", help="Recover stale jobs and queue claims without rerunning models"
+    )
     recover.add_argument("--stale-minutes", type=int, default=60)
 
     knowledge = sub.add_parser("knowledge", help="Manage local reference files")
@@ -219,10 +221,12 @@ def main() -> int:
                 rows = company.queue_items(args.status)
                 if not rows:
                     print("No queue items found.")
-                for item_id, status, priority, scheduled, project, playbook, objective, job_id in rows:
+                for item_id, status, priority, scheduled, project, playbook, objective, job_id, error in rows:
+                    error_text = f"  error={error}" if error else ""
                     print(
                         f"{item_id}  {status:14}  p={priority:<3}  {scheduled}  "
-                        f"project={project or '-'}  playbook={playbook or '-'}  job={job_id or '-'}  {objective}"
+                        f"project={project or '-'}  playbook={playbook or '-'}  job={job_id or '-'}  "
+                        f"{objective}{error_text}"
                     )
             elif args.queue_command == "run-next":
                 queue_id, job_id, output, passed = company.run_next_queue_item()
@@ -279,7 +283,11 @@ def main() -> int:
             print(f"Resumed and completed job {job_id}\nReport: {output}")
         elif args.command == "recover":
             recovered = company.recover_stale_jobs(args.stale_minutes * 60)
-            print(f"Recovered {len(recovered)} stale job(s): {', '.join(recovered) if recovered else 'none'}")
+            print(
+                f"Recovered {len(recovered)} stale job(s): "
+                f"{', '.join(recovered) if recovered else 'none'}. "
+                "Stale queue claims were reconciled without model reruns."
+            )
         elif args.command == "knowledge":
             if args.knowledge_command == "add":
                 item_id, changed = company.add_knowledge(args.path, args.project)
