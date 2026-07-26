@@ -77,6 +77,25 @@ SENSITIVE_ACTIONS = {
     "claims": ("revenue claim", "guarantee revenue"),
 }
 
+SENSITIVE_ACTION_PATTERNS = {
+    "external_communication": (
+        r"\b(?:send|contact|notify|call|message)\b.{0,80}\b(?:prospects?|customers?|clients?|leads?|users?|recipients?|people|team|everyone|all)\b",
+        r"\bemail\b.{0,40}\b(?:every|all|prospects?|customers?|clients?|leads?|users?|recipients?)\b",
+    ),
+    "money": (
+        r"\b(?:wire|transfer|pay|charge|refund)\b.{0,60}\b(?:funds?|money|cash|account|card|customer|vendor|invoice|subscription)\b",
+    ),
+    "deployment": (
+        r"\b(?:deploy|publish|promote|release|push)\b.{0,60}\b(?:production|publicly|live|website|site|app|service|release)\b",
+    ),
+    "browser": (
+        r"\b(?:log\s*in|sign\s*in|click|submit)\b.{0,60}\b(?:browser|form|account|website|site|checkout|button)\b",
+    ),
+    "destructive": (
+        r"\b(?:delete|erase|wipe|truncate|drop|purge)\b.{0,60}\b(?:data|database|tables?|records?|files?|storage|accounts?)\b",
+    ),
+}
+
 TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".py", ".ps1", ".js", ".ts"}
 MAX_KNOWLEDGE_BYTES = 2_000_000
 MAX_DATASET_BYTES = 20_000_000
@@ -521,8 +540,19 @@ class Company:
 
     @staticmethod
     def sensitive_categories(text: str) -> list[str]:
-        lower = text.lower()
-        return [category for category, phrases in SENSITIVE_ACTIONS.items() if any(p in lower for p in phrases)]
+        lower = " ".join(text.lower().replace("_", " ").split())
+        categories = {
+            category for category, phrases in SENSITIVE_ACTIONS.items()
+            if any(
+                re.search(r"(?<!\w)" + re.escape(phrase.strip()) + r"(?!\w)", lower)
+                for phrase in phrases
+            )
+        }
+        categories.update(
+            category for category, patterns in SENSITIVE_ACTION_PATTERNS.items()
+            if any(re.search(pattern, lower) for pattern in patterns)
+        )
+        return sorted(categories)
 
     @staticmethod
     def select_roles(objective: str) -> list[str]:

@@ -8,6 +8,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,7 +33,73 @@ def _read_state(home: Path) -> dict[str, object] | None:
 
 def _write_state(home: Path, state: dict[str, object]) -> None:
     home.mkdir(parents=True, exist_ok=True)
-    _state_path(home).write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path = _state_path(home)
+    payload = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def _startup_lock(home: Path):
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "service.start.lock"
+    descriptor = None
+    for _ in range(2):
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+            break
+        except FileExistsError:
+            try:
+                owner_pid = int(path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                owner_pid = 0
+            if _pid_exists(owner_pid):
+                raise RuntimeError(f"Local company service startup is already in progress as PID {owner_pid}")
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    if descriptor is None:
+        raise RuntimeError("Could not acquire local service startup lock")
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _probe(port: int) -> dict[str, object] | None:
@@ -74,46 +141,55 @@ def start_service(
         raise ValueError("num_ctx must be between 1024 and 131072")
     if num_predict < 32 or num_predict > 4096:
         raise ValueError("num_predict must be between 32 and 4096")
-    existing = service_status(home)
-    if existing.get("live"):
-        raise RuntimeError(f"Local company service is already running as PID {existing.get('pid')}")
+    with _startup_lock(home):
+        existing = service_status(home)
+        if existing.get("live"):
+            raise RuntimeError(f"Local company service is already running as PID {existing.get('pid')}")
+        recorded = _read_state(home) or {}
+        recorded_pid = int(recorded.get("pid", 0))
+        if recorded.get("status") in {"starting", "running"} and _pid_exists(recorded_pid):
+            raise RuntimeError(
+                f"Local company service is already {recorded.get('status')} as PID {recorded_pid}"
+            )
 
-    token = secrets.token_urlsafe(32)
-    log_path = home / "service.log"
-    project_root = Path(__file__).resolve().parents[2]
-    environment = os.environ.copy()
-    current_pythonpath = environment.get("PYTHONPATH", "")
-    environment["PYTHONPATH"] = str(project_root / "src") + (os.pathsep + current_pythonpath if current_pythonpath else "")
-    environment["LOCAL_COMPANY_SERVICE_TOKEN"] = token
-    command = [
-        sys.executable, "-m", "local_company.cli", "--home", str(home),
-        "dashboard", "--port", str(port), "--provider", provider, "--model", model,
-        "--num-ctx", str(num_ctx), "--num-predict", str(num_predict), "--keep-alive", keep_alive,
-    ]
-    creationflags = 0
-    popen_kwargs: dict[str, object] = {}
-    if os.name == "nt":
-        creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        token = secrets.token_urlsafe(32)
+        log_path = home / "service.log"
+        project_root = Path(__file__).resolve().parents[2]
+        environment = os.environ.copy()
+        current_pythonpath = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = str(project_root / "src") + (
+            os.pathsep + current_pythonpath if current_pythonpath else ""
         )
-    else:
-        popen_kwargs["start_new_session"] = True
-    home.mkdir(parents=True, exist_ok=True)
-    with log_path.open("ab") as log:
-        process = subprocess.Popen(
-            command, cwd=project_root, env=environment, stdin=subprocess.DEVNULL,
-            stdout=log, stderr=subprocess.STDOUT, close_fds=True,
-            creationflags=creationflags, **popen_kwargs,
-        )
-    state: dict[str, object] = {
-        "status": "starting", "pid": process.pid, "port": port, "home": str(home),
-        "token": token, "log_path": str(log_path), "started_at": _utc_now(),
-        "provider": provider, "model": model, "num_ctx": num_ctx,
-        "num_predict": num_predict, "keep_alive": keep_alive,
-    }
-    _write_state(home, state)
+        environment["LOCAL_COMPANY_SERVICE_TOKEN"] = token
+        command = [
+            sys.executable, "-m", "local_company.cli", "--home", str(home),
+            "dashboard", "--port", str(port), "--provider", provider, "--model", model,
+            "--num-ctx", str(num_ctx), "--num-predict", str(num_predict),
+            "--keep-alive", keep_alive,
+        ]
+        creationflags = 0
+        popen_kwargs: dict[str, object] = {}
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        with log_path.open("ab") as log:
+            process = subprocess.Popen(
+                command, cwd=project_root, env=environment, stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, close_fds=True,
+                creationflags=creationflags, **popen_kwargs,
+            )
+        state: dict[str, object] = {
+            "status": "starting", "pid": process.pid, "port": port, "home": str(home),
+            "token": token, "log_path": str(log_path), "started_at": _utc_now(),
+            "provider": provider, "model": model, "num_ctx": num_ctx,
+            "num_predict": num_predict, "keep_alive": keep_alive,
+        }
+        _write_state(home, state)
     for _ in range(30):
         health = _probe(port)
         if health and int(health.get("pid", -1)) == process.pid:

@@ -18,6 +18,7 @@ from unittest.mock import patch
 from local_company.cli import parser
 from local_company.core import Company, MockModel, OllamaModel, PLAYBOOKS, source_limitation_conflicts
 from local_company.dashboard import create_dashboard_server, render_dashboard
+from local_company.service import _read_state, _startup_lock, _write_state
 
 
 class RecordingModel:
@@ -196,6 +197,23 @@ class FilenameOnlyCitationModel(MockModel):
 
 
 class CompanyTests(unittest.TestCase):
+    def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            first = {"status": "starting", "pid": 1, "token": "local-test-token"}
+            second = {"status": "running", "pid": 2, "token": "replacement-token"}
+            _write_state(home, first)
+            _write_state(home, second)
+            self.assertEqual(_read_state(home), second)
+            self.assertEqual(list(home.glob(".service.json.*.tmp")), [])
+
+            with _startup_lock(home):
+                self.assertTrue((home / "service.start.lock").is_file())
+                with self.assertRaisesRegex(RuntimeError, "startup is already in progress"):
+                    with _startup_lock(home):
+                        pass
+            self.assertFalse((home / "service.start.lock").exists())
+
     def test_negative_evidence_claim_is_not_misclassified_as_completion(self):
         findings = source_limitation_conflicts(
             "Verified facts: No telemetry or hosted activation is ready in the current evidence.",
@@ -441,6 +459,18 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(len(requests), 1)
             company.decide_action(requests[0][0], "rejected", "Not authorized")
             self.assertEqual(company.action_requests("rejected")[0][0], requests[0][0])
+
+    def test_sensitive_action_normalization_blocks_common_bypass_wording(self):
+        categories = Company.sensitive_categories(
+            "Email every prospect and wire funds, then wipe the database"
+        )
+        self.assertEqual(categories, ["destructive", "external_communication", "money"])
+        self.assertEqual(
+            Company.sensitive_categories("Draft an email template for owner review"), []
+        )
+        self.assertEqual(
+            Company.sensitive_categories("Prepare a deployment plan without executing it"), []
+        )
 
     def test_knowledge_is_retrieved_and_cited(self):
         with tempfile.TemporaryDirectory() as tmp:
