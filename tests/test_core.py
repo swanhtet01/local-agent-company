@@ -3068,6 +3068,7 @@ class CompanyTests(unittest.TestCase):
             project_root / relative for relative in (
                 "scripts/check_live_build.py",
                 "scripts/check_readiness.py",
+                "scripts/check_runtime_supervisor.py",
                 "scripts/runtime_guard.py",
                 "scripts/stamp_build_manifest.py",
             )
@@ -3079,6 +3080,7 @@ class CompanyTests(unittest.TestCase):
             {path.relative_to(project_root).as_posix() for path in release_files},
             {
                 "scripts/check_live_build.py", "scripts/check_readiness.py",
+                "scripts/check_runtime_supervisor.py",
                 "scripts/runtime_guard.py", "scripts/stamp_build_manifest.py",
                 "src/local_company/__init__.py", "src/local_company/cli.py",
                 "src/local_company/config.py", "src/local_company/core.py",

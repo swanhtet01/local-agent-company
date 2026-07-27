@@ -142,7 +142,7 @@ class BuildManifestTests(unittest.TestCase):
             self.assertEqual(release.sha256, expected.hexdigest())
             self.assertEqual(
                 release.sha256,
-                "3adbe12cc7c506ee1fb892d8080a45514a682b30ef2c2f17b5a6a1293e6123ee",
+                "3e7211a5f4afaa08392ce6385f8b1c1a9f9d86bf338619381bf1e2b7e32d7352",
             )
             self.assertEqual(release.file_count, len(covered))
             self.assertEqual(release.total_bytes, expected_bytes)

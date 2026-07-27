@@ -22,6 +22,7 @@ SOURCE_RELATIVE_PATH = Path("src/local_company")
 OPERATIONAL_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/check_live_build.py"),
     Path("scripts/check_readiness.py"),
+    Path("scripts/check_runtime_supervisor.py"),
     Path("scripts/runtime_guard.py"),
     Path("scripts/stamp_build_manifest.py"),
 )

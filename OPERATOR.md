@@ -46,6 +46,28 @@ The Windows task is an operator cutover procedure; it is not registered or claim
 
 The five-minute task checks lifecycle only. Queue review and mission execution remain explicit owner actions in the daily loop.
 
+## Read-only scheduled-runtime supervisor
+
+Run the supervisor after task installation or a deliberate runtime update, and before relying on automatic recovery. This is the exact accepted local profile for this machine:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+python .\scripts\check_runtime_supervisor.py `
+  --home "C:\Users\thesw\Projects\supermega-local-company-state" `
+  --task-name "SuperMega Local Runtime Guard" `
+  --python-executable "C:\Users\thesw\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
+  --ollama-executable "C:\Users\thesw\AppData\Local\Programs\Ollama\ollama.exe" `
+  --ollama-sha256 "9648169dfef645752ff8b25fded65d57e4b519fda9b0c9710a938af025cec2a1" `
+  --model qwen3.5:0.8b `
+  --allow-windows-job-inheritance
+```
+
+The supervisor reads but never mutates Task Scheduler, the guard journal, the company store, services, processes, queues, or schedules. It never runs a mission, calls a model, or pulls a model. It requires the sealed current-user `InteractiveToken`/least-privilege task, exact action and runtime profile (`8765`, `4096`, `2048`, `30s`, `15` seconds, reviewed pin, inheritance switch, and `--record-result`), a successful correlated `runtime-guard-last.json`, equality between checked disk and live build, equality between the task pin and the bounded stable Ollama executable hash, and a fresh authoritative readiness result. Its JSON omits the supplied paths and digest.
+
+Exit `0` is the only ready result. Exit `1` names a determinate action; a disabled task, a current queued/running task, a nonzero latest result, or stale evidence is not ready. Exit `2` means task, journal, build, pin, runtime, or snapshot evidence is unavailable, malformed, inconsistent, or repeatedly changed during checking. Exit `3` means usage is invalid or the supervisor itself failed internally. Follow the returned `action` and `blockers`, correct only the named local condition, and rerun the command.
+
+The fixed timing envelope is: five-minute (`300`-second) interval, three-minute (`180`-second) execution limit, `120` seconds of dispatch grace, and `2` seconds of clock-skew tolerance. A ready latest run and journal must be no older than `420` seconds. The bounded canonical journal must be `1` to `2048` bytes and its timestamp must fall from two seconds before the latest task start through `210` seconds after it. Missed-run count, author text, task description, idle defaults, and the exact time-trigger start timestamp are not readiness gates; the supervisor validates the operational and security fields without treating benign Task Scheduler serialization differences as failures.
+
 ## Good objectives
 
 - `Create a 14-day inventory improvement plan with daily checks and a maximum budget of 300.`

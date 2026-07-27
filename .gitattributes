@@ -1,5 +1,6 @@
 /src/local_company/**/*.py text eol=lf
 /scripts/check_live_build.py text eol=lf
 /scripts/check_readiness.py text eol=lf
+/scripts/check_runtime_supervisor.py text eol=lf
 /scripts/runtime_guard.py text eol=lf
 /scripts/stamp_build_manifest.py text eol=lf
