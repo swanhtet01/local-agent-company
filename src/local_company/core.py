@@ -202,8 +202,8 @@ QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
-QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v3"
-QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
+QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v4"
+QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v2"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
 MAX_QUALITY_SUPERSESSION_CANDIDATES = 20
@@ -6024,7 +6024,15 @@ class Company:
         if not isinstance(source_conflicts, list) or not isinstance(incomplete_roles, list):
             raise RuntimeError("Current evaluator returned malformed findings")
 
-        if current_status == "failed":
+        integrity_retry_required = any(
+            checks.get(key) is not True for key in (
+                "report_integrity_valid", "evidence_manifest_valid",
+                "evidence_manifest_bound_to_report",
+            )
+        )
+        if current_status == "failed" and integrity_retry_required:
+            next_action = "preserve_history_then_retry_with_current_evidence"
+        elif current_status == "failed":
             next_action = "repair_current_failed_checks_before_retry"
         elif evaluator_changed or result_changed or stored_status == "not_evaluated":
             next_action = "review_then_run_quality_evaluation"
@@ -7744,7 +7752,9 @@ class Company:
             return list(db.execute("SELECT id, status, created_at, objective FROM jobs ORDER BY created_at DESC"))
 
     @staticmethod
-    def _quality_repair_actions(failed_checks: list[str]) -> list[str]:
+    def _quality_repair_actions(
+        failed_checks: list[str], *, retry_with_current_evidence: bool = False,
+    ) -> list[str]:
         """Map bounded deterministic gate tokens to code-owned repair actions."""
         repair_groups = (
             (
@@ -7777,7 +7787,11 @@ class Company:
                     "evidence_manifest_bound_to_report", "evidence_manifest_valid",
                     "report_integrity_valid", "report_path_local", "report_present",
                 },
-                "repair_sealed_report_or_evidence_integrity_before_retry",
+                (
+                    "preserve_history_and_retry_with_current_evidence"
+                    if retry_with_current_evidence else
+                    "repair_sealed_report_or_evidence_integrity_before_retry"
+                ),
             ),
             (
                 {"assignments_complete", "job_complete", "model_stopped_cleanly"},
@@ -8113,7 +8127,14 @@ class Company:
                 }
                 or any(value is not False for value in preview_effects.values())
                 or preview.get("next_action") != (
-                    "repair_current_failed_checks_before_retry"
+                    "preserve_history_then_retry_with_current_evidence"
+                    if current.get("quality_status") == "failed" and any(
+                        current.get(key) is not True for key in (
+                            "report_integrity_valid", "evidence_manifest_valid",
+                            "evidence_manifest_bound_to_report",
+                        )
+                    )
+                    else "repair_current_failed_checks_before_retry"
                     if current.get("quality_status") == "failed"
                     else "review_then_run_quality_evaluation"
                 )
@@ -8139,7 +8160,16 @@ class Company:
             ):
                 raise ValueError("Current quality recovery comparison is malformed")
 
-            current_actions = self._quality_repair_actions(current["failed_checks"])
+            integrity_retry_required = any(
+                current.get(key) is not True for key in (
+                    "report_integrity_valid", "evidence_manifest_valid",
+                    "evidence_manifest_bound_to_report",
+                )
+            )
+            current_actions = self._quality_repair_actions(
+                current["failed_checks"],
+                retry_with_current_evidence=integrity_retry_required,
+            )
             retry_policy = (
                 "strict_grounded" if _requires_strict_grounded_synthesis(objective)
                 else "standard"
@@ -8231,6 +8261,12 @@ class Company:
             "next_action": (
                 "review_current_passes_before_queue_change"
                 if current_passed_count else
+                "review_then_retry_highest_priority_with_current_evidence"
+                if any(
+                    item["next_action"]
+                    == "preserve_history_then_retry_with_current_evidence"
+                    for item in items
+                ) else
                 "repair_highest_priority_current_failed_checks" if items else "none"
             ),
             "effects": {

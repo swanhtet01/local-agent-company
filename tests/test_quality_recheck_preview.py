@@ -127,6 +127,43 @@ class QualityRecheckPreviewTests(unittest.TestCase):
             self.assertEqual(company.db_path.read_bytes(), database_before)
             self.assertEqual(report_path.read_bytes(), report_before)
 
+    def test_invalid_integrity_preserves_history_and_directs_current_evidence_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company, _, job_id, _, _ = self._seed_historical_failure(root)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                report_path = Path(db.execute(
+                    "SELECT output_path FROM jobs WHERE id=?", (job_id,),
+                ).fetchone()[0])
+            report_path.write_bytes(report_path.read_bytes() + b"\nlocal drift\n")
+            database_before = company.db_path.read_bytes()
+            report_before = report_path.read_bytes()
+
+            preview = company.quality_recheck_preview(job_id)
+
+            self.assertEqual(
+                preview["next_action"],
+                "preserve_history_then_retry_with_current_evidence",
+            )
+            self.assertFalse(preview["current_preview"]["report_integrity_valid"])
+            overview = company.quality_failure_summaries()
+            item = overview["items"][0]
+            self.assertIn(
+                "preserve_history_and_retry_with_current_evidence",
+                item["current_preview"]["repair_actions"],
+            )
+            self.assertNotIn(
+                "repair_sealed_report_or_evidence_integrity_before_retry",
+                item["current_preview"]["repair_actions"],
+            )
+            self.assertEqual(
+                overview["next_action"],
+                "review_then_retry_highest_priority_with_current_evidence",
+            )
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(report_path.read_bytes(), report_before)
+            self.assertEqual(company.model.calls, 0)
+
     def test_cli_and_dashboard_preview_are_bounded_exact_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
