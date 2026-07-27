@@ -197,7 +197,7 @@ KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
-QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v1"
+QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
@@ -4643,6 +4643,9 @@ class Company:
             )
             if proof_sha256 != preview["proof_sha256"]:
                 raise RuntimeError("Successor proof changed before supersession")
+            successor_inputs_before = self._quality_recheck_source_fingerprint(
+                successor_job_id,
+            )
             try:
                 report_bytes = self._read_local_report_bytes(successor[4])
                 report = report_bytes.decode("utf-8")
@@ -4660,6 +4663,13 @@ class Company:
             )
             if not manifest_valid:
                 raise RuntimeError("Successor evidence changed before supersession")
+            successor_inputs_after = self._quality_recheck_source_fingerprint(
+                successor_job_id,
+            )
+            if successor_inputs_before != successor_inputs_after:
+                raise RuntimeError(
+                    "Successor files changed during supersession"
+                )
             changed = db.execute(
                 "UPDATE mission_queue SET status='superseded', "
                 "completed_at=COALESCE(completed_at, ?) "
@@ -4684,6 +4694,9 @@ class Company:
                         "successor_chain_depth": chain_depth,
                         "proof_schema": QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
                         "proof_sha256": proof_sha256,
+                        "successor_input_fingerprint_sha256": (
+                            successor_inputs_after
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -4698,6 +4711,7 @@ class Company:
             "reason": normalized_reason,
             "successor_job_id": successor_job_id,
             "proof_sha256": proof_sha256,
+            "successor_input_fingerprint_sha256": successor_inputs_after,
             "effects": {
                 "database_mutated": True,
                 "queue_changed": True,

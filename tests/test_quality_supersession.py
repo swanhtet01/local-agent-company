@@ -206,6 +206,9 @@ class QualitySupersessionTests(unittest.TestCase):
             self.assertEqual(result["schema"], QUEUE_SUPERSEDE_SCHEMA)
             self.assertEqual(result["successor_job_id"], successor_job_id)
             self.assertRegex(result["proof_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(
+                result["successor_input_fingerprint_sha256"], r"^[0-9a-f]{64}$",
+            )
             self.assertEqual(result["status"], "superseded")
             self.assertEqual(cli_model.calls, 0)
             self.assertEqual(company.model.calls, 0)
@@ -222,10 +225,53 @@ class QualitySupersessionTests(unittest.TestCase):
             self.assertEqual(failed_report.read_bytes(), report_before)
             self.assertEqual(event["successor_job_id"], successor_job_id)
             self.assertEqual(event["proof_sha256"], result["proof_sha256"])
+            self.assertEqual(
+                event["successor_input_fingerprint_sha256"],
+                result["successor_input_fingerprint_sha256"],
+            )
             self.assertEqual(event["proof_schema"], QUALITY_SUPERSESSION_PREVIEW_SCHEMA)
             after = company.quality_supersession_preview(queue_id)
             self.assertEqual(after["eligibility"], "already_superseded")
             self.assertEqual(after["next_action"], "none")
+
+    def test_supersede_rolls_back_if_successor_files_cross_during_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (
+                company, queue_id, job_id, successor_job_id, _, _, successor_report,
+            ) = self._seed_eligible_failure(Path(tmp))
+            database_before = company.db_path.read_bytes()
+            report_before = successor_report.read_bytes()
+            original_validate = company._validate_evidence_manifest
+
+            def mutate_after_validation(
+                observed_job_id: str, manifest_sha256: str | None,
+            ) -> tuple[bool, dict[str, object] | None, str]:
+                result = original_validate(observed_job_id, manifest_sha256)
+                successor_report.write_bytes(
+                    report_before + b"\nConcurrent local report change.\n"
+                )
+                return result
+
+            with patch.object(
+                company, "_validate_evidence_manifest",
+                side_effect=mutate_after_validation,
+            ), self.assertRaisesRegex(RuntimeError, "files changed during supersession"):
+                company.supersede_quality_failure(
+                    queue_id,
+                    "A crossing report write must abort the queue lifecycle mutation.",
+                    successor_job_id,
+                )
+
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.queue_items("quality_failed")[0][0], queue_id)
+            self.assertNotEqual(successor_report.read_bytes(), report_before)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                event_count = db.execute(
+                    "SELECT COUNT(*) FROM events WHERE job_id=? "
+                    "AND kind='queue_quality_failure_superseded'", (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(event_count, 0)
+            self.assertEqual(company.model.calls, 0)
 
     def test_unresolved_and_racing_failures_remain_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
