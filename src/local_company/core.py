@@ -2307,22 +2307,26 @@ class Company:
         project_id = self._resolve_project(project)[0] if project else None
         with closing(self._connect()) as db:
             rows = self._select_knowledge_scope_rows(db, project_id)
-        if len(rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
-            raise ValueError(
-                "Knowledge freshness supports at most "
-                f"{MAX_KNOWLEDGE_AUDIT_SOURCES} registered sources per audit"
-            )
+        self._check_knowledge_scope_limit(rows)
         return project_id, rows
 
-    def _collect_knowledge_freshness(
-        self, project: str | None, *, retain_content: bool,
-    ) -> tuple[
-        str | None,
-        list[tuple[str, str, str, str]],
-        list[dict[str, object]],
-        dict[str, _KnowledgeSnapshot],
-    ]:
-        project_id, rows = self._knowledge_scope_rows(project)
+    @staticmethod
+    def _check_knowledge_scope_limit(
+        rows: list[tuple[str, str, str, str]],
+    ) -> None:
+        if len(rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
+            raise ValueError(
+                "Knowledge freshness and execution support at most "
+                f"{MAX_KNOWLEDGE_AUDIT_SOURCES} registered sources per scope"
+            )
+
+    def _collect_knowledge_freshness_rows(
+        self,
+        rows: list[tuple[str, str, str, str]],
+        *,
+        retain_content: bool,
+    ) -> tuple[list[dict[str, object]], dict[str, _KnowledgeSnapshot]]:
+        self._check_knowledge_scope_limit(rows)
         items: list[dict[str, object]] = []
         snapshots: dict[str, _KnowledgeSnapshot] = {}
         for item_id, path_text, stored_digest, _ in rows:
@@ -2351,6 +2355,20 @@ class Company:
                 "status": status,
                 "current_bytes": current_bytes,
             })
+        return items, snapshots
+
+    def _collect_knowledge_freshness(
+        self, project: str | None, *, retain_content: bool,
+    ) -> tuple[
+        str | None,
+        list[tuple[str, str, str, str]],
+        list[dict[str, object]],
+        dict[str, _KnowledgeSnapshot],
+    ]:
+        project_id, rows = self._knowledge_scope_rows(project)
+        items, snapshots = self._collect_knowledge_freshness_rows(
+            rows, retain_content=retain_content,
+        )
         return project_id, rows, items, snapshots
 
     @staticmethod
@@ -2359,6 +2377,46 @@ class Company:
             status: sum(item.get("status") == status for item in items)
             for status in ("current", "changed", "missing", "unavailable")
         }
+
+    def _require_current_knowledge_rows(
+        self, rows: list[tuple[str, str, str, str]],
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        items, _ = self._collect_knowledge_freshness_rows(
+            rows, retain_content=False,
+        )
+        counts = self._knowledge_status_counts(items)
+        if counts["changed"] or counts["missing"] or counts["unavailable"]:
+            raise RuntimeError(
+                "Knowledge preflight refused execution before model work: "
+                f"changed={counts['changed']}, missing={counts['missing']}, "
+                f"unavailable={counts['unavailable']}. Run the pathless knowledge "
+                "audit, then refresh the reviewed project or explicitly re-add the "
+                "affected source before retrying."
+            )
+        return tuple(rows)
+
+    def _require_current_knowledge(
+        self, project: str | None,
+    ) -> tuple[str | None, tuple[tuple[str, str, str, str], ...]]:
+        project_id, rows = self._knowledge_scope_rows(project)
+        return project_id, self._require_current_knowledge_rows(rows)
+
+    def _require_unchanged_current_knowledge_scope(
+        self,
+        db: sqlite3.Connection,
+        project_id: str | None,
+        expected_rows: tuple[tuple[str, str, str, str], ...],
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        current_rows = self._require_current_knowledge_rows(
+            self._select_knowledge_scope_rows(db, project_id)
+        )
+        if current_rows != expected_rows:
+            raise RuntimeError(
+                "Knowledge preflight refused execution before model work: registered "
+                "source scope changed during preflight. Run the pathless knowledge "
+                "audit before retrying."
+            )
+        return current_rows
 
     def knowledge_freshness(self, project: str | None = None) -> dict[str, object]:
         project_id, _, items, _ = self._collect_knowledge_freshness(
@@ -2742,12 +2800,19 @@ class Company:
                 return False, manifest, "source_snapshot_mismatch"
             candidate = Path(str(stored["path"]))
             try:
-                if candidate.is_symlink() or not candidate.is_file():
-                    return False, manifest, "source_stale"
-                live_content = candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                snapshot = self._read_knowledge_snapshot(
+                    candidate, retain_content=True,
+                )
+            except (FileNotFoundError, ValueError):
                 return False, manifest, "source_stale"
-            if hashlib.sha256(live_content.encode("utf-8")).hexdigest() != stored["sha256"]:
+            same_path = os.path.normcase(os.path.normpath(snapshot.path)) == (
+                os.path.normcase(os.path.normpath(str(stored["path"])))
+            )
+            if (
+                not same_path
+                or snapshot.sha256 != stored["sha256"]
+                or snapshot.content != stored["content"]
+            ):
                 return False, manifest, "source_stale"
             manifest_sources[source_id] = stored
 
@@ -4195,6 +4260,9 @@ class Company:
                     f"Queue changed; reviewed mission {expected_queue_id} is no longer next. "
                     "Refresh before running anything."
                 )
+            if not self.sensitive_categories(objective):
+                knowledge_rows = self._select_knowledge_scope_rows(db, project_id)
+                self._require_current_knowledge_rows(knowledge_rows)
             claimed = db.execute(
                 "UPDATE mission_queue SET status='running', started_at=?, error=NULL, run_token=? "
                 "WHERE id=? AND status='queued'",
@@ -4978,6 +5046,7 @@ class Company:
             raise PermissionError(
                 f"Sensitive action was not executed. Approval request {request_id} is pending for: {', '.join(blocked)}"
             )
+        _, knowledge_scope_rows = self._require_current_knowledge(project_id)
         job_id = uuid.uuid4().hex[:12]
         run_token = _run_token or uuid.uuid4().hex
         assignments = self.plan(objective, roles)
@@ -5024,6 +5093,9 @@ class Company:
         with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db)
             self._ensure_no_active_queue_claim(db, _queue_id)
+            transaction_knowledge_rows = self._require_unchanged_current_knowledge_scope(
+                db, project_id, knowledge_scope_rows,
+            )
             if parent_job_id is None and runtime_identity is not None:
                 cutoff = (
                     datetime.now(timezone.utc) - timedelta(seconds=RECENT_JOB_REUSE_SECONDS)
@@ -5052,6 +5124,9 @@ class Company:
                     )
                     manifest_reusable, _, manifest_reason = self._validate_evidence_manifest(
                         reusable[0], reusable[4],
+                    )
+                    self._require_unchanged_current_knowledge_scope(
+                        db, project_id, transaction_knowledge_rows,
                     )
                     if report_reusable and manifest_reusable:
                         if _queue_id:
@@ -5911,17 +5986,29 @@ class Company:
             ))
         assignments = [Assignment(row[0], row[1], row[2], row[3]) for row in rows]
         results = [(assignments[index], row[4]) for index, row in enumerate(rows) if row[5] == "complete" and row[4]]
+        _, resume_knowledge_rows = self._require_current_knowledge(job[2])
         frozen_manifest = self._load_evidence_manifest(job_id)
-        sources = (
-            self._source_hits_from_manifest(frozen_manifest)
-            if frozen_manifest else self.search_knowledge(
+        if frozen_manifest:
+            manifest_valid, validated_manifest, manifest_reason = (
+                self._validate_evidence_manifest(job_id, job[4])
+            )
+            if not manifest_valid or validated_manifest is None:
+                raise RuntimeError(
+                    "Resume refused before model work: frozen evidence is not current "
+                    f"({manifest_reason}); use retry to create a new job and evidence manifest."
+                )
+            sources = self._source_hits_from_manifest(validated_manifest)
+        else:
+            sources = self.search_knowledge(
                 job[0], limit=RUN_KNOWLEDGE_HIT_LIMIT, project=job[2],
             )
-        )
         run_token = uuid.uuid4().hex
         with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db, job_id)
             self._ensure_no_active_queue_claim(db)
+            self._require_unchanged_current_knowledge_scope(
+                db, job[2], resume_knowledge_rows,
+            )
             resumed = db.execute(
                 "UPDATE jobs SET status='running', heartbeat_at=?, run_token=?, "
                 "input_fingerprint=NULL "

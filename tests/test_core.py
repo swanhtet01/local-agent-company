@@ -2295,7 +2295,7 @@ class CompanyTests(unittest.TestCase):
 
             self.assertNotEqual(second_job, first_job)
 
-    def test_live_source_drift_blocks_reuse_without_reindex(self):
+    def test_live_source_drift_blocks_before_reuse_or_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "inventory.md"
@@ -2308,16 +2308,18 @@ class CompanyTests(unittest.TestCase):
             calls_after_first = model.calls
 
             source.write_text("inventory baseline is 14 units", encoding="utf-8")
-            second_job, _ = company.run("Review inventory baseline", project=project_id)
+            before = hashlib.sha256(company.db_path.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.run("Review inventory baseline", project=project_id)
 
-            self.assertNotEqual(second_job, first_job)
-            self.assertGreater(model.calls, calls_after_first)
-            rejection_events = [
-                json.loads(event[1]) for event in company.job_detail(first_job)["events"]
-                if event[0] == "job_reuse_rejected"
-            ]
+            self.assertEqual(model.calls, calls_after_first)
+            self.assertEqual([row[0] for row in company.jobs()], [first_job])
             self.assertEqual(
-                rejection_events[-1]["reason"], "evidence_manifest_source_stale",
+                hashlib.sha256(company.db_path.read_bytes()).hexdigest(), before,
+            )
+            self.assertNotIn(
+                "job_reuse_rejected",
+                {event[0] for event in company.job_detail(first_job)["events"]},
             )
 
     def test_source_mutation_during_reuse_report_check_is_rejected(self):
@@ -2330,6 +2332,8 @@ class CompanyTests(unittest.TestCase):
             project_id = company.create_project("Inventory")
             company.add_knowledge(source, project=project_id)
             first_job, _ = company.run("Review inventory baseline", project=project_id)
+            calls_after_first = model.calls
+            before = hashlib.sha256(company.db_path.read_bytes()).hexdigest()
             original_reader = company._read_local_report_bytes
             mutated = False
 
@@ -2343,19 +2347,20 @@ class CompanyTests(unittest.TestCase):
 
             with patch.object(
                 company, "_read_local_report_bytes", side_effect=read_then_mutate,
-            ):
-                second_job, _ = company.run(
+            ), self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.run(
                     "Review inventory baseline", project=project_id,
                 )
 
             self.assertTrue(mutated)
-            self.assertNotEqual(second_job, first_job)
-            rejection_events = [
-                json.loads(event[1]) for event in company.job_detail(first_job)["events"]
-                if event[0] == "job_reuse_rejected"
-            ]
+            self.assertEqual(model.calls, calls_after_first)
+            self.assertEqual([row[0] for row in company.jobs()], [first_job])
             self.assertEqual(
-                rejection_events[-1]["reason"], "evidence_manifest_source_stale",
+                hashlib.sha256(company.db_path.read_bytes()).hexdigest(), before,
+            )
+            self.assertNotIn(
+                "job_reuse_rejected",
+                {event[0] for event in company.job_detail(first_job)["events"]},
             )
 
     def test_evidence_manifest_freezes_exact_excerpt_and_detects_stale_source(self):

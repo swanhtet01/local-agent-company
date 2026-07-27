@@ -92,6 +92,8 @@ Directory reads are non-recursive unless `--recursive` is explicitly supplied, c
 
 `knowledge audit` is a bounded, read-only freshness check over at most 64 registered sources. Its JSON reports only source IDs, statuses, and current byte counts; it withholds paths, content, and digests, starts no work, and calls no model. `knowledge refresh` requires exactly one project and rereads all of that project's registered sources twice before opening one database transaction. A missing, unavailable, unsafe, over-limit, or changing source refuses the entire refresh. A successful refresh updates only changed index records and never writes to source files.
 
+Every model-backed direct, queued, or retry execution now checks the complete retrieval scope before reading indexed excerpts and again under the job transaction. A known stale queue item remains queued and unclaimed; no job or model call starts. Unprojected missions check every globally searchable source. Resume additionally requires its frozen evidence manifest to still match the safe current source and index; when it does not, use `retry` to create a new job with new frozen evidence. The error is pathless and directs the operator to audit and deliberately refresh or re-add the affected source. A source changing after the first scan still fails before job creation, cache reuse, or fresh model work.
+
 ## Run teams
 
 Preview the automatically selected team before spending any local inference

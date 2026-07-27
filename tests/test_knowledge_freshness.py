@@ -29,6 +29,14 @@ class CountingModel(MockModel):
         return super().complete(system, prompt)
 
 
+class FailFirstModel(CountingModel):
+    def complete(self, system: str, prompt: str) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("simulated first model failure")
+        return MockModel().complete(system, prompt)
+
+
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -236,7 +244,8 @@ class KnowledgeFreshnessTests(unittest.TestCase):
     def test_audit_refuses_more_than_bounded_source_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            company = Company(root / "state", CountingModel())
+            model = CountingModel()
+            company = Company(root / "state", model)
             project = company.create_project("Bounded Lab")
             with closing(company._connect(immediate=True)) as db, db:
                 for index in range(65):
@@ -252,6 +261,10 @@ class KnowledgeFreshnessTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "at most 64"):
                 company.knowledge_freshness(project)
+            with self.assertRaisesRegex(ValueError, "at most 64"):
+                company.run("Review the bounded source scope", project=project)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
 
     def test_cli_audit_and_refresh_emit_versioned_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -287,6 +300,259 @@ class KnowledgeFreshnessTests(unittest.TestCase):
             refresh = json.loads(refresh_output.getvalue())
             self.assertEqual(refresh["schema"], KNOWLEDGE_REFRESH_SCHEMA)
             self.assertEqual(refresh["refreshed_count"], 1)
+
+    def test_direct_execution_refuses_stale_knowledge_without_state_or_model_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Execution Gate")
+            changed = root / "private-changed.md"
+            missing = root / "private-missing.md"
+            changed.write_text("private old baseline", encoding="utf-8")
+            missing.write_text("private disappearing baseline", encoding="utf-8")
+            company.add_knowledge(changed, project)
+            company.add_knowledge(missing, project)
+            changed.write_text("private new baseline", encoding="utf-8")
+            missing.unlink()
+            before = file_sha256(company.db_path)
+
+            with self.assertRaisesRegex(
+                RuntimeError, "changed=1, missing=1, unavailable=0",
+            ) as caught:
+                company.run("Review the private baseline", project=project)
+
+            rendered = str(caught.exception)
+            self.assertNotIn(str(changed.resolve()), rendered)
+            self.assertNotIn("private old baseline", rendered)
+            self.assertNotIn("private new baseline", rendered)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+            self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_queue_preflight_leaves_stale_item_queued_and_unclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Queue Gate")
+            source = root / "queue.md"
+            source.write_text("queued current baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            queue_id = company.enqueue(
+                "Review queued current baseline", project=project,
+            )
+            source.write_text("queued changed baseline", encoding="utf-8")
+            before = file_sha256(company.db_path)
+
+            with self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.run_next_queue_item(queue_id)
+
+            row = company.queue_items()[0]
+            self.assertEqual(row[0], queue_id)
+            self.assertEqual(row[1], "queued")
+            self.assertEqual(row[7], "")
+            self.assertEqual(row[8], "")
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+            self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_owner_gate_is_not_masked_by_stale_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Owner Gate")
+            source = root / "owner.md"
+            source.write_text("owner gate baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            queue_id = company.enqueue(
+                "Send email to every prospect", project=project,
+            )
+            source.write_text("stale owner gate baseline", encoding="utf-8")
+
+            with self.assertRaisesRegex(PermissionError, "Approval request"):
+                company.run_next_queue_item(queue_id)
+
+            self.assertEqual(company.queue_items()[0][1], "needs_approval")
+            self.assertEqual(len(company.action_requests("pending")), 1)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+
+    def test_source_change_between_execution_scans_refuses_before_job_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Execution Race")
+            source = root / "race.md"
+            source.write_text("current race baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            before = file_sha256(company.db_path)
+            original = company._read_knowledge_snapshot
+            reads = 0
+
+            def change_after_first_scan(path: Path, *, retain_content: bool):
+                nonlocal reads
+                snapshot = original(path, retain_content=retain_content)
+                reads += 1
+                if reads == 1:
+                    source.write_text("changed during execution preflight", encoding="utf-8")
+                return snapshot
+
+            with patch.object(
+                company, "_read_knowledge_snapshot", side_effect=change_after_first_scan,
+            ), self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.run("Review the current race baseline", project=project)
+
+            self.assertGreaterEqual(reads, 2)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+            self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_source_change_during_cache_inspection_blocks_reuse_and_new_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Cache Gate")
+            source = root / "cache.md"
+            source.write_text("cache baseline is current", encoding="utf-8")
+            company.add_knowledge(source, project)
+            first_job, _ = company.run("Review cache baseline", project=project)
+            calls_after_first = model.calls
+            before = file_sha256(company.db_path)
+            original_reader = company._read_local_report_bytes
+            mutated = False
+
+            def read_then_mutate(path: str | None) -> bytes:
+                nonlocal mutated
+                report = original_reader(path)
+                if not mutated:
+                    source.write_text("cache baseline changed during reuse", encoding="utf-8")
+                    mutated = True
+                return report
+
+            with patch.object(
+                company, "_read_local_report_bytes", side_effect=read_then_mutate,
+            ), self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.run("Review cache baseline", project=project)
+
+            self.assertTrue(mutated)
+            self.assertEqual(model.calls, calls_after_first)
+            self.assertEqual([row[0] for row in company.jobs()], [first_job])
+            self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_retry_refuses_stale_knowledge_without_second_model_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = FailFirstModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Retry Gate")
+            source = root / "retry.md"
+            source.write_text("retry inventory baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            with self.assertRaisesRegex(RuntimeError, "simulated first model failure"):
+                company.run("Review retry inventory baseline", project=project)
+            failed_job = company.jobs()[0][0]
+            source.write_text("retry inventory changed", encoding="utf-8")
+            calls_before_retry = model.calls
+
+            with self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.retry(failed_job)
+
+            self.assertEqual(model.calls, calls_before_retry)
+            self.assertEqual(len(company.jobs()), 1)
+            self.assertEqual(company.jobs()[0][1], "failed")
+
+    def test_resume_requires_current_scope_and_matching_frozen_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = FailFirstModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Resume Gate")
+            source = root / "resume.md"
+            source.write_text("resume inventory baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            with self.assertRaisesRegex(RuntimeError, "simulated first model failure"):
+                company.run("Review resume inventory baseline", project=project)
+            failed_job = company.jobs()[0][0]
+            source.write_text("resume inventory changed", encoding="utf-8")
+            calls_before_resume = model.calls
+
+            with self.assertRaisesRegex(RuntimeError, "before model work"):
+                company.resume(failed_job)
+            self.assertEqual(model.calls, calls_before_resume)
+            self.assertEqual(company.jobs()[0][1], "failed")
+
+            company.refresh_project_knowledge(project)
+            with self.assertRaisesRegex(RuntimeError, "use retry") as caught:
+                company.resume(failed_job)
+            self.assertNotIn(str(source.resolve()), str(caught.exception))
+            self.assertEqual(model.calls, calls_before_resume)
+            self.assertEqual(company.jobs()[0][1], "failed")
+
+    def test_unprojected_execution_gates_every_globally_searchable_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Global Gate")
+            source = root / "global.md"
+            source.write_text("global indexed baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            source.write_text("global changed baseline", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "changed=1"):
+                company.run("Review globally searchable baseline")
+
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+
+    def test_evidence_validation_uses_the_stable_safe_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Evidence Reader")
+            source = root / "evidence.md"
+            source.write_text("evidence reader baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            job_id, _ = company.run("Review evidence reader baseline", project=project)
+            calls_before_recheck = model.calls
+
+            with patch(
+                "local_company.core.read_stable_local_file",
+                side_effect=SpreadsheetError("source changed while reading"),
+            ):
+                evaluation = company.evaluate_job(job_id)
+
+            self.assertFalse(evaluation["checks"]["evidence_manifest_valid"])
+            self.assertEqual(evaluation["manifest_reason"], "source_stale")
+            self.assertEqual(model.calls, calls_before_recheck)
+
+    def test_unsafe_execution_source_is_pathless_and_starts_no_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Unsafe Gate")
+            source = root / "unsafe-private.md"
+            source.write_text("unsafe private baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            before = file_sha256(company.db_path)
+
+            with patch(
+                "local_company.core.read_stable_local_file",
+                side_effect=SpreadsheetError("unsafe path internals"),
+            ), self.assertRaisesRegex(RuntimeError, "unavailable=1") as caught:
+                company.run("Review unsafe private baseline", project=project)
+
+            self.assertNotIn(str(source.resolve()), str(caught.exception))
+            self.assertNotIn("unsafe private baseline", str(caught.exception))
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.jobs(), [])
+            self.assertEqual(file_sha256(company.db_path), before)
 
 
 if __name__ == "__main__":
