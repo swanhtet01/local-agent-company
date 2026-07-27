@@ -14,7 +14,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
-    Company, MockModel, OllamaModel, PLAYBOOKS, QueueClaim, ReportFinalizationPending,
+    Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS, QueueClaim,
+    ReportFinalizationPending,
 )
 
 
@@ -311,9 +312,10 @@ def render_dashboard(
         return str(state).replace("_", " ")
 
     project_rows = "".join(
-        f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td><td>{cell(row[3])}</td></tr>"
+        f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td>"
+        f"<td>{cell(row[3])}</td><td><a href=\"/operator-brief?project={cell(row[0])}\">Brief</a></td></tr>"
         for row in snapshot["projects"]
-    ) or '<tr><td colspan="3" class="empty">No projects</td></tr>'
+    ) or '<tr><td colspan="4" class="empty">No projects</td></tr>'
     quality_by_job = {row[0]: ("pass" if row[1] else "fail", row[2]) for row in snapshot["evaluations"]}
 
     def mission_link(job_id: object) -> str:
@@ -581,7 +583,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
 <section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Only explicitly declared contract rules are treated as business checks.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Contract</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>
-<section><h2>Projects</h2><table><thead><tr><th>ID</th><th>Name</th><th>Missions</th></tr></thead><tbody>{project_rows}</tbody></table></section>
+<section><h2>Projects</h2><table><thead><tr><th>ID</th><th>Name</th><th>Missions</th><th>Action</th></tr></thead><tbody>{project_rows}</tbody></table></section>
 <section><h2>Approval inbox</h2><table><thead><tr><th>ID</th><th>Category</th><th>Proposed action</th></tr></thead><tbody>{approval_rows}</tbody></table></section>
 </body></html>"""
 
@@ -664,6 +666,128 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 <div class="grid"><section><h2>Common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{common_check_rows}</tbody></table></section>
 <section><h2>Common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{common_action_rows}</tbody></table></section></div>
 <p class="meta">Next action: <code>{cell(overview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(overview.get('schema', 'unknown'))}</code></p>
+</body></html>"""
+
+
+def render_operator_brief(company: Company, project: str) -> str:
+    """Render one bounded project brief without objectives, paths, or reports."""
+    brief = company.operator_brief(project)
+    counts = brief.get("counts")
+    knowledge = brief.get("knowledge")
+    attention = brief.get("attention")
+    effects = brief.get("effects")
+    expected_counts = {
+        "active_jobs", "failed_or_interrupted_jobs", "queued_missions",
+        "running_missions", "quality_failed_missions",
+        "project_pending_owner_approvals", "company_pending_owner_approvals",
+        "pending_report_finalizations", "pending_evaluations",
+        "enabled_schedules", "due_schedules", "dataset_count",
+        "dataset_profile_unavailable", "dataset_quality_review",
+        "dataset_contract_violations",
+    }
+    status_counts = knowledge.get("status_counts") if isinstance(knowledge, dict) else None
+    if (
+        brief.get("schema") != OPERATOR_BRIEF_SCHEMA
+        or brief.get("status") not in {"ready", "work_pending", "attention_required"}
+        or not isinstance(brief.get("observed_at"), str)
+        or not 1 <= len(brief["observed_at"]) <= 64
+        or not isinstance(brief.get("project_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{12}", brief["project_id"])
+        or not isinstance(counts, dict) or set(counts) != expected_counts
+        or any(type(value) is not int or value < 0 for value in counts.values())
+        or not isinstance(knowledge, dict)
+        or set(knowledge) != {"source_count", "ready_for_use", "status_counts"}
+        or type(knowledge.get("source_count")) is not int
+        or knowledge["source_count"] < 0
+        or type(knowledge.get("ready_for_use")) is not bool
+        or not isinstance(status_counts, dict)
+        or set(status_counts) != {"current", "changed", "missing", "unavailable"}
+        or any(type(value) is not int or value < 0 for value in status_counts.values())
+        or sum(status_counts.values()) != knowledge["source_count"]
+        or not isinstance(attention, list) or len(attention) > 16
+        or not isinstance(effects, dict)
+        or set(effects) != {"database_mutated", "model_called", "queue_changed", "work_started"}
+        or any(value is not False for value in effects.values())
+        or not isinstance(brief.get("next_action"), str)
+        or not re.fullmatch(r"[a-z0-9_]{1,120}", brief["next_action"])
+    ):
+        raise RuntimeError("Operator brief is malformed")
+    for item in attention:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"severity", "code", "count", "action"}
+            or item.get("severity") not in {"critical", "high", "normal"}
+            or not isinstance(item.get("code"), str)
+            or not re.fullmatch(r"[a-z0-9_]{1,80}", item["code"])
+            or type(item.get("count")) is not int or item["count"] < 1
+            or not isinstance(item.get("action"), str)
+            or not re.fullmatch(r"[a-z0-9_]{1,120}", item["action"])
+        ):
+            raise RuntimeError("Operator brief attention item is malformed")
+    attention_codes = [str(item["code"]) for item in attention]
+    expected_status = (
+        "attention_required"
+        if any(item["severity"] in {"critical", "high"} for item in attention)
+        else "work_pending" if attention else "ready"
+    )
+    expected_next_action = (
+        str(attention[0]["action"])
+        if attention else "queue_or_schedule_reviewed_mission"
+    )
+    if (
+        len(attention_codes) != len(set(attention_codes))
+        or brief["status"] != expected_status
+        or brief["next_action"] != expected_next_action
+        or knowledge["ready_for_use"] is not (
+            status_counts["changed"] == 0
+            and status_counts["missing"] == 0
+            and status_counts["unavailable"] == 0
+        )
+        or counts["project_pending_owner_approvals"]
+        > counts["company_pending_owner_approvals"]
+        or counts["due_schedules"] > counts["enabled_schedules"]
+        or counts["dataset_profile_unavailable"] > counts["dataset_count"]
+        or counts["dataset_quality_review"] > counts["dataset_count"]
+        or counts["dataset_contract_violations"] > counts["dataset_count"]
+    ):
+        raise RuntimeError("Operator brief is inconsistent")
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    attention_rows = "".join(
+        f"<tr><td>{cell(item['severity'])}</td><td><code>{cell(item['code'])}</code></td>"
+        f"<td>{cell(item['count'])}</td><td><code>{cell(item['action'])}</code></td></tr>"
+        for item in attention
+    ) or '<tr><td colspan="4" class="empty">No current attention items.</td></tr>'
+    count_rows = "".join(
+        f"<tr><td><code>{cell(name)}</code></td><td>{cell(value)}</td></tr>"
+        for name, value in counts.items()
+    )
+    knowledge_rows = "".join(
+        f"<tr><td><code>{cell(name)}</code></td><td>{cell(value)}</td></tr>"
+        for name, value in status_counts.items()
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Project operator brief</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:1120px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.status {{ font-size:28px; font-weight:800; color:#ffd479; }} .meta {{ color:#9aa7bd; }}
+.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} .empty {{ color:#6f7d95; text-align:center; }}
+@media(max-width:800px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
+</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<h1>Project operator brief</h1><p class="status">{cell(brief['status'])}</p>
+<p class="meta">Project <code>{cell(brief['project_id'])}</code> &middot; observed {cell(brief['observed_at'])}</p>
+<p class="boundary">Deterministic local metadata only. Objectives, project names, reports, source paths, evidence text, claims, and model output are withheld. This view changes no database, queue item, or work state and calls no model.</p>
+<section><h2>Attention queue</h2><table><thead><tr><th>Severity</th><th>Signal</th><th>Count</th><th>Action</th></tr></thead><tbody>{attention_rows}</tbody></table></section>
+<div class="grid"><section><h2>Operating counts</h2><table><thead><tr><th>Signal</th><th>Count</th></tr></thead><tbody>{count_rows}</tbody></table></section>
+<section><h2>Knowledge freshness</h2><p class="meta">Ready for use: {cell(knowledge['ready_for_use'])}</p><table><thead><tr><th>Status</th><th>Sources</th></tr></thead><tbody>{knowledge_rows}</tbody></table></section></div>
+<p class="meta">Next action: <code>{cell(brief['next_action'])}</code> &middot; schema <code>{cell(brief['schema'])}</code></p>
 </body></html>"""
 
 
@@ -1120,6 +1244,42 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+            elif parsed.path == "/operator-brief":
+                try:
+                    query = parse_qs(
+                        parsed.query, keep_blank_values=True, max_num_fields=2,
+                    )
+                except ValueError:
+                    query = {}
+                project_values = query.get("project") if set(query) == {"project"} else None
+                project_id = (
+                    project_values[0]
+                    if isinstance(project_values, list) and len(project_values) == 1
+                    else ""
+                )
+                if not re.fullmatch(r"[0-9a-f]{12}", project_id):
+                    body = b"Operator brief not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                else:
+                    try:
+                        known = any(
+                            str(row[0]) == project_id for row in company.projects()
+                        )
+                        if not known:
+                            body = b"Operator brief not found"
+                            self.send_response(404)
+                            self.send_header("Content-Type", "text/plain; charset=utf-8")
+                        else:
+                            body = render_operator_brief(
+                                company, project_id,
+                            ).encode("utf-8")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/html; charset=utf-8")
+                    except (KeyError, RuntimeError, TypeError, ValueError):
+                        body = b"Operator brief unavailable; retry after local state is stable."
+                        self.send_response(409)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif parsed.path == "/quality-failures":
                 try:
                     body = render_quality_failure_overview(company).encode("utf-8")

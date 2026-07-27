@@ -240,6 +240,10 @@ def parser() -> argparse.ArgumentParser:
         "--failed", action="store_true",
         help="Show one pathless recovery overview for all quality-failed queue missions",
     )
+    brief = sub.add_parser(
+        "brief", help="Show one pathless project operating brief and next action"
+    )
+    brief.add_argument("--project", required=True)
     health = sub.add_parser("health", help="Show local storage, model, queue, and runtime health")
     add_runtime_args(health)
     export = sub.add_parser("export", help="Write a portable audit JSON and SHA-256 manifest")
@@ -529,6 +533,8 @@ def main() -> int:
                     if args.summary else company.evaluate_job(args.job_id)
                 )
             print(json.dumps(result, indent=2))
+        elif args.command == "brief":
+            print(json.dumps(company.operator_brief(args.project), indent=2))
         elif args.command == "health":
             print(json.dumps(company.health_snapshot(), indent=2))
         elif args.command == "export":

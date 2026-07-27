@@ -198,7 +198,9 @@ MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
+OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
+MAX_OPERATOR_BRIEF_DATASETS = 1_000
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
@@ -4777,6 +4779,242 @@ class Company:
             "pending_approvals": int(row[3]),
             "pending_report_finalizations": int(row[4]),
             "pending_evaluations": int(row[5]),
+        }
+
+    def _operator_brief_snapshot(
+        self, project_id: str, observed_at: str,
+    ) -> tuple[
+        tuple[str, str], tuple[int, ...], tuple[tuple[object, ...], ...],
+        tuple[tuple[object, ...], ...],
+    ]:
+        """Capture every database input used by the project operator brief."""
+        with closing(self._connect()) as db:
+            project = db.execute(
+                "SELECT id, name FROM projects WHERE id=?", (project_id,),
+            ).fetchone()
+            counts = db.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM jobs
+                     WHERE project_id=:project_id AND status='running'),
+                    (SELECT COUNT(*) FROM jobs
+                     WHERE project_id=:project_id AND status IN ('failed', 'interrupted')),
+                    (SELECT COUNT(*) FROM mission_queue
+                     WHERE project_id=:project_id AND status='queued'),
+                    (SELECT COUNT(*) FROM mission_queue
+                     WHERE project_id=:project_id AND status='running'),
+                    (SELECT COUNT(*) FROM mission_queue
+                     WHERE project_id=:project_id AND status='quality_failed'),
+                    (SELECT COUNT(*) FROM action_requests ar
+                     JOIN jobs j ON j.id=ar.job_id
+                     WHERE j.project_id=:project_id AND ar.status='pending'),
+                    (SELECT COUNT(*) FROM action_requests WHERE status='pending'),
+                    (SELECT COUNT(*) FROM report_finalizations rf
+                     JOIN jobs j ON j.id=rf.job_id
+                     WHERE j.project_id=:project_id),
+                    (
+                        SELECT COUNT(*) FROM jobs j
+                        LEFT JOIN evaluations e ON e.job_id=j.id
+                        LEFT JOIN report_finalizations rf ON rf.job_id=j.id
+                        LEFT JOIN mission_queue q
+                          ON q.job_id=j.id AND q.status='running'
+                        WHERE j.project_id=:project_id AND j.status='complete'
+                          AND (e.job_id IS NULL OR q.id IS NOT NULL)
+                          AND rf.job_id IS NULL
+                    ),
+                    (SELECT COUNT(*) FROM schedules
+                     WHERE project_id=:project_id AND enabled=1),
+                    (SELECT COUNT(*) FROM schedules
+                     WHERE project_id=:project_id AND enabled=1
+                       AND next_run_at<=:observed_at)
+                """,
+                {"project_id": project_id, "observed_at": observed_at},
+            ).fetchone()
+            datasets = tuple(db.execute(
+                "SELECT id, row_count, column_count, profile_json FROM datasets "
+                "WHERE project_id=? ORDER BY id LIMIT ?",
+                (project_id, MAX_OPERATOR_BRIEF_DATASETS + 1),
+            ))
+            knowledge = tuple(db.execute(
+                "SELECT k.id, k.path, k.sha256, k.added_at FROM knowledge k "
+                "JOIN project_knowledge pk ON pk.knowledge_id=k.id "
+                "WHERE pk.project_id=? ORDER BY k.id LIMIT ?",
+                (project_id, MAX_KNOWLEDGE_AUDIT_SOURCES + 1),
+            ))
+        if project is None or counts is None:
+            raise RuntimeError("Project changed during operator brief")
+        if len(datasets) > MAX_OPERATOR_BRIEF_DATASETS:
+            raise ValueError(
+                f"Operator brief supports at most {MAX_OPERATOR_BRIEF_DATASETS} datasets"
+            )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ValueError("Stored project operating counters are malformed")
+        return (
+            (str(project[0]), str(project[1])), tuple(int(value) for value in counts),
+            datasets, knowledge,
+        )
+
+    def operator_brief(self, project: str) -> dict[str, object]:
+        """Return one stable, pathless next-action brief without running a model."""
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("Operator brief requires one project")
+        self.initialize()
+        project_id, _ = self._resolve_project(project)
+        observed_at = utc_now()
+        before = self._operator_brief_snapshot(project_id, observed_at)
+        knowledge = self.knowledge_freshness(project_id)
+
+        dataset_profile_unavailable = 0
+        dataset_quality_review = 0
+        dataset_contract_violations = 0
+        for _, row_count, column_count, profile_json in before[2]:
+            overview = self._dataset_quality_overview(
+                profile_json, expected_rows=row_count, expected_columns=column_count,
+            )
+            if overview["profile_status"] != "ready":
+                dataset_profile_unavailable += 1
+                continue
+            dataset_quality_review += int(overview["quality_status"] == "review")
+            dataset_contract_violations += int(
+                overview["contract_status"] == "violations"
+            )
+
+        after = self._operator_brief_snapshot(project_id, observed_at)
+        if after != before:
+            raise RuntimeError("Project operating state changed during observation; retry")
+
+        status_counts = knowledge.get("status_counts")
+        if (
+            knowledge.get("schema") != KNOWLEDGE_FRESHNESS_SCHEMA
+            or knowledge.get("project_id") != project_id
+            or not isinstance(status_counts, dict)
+            or set(status_counts) != {"current", "changed", "missing", "unavailable"}
+            or any(type(value) is not int or value < 0 for value in status_counts.values())
+            or type(knowledge.get("source_count")) is not int
+            or knowledge["source_count"] < 0
+            or sum(status_counts.values()) != knowledge.get("source_count")
+            or type(knowledge.get("ready_for_use")) is not bool
+            or knowledge["ready_for_use"] is not (
+                status_counts["changed"] == 0
+                and status_counts["missing"] == 0
+                and status_counts["unavailable"] == 0
+            )
+        ):
+            raise RuntimeError("Project knowledge summary is malformed")
+
+        count_names = (
+            "active_jobs", "failed_or_interrupted_jobs", "queued_missions",
+            "running_missions", "quality_failed_missions",
+            "project_pending_owner_approvals", "company_pending_owner_approvals",
+            "pending_report_finalizations", "pending_evaluations",
+            "enabled_schedules", "due_schedules",
+        )
+        counts = dict(zip(count_names, before[1]))
+        counts.update({
+            "dataset_count": len(before[2]),
+            "dataset_profile_unavailable": dataset_profile_unavailable,
+            "dataset_quality_review": dataset_quality_review,
+            "dataset_contract_violations": dataset_contract_violations,
+        })
+        attention: list[dict[str, object]] = []
+
+        def add_attention(severity: str, code: str, count: int, action: str) -> None:
+            if count > 0:
+                attention.append({
+                    "severity": severity, "code": code, "count": count,
+                    "action": action,
+                })
+
+        add_attention(
+            "critical", "knowledge_unavailable", status_counts["unavailable"],
+            "restore_or_remove_unavailable_project_sources",
+        )
+        add_attention(
+            "critical", "knowledge_missing", status_counts["missing"],
+            "restore_or_remove_missing_project_sources",
+        )
+        add_attention(
+            "high", "knowledge_changed", status_counts["changed"],
+            "review_then_refresh_changed_project_sources",
+        )
+        add_attention(
+            "high", "report_finalization_pending", counts["pending_report_finalizations"],
+            "resume_pending_report_finalization",
+        )
+        add_attention(
+            "high", "evaluation_pending", counts["pending_evaluations"],
+            "resume_pending_quality_evaluation",
+        )
+        add_attention(
+            "high", "quality_failed_missions", counts["quality_failed_missions"],
+            "review_quality_failures_before_retry",
+        )
+        add_attention(
+            "high", "project_owner_approvals", counts["project_pending_owner_approvals"],
+            "review_project_owner_approval_inbox",
+        )
+        add_attention(
+            "high", "other_owner_approvals",
+            max(
+                0, counts["company_pending_owner_approvals"]
+                - counts["project_pending_owner_approvals"],
+            ),
+            "review_company_owner_approval_inbox",
+        )
+        add_attention(
+            "high", "dataset_profile_unavailable", dataset_profile_unavailable,
+            "inspect_malformed_stored_dataset_profiles",
+        )
+        add_attention(
+            "high", "dataset_contract_violations", dataset_contract_violations,
+            "review_dataset_contract_violations",
+        )
+        add_attention(
+            "normal", "failed_or_interrupted_jobs",
+            counts["failed_or_interrupted_jobs"],
+            "review_failed_or_interrupted_jobs",
+        )
+        add_attention(
+            "normal", "due_schedules", counts["due_schedules"],
+            "materialize_due_schedules_after_review",
+        )
+        add_attention(
+            "normal", "running_missions", counts["running_missions"],
+            "monitor_running_missions",
+        )
+        add_attention(
+            "normal", "queued_missions", counts["queued_missions"],
+            "run_queue_preflight_for_next_due_mission",
+        )
+
+        if any(item["severity"] in {"critical", "high"} for item in attention):
+            status = "attention_required"
+        elif attention:
+            status = "work_pending"
+        else:
+            status = "ready"
+        return {
+            "schema": OPERATOR_BRIEF_SCHEMA,
+            "status": status,
+            "observed_at": observed_at,
+            "project_id": project_id,
+            "knowledge": {
+                "source_count": knowledge["source_count"],
+                "ready_for_use": knowledge["ready_for_use"],
+                "status_counts": dict(status_counts),
+            },
+            "counts": counts,
+            "attention": attention,
+            "next_action": (
+                str(attention[0]["action"])
+                if attention else "queue_or_schedule_reviewed_mission"
+            ),
+            "effects": {
+                "database_mutated": False,
+                "model_called": False,
+                "queue_changed": False,
+                "work_started": False,
+            },
         }
 
     def health_snapshot(self) -> dict[str, object]:

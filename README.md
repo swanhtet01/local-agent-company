@@ -203,6 +203,28 @@ allowlist.
 
 A report is written through a same-directory atomic replacement and sealed with SHA-256 before evaluation. Every recheck appends a versioned evaluation-history record; the latest result remains the dashboard projection. The evaluator reads and scans the exact sealed report bytes, so edits, moved paths, symlinks, and appended action claims fail closed. A queue item becomes `quality_failed` instead of `complete` when these gates fail. `quality JOB_ID --summary` is a bounded, pathless read of the latest stored result: it lists exact failed-check tokens, grouped repair actions, source-conflict count, queue linkage, and explicit zero-effect flags without appending an evaluation, calling a model, or changing queue state. `quality --failed` returns the same safe recovery fields for every failed queue mission in priority order, adds common-gate counts, and fails closed if the queue changes during observation. Use the dashboard **Recheck** control or `quality JOB_ID` after evaluator improvements. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`; queued items can be stopped with `queue cancel QUEUE_ID`.
 
+## Project operator brief
+
+Start each local review with one deterministic project summary:
+
+```powershell
+.\local-company.cmd brief --project "PROJECT"
+```
+
+The `local-company.operator-brief.v1` result combines project-scoped knowledge
+freshness, mission and completion state, owner approvals, due schedules, failed
+quality gates, and aggregate dataset-quality signals. It emits an ordered
+attention queue and exactly one `next_action`. The brief withholds objectives,
+project names, reports, paths, evidence text, claims, and model output; it calls
+no model and changes no database, queue item, schedule, or work state. It scans
+registered source freshness and double-snapshots every database input, returning
+an error instead of mixing states when either side changes during observation.
+
+Each project row on the localhost dashboard has a **Brief** link to the same
+bounded view. That page is no-store, accepts only one exact project ID, returns
+404 for malformed or extra routes, and returns a sanitized conflict response if
+the local state changes while it is rendered.
+
 ## Recurring local schedules
 
 Schedules do not run autonomously. They create queue items only when the operator invokes `tick`:
@@ -317,7 +339,7 @@ For other stale-heartbeat jobs, `recover` revokes their execution leases and rec
 .\local-company.cmd service start --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. The detached service binds only to localhost and shows an authenticated form for adding project-scoped tasks to the queue. The page does not auto-refresh while an objective is being drafted; use **Refresh** explicitly. The **Failed mission recovery** card opens a bounded, pathless priority view with shared failed gates and repair actions; it withholds objectives, reports, sources, evidence, and model output and performs no evaluation, model, queue, or work side effect. Mission IDs open a local detail page containing the report, failed automated gates, source-conflict evidence, exact frozen evidence excerpts, report/manifest hashes, append-only evaluation history, assignments, and audit events. A visible **Mission completion pending** banner and row annotations distinguish durable report-finalization or evaluation phases from an ordinary failure, including after a service restart. Queued items may be cancelled before they start. Intake never runs a model or performs an external action. The separate run control names the exact next ID, priority, and objective it will claim. If priority order changes after rendering, the stale submission is refused and the operator must refresh. A database-wide execution-slot guard keeps losing concurrent queue or direct attempts untouched instead of consuming a second item.
+Open `http://127.0.0.1:8765`. The detached service binds only to localhost and shows an authenticated form for adding project-scoped tasks to the queue. The page does not auto-refresh while an objective is being drafted; use **Refresh** explicitly. Each project row opens its deterministic, pathless operator brief. The **Failed mission recovery** card opens a bounded, pathless priority view with shared failed gates and repair actions; it withholds objectives, reports, sources, evidence, and model output and performs no evaluation, model, queue, or work side effect. Mission IDs open a local detail page containing the report, failed automated gates, source-conflict evidence, exact frozen evidence excerpts, report/manifest hashes, append-only evaluation history, assignments, and audit events. A visible **Mission completion pending** banner and row annotations distinguish durable report-finalization or evaluation phases from an ordinary failure, including after a service restart. Queued items may be cancelled before they start. Intake never runs a model or performs an external action. The separate run control names the exact next ID, priority, and objective it will claim. If priority order changes after rendering, the stale submission is refused and the operator must refresh. A database-wide execution-slot guard keeps losing concurrent queue or direct attempts untouched instead of consuming a second item.
 
 Dataset IDs on the dashboard open a read-only aggregate quality page. The list and
 detail view expose dimensions, deterministic flag categories, declared-key checks,
