@@ -6,6 +6,21 @@ Measured machine-specific results and current limitations are recorded in `ACCEP
 
 This is an owner-controlled foundation. It plans and drafts locally; it does not autonomously message people, spend money, use credentials, browse, publish, deploy, or delete data.
 
+## Verify locally
+
+Run the complete dependency-free suite from any working directory with the
+repository-anchored runner:
+
+```powershell
+python C:\Users\thesw\Projects\local-agent-company\scripts\run_tests.py
+```
+
+The runner supplies the repository and `src` import roots, treats warnings as
+errors, and does not require an activated environment or a `PYTHONPATH` value.
+It does not initialize or mutate company state, start a service, or call a
+model. Use `--pattern test_readiness.py` only for a focused development check;
+the command without a pattern is the release suite.
+
 ## Start immediately
 
 No package download is required:
