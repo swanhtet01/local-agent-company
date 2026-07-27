@@ -96,7 +96,13 @@ def parser() -> argparse.ArgumentParser:
         help="Retire an obsolete quality failure while preserving its audit evidence",
     )
     queue_supersede.add_argument("queue_id")
+    queue_supersede.add_argument("--successor-job", required=True)
     queue_supersede.add_argument("--reason", required=True)
+    queue_supersession_preview = queue_sub.add_parser(
+        "supersession-preview",
+        help="Prove whether an exact current-passing retry can retire one failure",
+    )
+    queue_supersession_preview.add_argument("queue_id")
     queue_cancel = queue_sub.add_parser("cancel", help="Cancel an item that has not started")
     queue_cancel.add_argument("queue_id")
 
@@ -353,8 +359,14 @@ def main() -> int:
                 print(f"Queue item {args.queue_id} reset; nothing was executed.")
             elif args.queue_command == "supersede":
                 print(json.dumps(
-                    company.supersede_quality_failure(args.queue_id, args.reason),
+                    company.supersede_quality_failure(
+                        args.queue_id, args.reason, args.successor_job,
+                    ),
                     indent=2,
+                ))
+            elif args.queue_command == "supersession-preview":
+                print(json.dumps(
+                    company.quality_supersession_preview(args.queue_id), indent=2,
                 ))
             elif args.queue_command == "cancel":
                 company.cancel_queue_item(args.queue_id)

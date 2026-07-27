@@ -5091,12 +5091,16 @@ class CompanyTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,),
                 ).fetchone()[0]
 
+            company.model = ConstraintModel(True)
+            successor_job_id, _ = company.retry(job_id)
+
             no_model = CountingMockModel()
             output = io.StringIO()
             with patch(
                 "sys.argv", [
                     "local-company", "--home", str(company.home), "queue",
-                    "supersede", queue_id, "--reason", reason,
+                    "supersede", queue_id, "--successor-job", successor_job_id,
+                    "--reason", reason,
                 ],
             ), patch(
                 "local_company.cli.selected_model", return_value=no_model,
@@ -5111,6 +5115,8 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(result["previous_status"], "quality_failed")
             self.assertEqual(result["status"], "superseded")
             self.assertEqual(result["reason"], reason)
+            self.assertEqual(result["successor_job_id"], successor_job_id)
+            self.assertRegex(result["proof_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(result["effects"]["database_mutated"])
             self.assertTrue(result["effects"]["queue_changed"])
             self.assertTrue(all(
@@ -5135,6 +5141,9 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(history_after, history_before)
             self.assertIsNotNone(event)
             self.assertEqual(json.loads(event[0])["reason"], reason)
+            self.assertEqual(
+                json.loads(event[0])["successor_job_id"], successor_job_id,
+            )
             self.assertEqual(company.quality_failure_summaries()["quality_failed_count"], 0)
             brief = company.operator_brief(project_id)
             self.assertEqual(brief["counts"]["quality_failed_missions"], 0)
@@ -5158,22 +5167,34 @@ class CompanyTests(unittest.TestCase):
             queue_id = company.enqueue("Review a bounded local operating change")
             database_before = company.db_path.read_bytes()
 
-            with self.assertRaisesRegex(ValueError, "quality-failed"):
+            successor_job_id = "a" * 12
+            with self.assertRaisesRegex(ValueError, "Stored quality-failed queue link"):
                 company.supersede_quality_failure(
                     queue_id,
                     "This queued mission is not eligible for superseding.",
+                    successor_job_id,
                 )
             with self.assertRaisesRegex(ValueError, "12 lowercase hexadecimal"):
                 company.supersede_quality_failure(
                     "../unsafe",
                     "This malformed identifier must not change queue state.",
+                    successor_job_id,
                 )
             with self.assertRaisesRegex(ValueError, "20 to 240"):
-                company.supersede_quality_failure(queue_id, "too short")
+                company.supersede_quality_failure(
+                    queue_id, "too short", successor_job_id,
+                )
             with self.assertRaisesRegex(ValueError, "control characters"):
                 company.supersede_quality_failure(
                     queue_id,
                     "This reason contains a forbidden null character.\x00",
+                    successor_job_id,
+                )
+            with self.assertRaisesRegex(ValueError, "Successor job ID"):
+                company.supersede_quality_failure(
+                    queue_id,
+                    "This successor identifier must fail before state changes.",
+                    "../unsafe",
                 )
             self.assertEqual(company.db_path.read_bytes(), database_before)
             self.assertEqual(company.queue_items("queued")[0][0], queue_id)

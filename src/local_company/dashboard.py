@@ -15,7 +15,8 @@ from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
     Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
-    QUALITY_RECHECK_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending,
+    QUALITY_RECHECK_PREVIEW_SCHEMA, QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
+    QueueClaim, ReportFinalizationPending,
 )
 
 
@@ -642,7 +643,8 @@ def render_quality_failure_overview(company: Company) -> str:
         f"<td>{cell(item['priority'])}</td>"
         f"<td><code>{cell(item['queue_id'])}</code></td>"
         f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a>'
-        f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview</a></td>'
+        f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview</a>'
+        f'<br><a href="/quality-supersession/{cell(item["queue_id"])}">Supersession proof</a></td>'
         f"<td>{cell(item['score'])}/100<br><span class=\"meta\"><code>{cell(item['evaluator_version'])}</code><br>{cell(item['evaluated_at'])}</span></td>"
         f"<td>{token_list(item['failed_checks'])}</td>"
         f"<td>{cell(item['source_conflict_count'])}</td>"
@@ -811,6 +813,147 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 </tbody></table></section>
 <section><h2>Current integrity gates</h2><table><tbody>{integrity_rows}</tbody></table></section>
 <p class="meta">Source conflicts: {cell(current.get('source_conflict_count', 0))} &middot; Next action: <code>{cell(preview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(preview.get('schema'))}</code></p>
+</body></html>"""
+
+
+def render_quality_supersession_preview(company: Company, queue_id: str) -> str:
+    """Render a pathless proof that a failure has an exact passing retry successor."""
+    preview = company.quality_supersession_preview(queue_id)
+    successor = preview.get("successor")
+    blockers = preview.get("blockers")
+    effects = preview.get("effects")
+    eligibility = preview.get("eligibility")
+    queue_status = preview.get("queue_status")
+    proof_sha256 = preview.get("proof_sha256")
+    next_action = preview.get("next_action")
+    if (
+        preview.get("schema") != QUALITY_SUPERSESSION_PREVIEW_SCHEMA
+        or preview.get("queue_id") != queue_id
+        or not isinstance(preview.get("failed_job_id"), str)
+        or re.fullmatch(r"[0-9a-f]{12}", preview["failed_job_id"]) is None
+        or queue_status not in {"quality_failed", "superseded"}
+        or eligibility not in {"eligible", "already_superseded", "ineligible"}
+        or type(preview.get("candidate_count")) is not int
+        or preview["candidate_count"] < 0
+        or type(preview.get("checked_candidate_count")) is not int
+        or not 0 <= preview["checked_candidate_count"] <= preview["candidate_count"]
+        or preview.get("proof_basis")
+        != "exact_objective_descendant_current_evaluator_pass"
+        or not isinstance(blockers, list)
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[a-z0-9_]+", value) is None
+            for value in blockers
+        )
+        or preview.get("observed_state_stable") is not True
+        or next_action not in {
+            "none", "supersede_with_successor_proof", "keep_failure_active",
+            "review_superseded_failure",
+        }
+        or not isinstance(effects, dict)
+        or set(effects) != {
+            "database_mutated", "evaluation_appended", "model_called",
+            "queue_changed", "work_started",
+        }
+        or any(value is not False for value in effects.values())
+    ):
+        raise ValueError("Quality supersession preview is malformed")
+
+    eligible = eligibility in {"eligible", "already_superseded"}
+    if eligible:
+        if (
+            not isinstance(successor, dict)
+            or set(successor) != {
+                "job_id", "chain_depth", "score", "evaluator_version",
+                "report_integrity_valid", "evidence_manifest_valid",
+                "evidence_manifest_bound_to_report",
+            }
+            or not isinstance(successor.get("job_id"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", successor["job_id"]) is None
+            or type(successor.get("chain_depth")) is not int
+            or not 1 <= successor["chain_depth"] <= 100
+            or type(successor.get("score")) is not int
+            or not 0 <= successor["score"] <= 100
+            or not isinstance(successor.get("evaluator_version"), str)
+            or re.fullmatch(r"[A-Za-z0-9._-]+", successor["evaluator_version"])
+            is None
+            or any(
+                successor.get(key) is not True
+                for key in (
+                    "report_integrity_valid", "evidence_manifest_valid",
+                    "evidence_manifest_bound_to_report",
+                )
+            )
+            or not isinstance(proof_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", proof_sha256) is None
+            or blockers
+            or (
+                eligibility == "eligible"
+                and (queue_status != "quality_failed"
+                     or next_action != "supersede_with_successor_proof")
+            )
+            or (
+                eligibility == "already_superseded"
+                and (queue_status != "superseded" or next_action != "none")
+            )
+        ):
+            raise ValueError("Quality supersession preview is malformed")
+    else:
+        expected_action = (
+            "review_superseded_failure"
+            if queue_status == "superseded" else "keep_failure_active"
+        )
+        if (
+            successor is not None or proof_sha256 is not None or not blockers
+            or next_action != expected_action
+        ):
+            raise ValueError("Quality supersession preview is malformed")
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    blocker_rows = "".join(
+        f"<li><code>{cell(value)}</code></li>" for value in blockers
+    ) or '<li class="muted">none</li>'
+    if isinstance(successor, dict):
+        successor_html = f"""<table><tbody>
+<tr><th>Mission</th><td><code>{cell(successor['job_id'])}</code></td></tr>
+<tr><th>Retry depth</th><td>{cell(successor['chain_depth'])}</td></tr>
+<tr><th>Current score</th><td>{cell(successor['score'])}/100</td></tr>
+<tr><th>Evaluator</th><td><code>{cell(successor['evaluator_version'])}</code></td></tr>
+<tr><th>Sealed report</th><td>valid</td></tr>
+<tr><th>Evidence manifest</th><td>valid and bound</td></tr>
+</tbody></table>"""
+    else:
+        successor_html = '<p class="muted">No qualifying successor was found.</p>'
+    proof_text = proof_sha256 if isinstance(proof_sha256, str) else "none"
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quality supersession proof</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:960px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
+.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} code {{ overflow-wrap:anywhere; }}
+@media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
+</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
+<h1>Quality supersession proof</h1>
+<p class="metric">{cell(eligibility)}</p>
+<p class="boundary">Read-only local proof. It changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reports, paths, source text, and claim text are withheld.</p>
+<div class="grid"><section><h2>Failure</h2><table><tbody>
+<tr><th>Queue</th><td><code>{cell(queue_id)}</code></td></tr>
+<tr><th>Mission</th><td><code>{cell(preview['failed_job_id'])}</code></td></tr>
+<tr><th>Queue status</th><td>{cell(queue_status)}</td></tr>
+<tr><th>Exact retry candidates</th><td>{cell(preview['candidate_count'])}</td></tr>
+<tr><th>Currently checked</th><td>{cell(preview['checked_candidate_count'])}</td></tr>
+</tbody></table></section><section><h2>Qualifying successor</h2>{successor_html}</section></div>
+<section><h2>Blockers</h2><ul>{blocker_rows}</ul></section>
+<section><h2>Proof binding</h2><p><code>{cell(proof_text)}</code></p></section>
+<p class="meta">Next action: <code>{cell(next_action)}</code> &middot; schema <code>{cell(preview['schema'])}</code></p>
 </body></html>"""
 
 
@@ -1450,6 +1593,31 @@ def create_dashboard_server(
                         self.send_header("Content-Type", "text/html; charset=utf-8")
                     except (KeyError, RuntimeError, TypeError, ValueError):
                         body = b"Quality preview unavailable; retry after local state is stable."
+                        self.send_response(409)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
+            elif not parsed.query and (
+                match := re.fullmatch(
+                    r"/quality-supersession/([0-9a-f]{12})", parsed.path,
+                )
+            ):
+                queue_id = match.group(1)
+                known = any(str(row[0]) == queue_id for row in company.queue_items())
+                if not known:
+                    body = b"Quality supersession proof not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                else:
+                    try:
+                        body = render_quality_supersession_preview(
+                            company, queue_id,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                    except (KeyError, RuntimeError, TypeError, ValueError):
+                        body = (
+                            b"Quality supersession proof unavailable; retry after "
+                            b"local state is stable."
+                        )
                         self.send_response(409)
                         self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif match := re.fullmatch(r"/datasets/([0-9a-f]{12})", parsed.path):

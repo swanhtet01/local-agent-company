@@ -198,11 +198,13 @@ KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v1"
+QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
+MAX_QUALITY_SUPERSESSION_CANDIDATES = 20
 MAX_OPERATOR_BRIEF_DATASETS = 1_000
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
@@ -4495,9 +4497,10 @@ class Company:
             )
 
     def supersede_quality_failure(
-        self, queue_id: str, reason: str, source: str = "cli",
+        self, queue_id: str, reason: str, successor_job_id: str,
+        source: str = "cli",
     ) -> dict[str, object]:
-        """Retire an obsolete quality failure without deleting its audit evidence."""
+        """Retire an obsolete failure only with a current-passing exact retry proof."""
         self.initialize()
         if (
             not isinstance(queue_id, str)
@@ -4513,9 +4516,28 @@ class Company:
         normalized_reason = " ".join(reason.split())
         if not 20 <= len(normalized_reason) <= 240:
             raise ValueError("Supersede reason must contain 20 to 240 characters")
+        if (
+            not isinstance(successor_job_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", successor_job_id) is None
+        ):
+            raise ValueError(
+                "Successor job ID must be 12 lowercase hexadecimal characters"
+            )
         source = " ".join(source.split())
         if not source or len(source) > 40:
             raise ValueError("Queue source must contain 1 to 40 characters")
+
+        preview = self.quality_supersession_preview(queue_id)
+        preview_successor = preview.get("successor")
+        if (
+            preview.get("eligibility") != "eligible"
+            or not isinstance(preview_successor, dict)
+            or preview_successor.get("job_id") != successor_job_id
+            or not isinstance(preview.get("proof_sha256"), str)
+        ):
+            raise ValueError(
+                "A matching current-passing exact retry descendant is required"
+            )
 
         with closing(self._connect(immediate=True)) as db, db:
             row = db.execute(
@@ -4548,6 +4570,94 @@ class Company:
                 raise RuntimeError(
                     "Quality-failed queue item still has an execution lease"
                 )
+            failed_job = db.execute(
+                "SELECT status, objective, project_id FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            successor = db.execute(
+                "SELECT parent_job_id, project_id, objective, status, output_path, "
+                "report_sha256, evidence_manifest_sha256 FROM jobs WHERE id=?",
+                (successor_job_id,),
+            ).fetchone()
+            if (
+                not failed_job or failed_job[0] != "complete"
+                or failed_job[2] != project_id
+                or not successor or successor[1] != project_id
+                or successor[2] != failed_job[1]
+                or successor[3] != "complete"
+                or not isinstance(successor[4], str)
+                or not isinstance(successor[5], str)
+                or re.fullmatch(r"[0-9a-f]{64}", successor[5]) is None
+                or not isinstance(successor[6], str)
+                or re.fullmatch(r"[0-9a-f]{64}", successor[6]) is None
+            ):
+                raise RuntimeError("Successor proof changed before supersession")
+
+            current_id = successor_job_id
+            chain_depth = 0
+            seen: set[str] = set()
+            while current_id != job_id and chain_depth < 100:
+                if current_id in seen:
+                    break
+                seen.add(current_id)
+                parent = db.execute(
+                    "SELECT parent_job_id FROM jobs WHERE id=?", (current_id,),
+                ).fetchone()
+                if not parent or not isinstance(parent[0], str):
+                    break
+                current_id = parent[0]
+                chain_depth += 1
+            if (
+                current_id != job_id
+                or chain_depth != preview_successor.get("chain_depth")
+            ):
+                raise RuntimeError("Successor lineage changed before supersession")
+
+            evaluation = db.execute(
+                "SELECT e.passed, e.score, h.id, h.passed, h.evaluator_version, "
+                "h.report_sha256, h.manifest_sha256 FROM evaluations e "
+                "LEFT JOIN evaluation_history h ON h.id=("
+                "SELECT MAX(latest.id) FROM evaluation_history latest "
+                "WHERE latest.job_id=e.job_id) WHERE e.job_id=?",
+                (successor_job_id,),
+            ).fetchone()
+            if (
+                not evaluation or evaluation[0] != 1
+                or type(evaluation[1]) is not int or not 0 <= evaluation[1] <= 100
+                or type(evaluation[2]) is not int or evaluation[2] < 1
+                or evaluation[3] != 1 or evaluation[4] != EVALUATOR_VERSION
+                or evaluation[5] != successor[5] or evaluation[6] != successor[6]
+                or evaluation[1] != preview_successor.get("score")
+            ):
+                raise RuntimeError("Successor evaluation changed before supersession")
+            proof_candidate = (
+                successor_job_id, chain_depth, successor[3], successor[4],
+                successor[5], successor[6], evaluation[0], evaluation[1],
+                evaluation[2], evaluation[3], evaluation[4], evaluation[5],
+                evaluation[6],
+            )
+            proof_sha256 = self._quality_successor_proof_sha256(
+                queue_id, job_id, failed_job[1], project_id, proof_candidate,
+            )
+            if proof_sha256 != preview["proof_sha256"]:
+                raise RuntimeError("Successor proof changed before supersession")
+            try:
+                report_bytes = self._read_local_report_bytes(successor[4])
+                report = report_bytes.decode("utf-8")
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Successor report changed before supersession"
+                ) from exc
+            if (
+                hashlib.sha256(report_bytes).hexdigest() != successor[5]
+                or f"Manifest SHA-256: `{successor[6]}`" not in report
+            ):
+                raise RuntimeError("Successor report changed before supersession")
+            manifest_valid, _, _ = self._validate_evidence_manifest(
+                successor_job_id, successor[6],
+            )
+            if not manifest_valid:
+                raise RuntimeError("Successor evidence changed before supersession")
             changed = db.execute(
                 "UPDATE mission_queue SET status='superseded', "
                 "completed_at=COALESCE(completed_at, ?) "
@@ -4566,6 +4676,12 @@ class Company:
                         "queue_id": queue_id,
                         "reason": normalized_reason,
                         "source": source,
+                        "successor_job_id": successor_job_id,
+                        "successor_evaluator_version": EVALUATOR_VERSION,
+                        "successor_score": evaluation[1],
+                        "successor_chain_depth": chain_depth,
+                        "proof_schema": QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
+                        "proof_sha256": proof_sha256,
                     },
                     sort_keys=True,
                 ),
@@ -4578,6 +4694,8 @@ class Company:
             "previous_status": previous_status,
             "status": "superseded",
             "reason": normalized_reason,
+            "successor_job_id": successor_job_id,
+            "proof_sha256": proof_sha256,
             "effects": {
                 "database_mutated": True,
                 "queue_changed": True,
@@ -5847,6 +5965,225 @@ class Company:
             "observed_state_stable": True,
             "next_action": next_action,
             "effects": {
+                "evaluation_appended": False,
+                "model_called": False,
+                "queue_changed": False,
+                "work_started": False,
+            },
+        }
+
+    def _quality_supersession_snapshot(self, queue_id: str) -> dict[str, object]:
+        """Read one bounded queue/job/descendant snapshot plus the full store digest."""
+        with closing(self._connect()) as db:
+            queue = db.execute(
+                "SELECT status, job_id, project_id, run_token FROM mission_queue WHERE id=?",
+                (queue_id,),
+            ).fetchone()
+            if not queue:
+                raise ValueError(f"Unknown queue item: {queue_id}")
+            failed_job = None
+            candidates: list[tuple[object, ...]] = []
+            if isinstance(queue[1], str):
+                failed_job = db.execute(
+                    "SELECT status, objective, project_id FROM jobs WHERE id=?",
+                    (queue[1],),
+                ).fetchone()
+            if failed_job and isinstance(failed_job[1], str):
+                candidates = list(db.execute(
+                    "WITH RECURSIVE descendants(id, depth, trail) AS ("
+                    "SELECT id, 1, ',' || id || ',' FROM jobs WHERE parent_job_id=? "
+                    "UNION ALL "
+                    "SELECT j.id, d.depth + 1, d.trail || j.id || ',' "
+                    "FROM jobs j JOIN descendants d ON j.parent_job_id=d.id "
+                    "WHERE d.depth < 100 AND instr(d.trail, ',' || j.id || ',')=0"
+                    ") "
+                    "SELECT j.id, d.depth, j.status, j.output_path, j.report_sha256, "
+                    "j.evidence_manifest_sha256, e.passed, e.score, h.id, h.passed, "
+                    "h.evaluator_version, h.report_sha256, h.manifest_sha256 "
+                    "FROM descendants d JOIN jobs j ON j.id=d.id "
+                    "LEFT JOIN evaluations e ON e.job_id=j.id "
+                    "LEFT JOIN evaluation_history h ON h.id=("
+                    "SELECT MAX(latest.id) FROM evaluation_history latest WHERE latest.job_id=j.id"
+                    ") WHERE j.objective=? AND j.project_id IS ? "
+                    "ORDER BY j.created_at DESC, j.id DESC LIMIT ?",
+                    (
+                        queue[1], failed_job[1], failed_job[2],
+                        MAX_QUALITY_SUPERSESSION_CANDIDATES + 1,
+                    ),
+                ))
+            database_sha256 = hashlib.sha256(db.serialize()).hexdigest()
+        return {
+            "database_sha256": database_sha256,
+            "queue": tuple(queue),
+            "failed_job": tuple(failed_job) if failed_job else None,
+            "candidates": tuple(tuple(row) for row in candidates),
+        }
+
+    @classmethod
+    def _quality_successor_proof_sha256(
+        cls, queue_id: str, failed_job_id: str, objective: str,
+        project_id: str | None, candidate: tuple[object, ...],
+    ) -> str:
+        basis = {
+            "schema": QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
+            "queue_id": queue_id,
+            "failed_job_id": failed_job_id,
+            "failed_objective_sha256": hashlib.sha256(
+                objective.encode("utf-8")
+            ).hexdigest(),
+            "project_id": project_id,
+            "successor_job_id": candidate[0],
+            "chain_depth": candidate[1],
+            "report_sha256": candidate[4],
+            "manifest_sha256": candidate[5],
+            "score": candidate[7],
+            "evaluation_history_id": candidate[8],
+            "evaluator_version": candidate[10],
+        }
+        return hashlib.sha256(cls._canonical_json(basis).encode("utf-8")).hexdigest()
+
+    def quality_supersession_preview(self, queue_id: str) -> dict[str, object]:
+        """Prove whether a failed queue item has an exact current-passing retry descendant."""
+        if not isinstance(queue_id, str) or re.fullmatch(r"[0-9a-f]{12}", queue_id) is None:
+            raise ValueError("Queue item ID must be 12 lowercase hexadecimal characters")
+        self.initialize()
+        before = self._quality_supersession_snapshot(queue_id)
+        queue = before["queue"]
+        failed_job = before["failed_job"]
+        candidates = before["candidates"]
+        if (
+            not isinstance(queue, tuple) or len(queue) != 4
+            or not isinstance(queue[0], str)
+            or not isinstance(queue[1], str)
+            or re.fullmatch(r"[0-9a-f]{12}", queue[1]) is None
+            or (queue[2] is not None and (
+                not isinstance(queue[2], str)
+                or re.fullmatch(r"[0-9a-f]{12}", queue[2]) is None
+            ))
+            or not isinstance(candidates, tuple)
+        ):
+            raise ValueError("Stored quality-failed queue link is malformed")
+        if (
+            not isinstance(failed_job, tuple) or len(failed_job) != 3
+            or not isinstance(failed_job[0], str)
+            or not isinstance(failed_job[1], str)
+            or failed_job[2] != queue[2]
+        ):
+            raise ValueError("Stored quality-failed queue link is malformed")
+        if len(candidates) > MAX_QUALITY_SUPERSESSION_CANDIDATES:
+            raise ValueError(
+                "Too many exact retry descendants to prove supersession safely"
+            )
+
+        blockers: list[str] = []
+        if queue[0] not in {"quality_failed", "superseded"}:
+            blockers.append("queue_not_quality_failed_or_superseded")
+        if queue[3] is not None:
+            blockers.append("execution_lease_present")
+        if failed_job[0] != "complete":
+            blockers.append("failed_job_not_complete")
+        if not candidates:
+            blockers.append("no_exact_retry_descendant")
+
+        checked = 0
+        selected: tuple[object, ...] | None = None
+        selected_preview: dict[str, object] | None = None
+        if not blockers:
+            for candidate in candidates:
+                if (
+                    len(candidate) != 13
+                    or not isinstance(candidate[0], str)
+                    or re.fullmatch(r"[0-9a-f]{12}", candidate[0]) is None
+                    or type(candidate[1]) is not int or not 1 <= candidate[1] <= 100
+                ):
+                    raise ValueError("Stored retry descendant is malformed")
+                stored_current_pass = bool(
+                    candidate[2] == "complete"
+                    and isinstance(candidate[3], str)
+                    and isinstance(candidate[4], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", candidate[4])
+                    and isinstance(candidate[5], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", candidate[5])
+                    and candidate[6] == 1
+                    and type(candidate[7]) is int and 0 <= candidate[7] <= 100
+                    and type(candidate[8]) is int and candidate[8] > 0
+                    and candidate[9] == 1
+                    and candidate[10] == EVALUATOR_VERSION
+                    and candidate[11] == candidate[4]
+                    and candidate[12] == candidate[5]
+                )
+                if not stored_current_pass:
+                    continue
+                checked += 1
+                preview = self.quality_recheck_preview(candidate[0])
+                current = preview.get("current_preview")
+                if (
+                    isinstance(current, dict)
+                    and current.get("quality_status") == "passed"
+                    and current.get("score") == candidate[7]
+                    and current.get("evaluator_version") == EVALUATOR_VERSION
+                    and current.get("report_integrity_valid") is True
+                    and current.get("evidence_manifest_valid") is True
+                    and current.get("evidence_manifest_bound_to_report") is True
+                ):
+                    selected = candidate
+                    selected_preview = preview
+                    break
+            if selected is None:
+                blockers.append("no_current_passing_exact_retry_descendant")
+
+        after = self._quality_supersession_snapshot(queue_id)
+        if before != after:
+            raise RuntimeError(
+                "Quality supersession inputs changed during observation; "
+                "retry after local state is stable"
+            )
+
+        successor = None
+        proof_sha256 = None
+        if selected is not None and selected_preview is not None:
+            current = selected_preview["current_preview"]
+            proof_sha256 = self._quality_successor_proof_sha256(
+                queue_id, queue[1], failed_job[1], queue[2], selected,
+            )
+            successor = {
+                "job_id": selected[0],
+                "chain_depth": selected[1],
+                "score": current["score"],
+                "evaluator_version": current["evaluator_version"],
+                "report_integrity_valid": current["report_integrity_valid"],
+                "evidence_manifest_valid": current["evidence_manifest_valid"],
+                "evidence_manifest_bound_to_report": (
+                    current["evidence_manifest_bound_to_report"]
+                ),
+            }
+
+        eligible = successor is not None and not blockers
+        already_superseded = queue[0] == "superseded"
+        return {
+            "schema": QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
+            "queue_id": queue_id,
+            "failed_job_id": queue[1],
+            "queue_status": queue[0],
+            "eligibility": (
+                "already_superseded" if eligible and already_superseded
+                else "eligible" if eligible else "ineligible"
+            ),
+            "candidate_count": len(candidates),
+            "checked_candidate_count": checked,
+            "successor": successor,
+            "proof_sha256": proof_sha256,
+            "proof_basis": "exact_objective_descendant_current_evaluator_pass",
+            "blockers": sorted(set(blockers)),
+            "observed_state_stable": True,
+            "next_action": (
+                "none" if already_superseded and eligible
+                else "review_superseded_failure" if already_superseded
+                else "supersede_with_successor_proof" if eligible
+                else "keep_failure_active"
+            ),
+            "effects": {
+                "database_mutated": False,
                 "evaluation_appended": False,
                 "model_called": False,
                 "queue_changed": False,
