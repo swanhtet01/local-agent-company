@@ -627,6 +627,58 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(child.terminated)
             self.assertFalse((home / "service.json").exists())
 
+    @unittest.skipUnless(os.name == "nt", "Windows Task Scheduler fallback")
+    def test_start_service_inherits_scheduler_job_only_after_explicit_denial(self):
+        class FakeProcess:
+            pid = 5006
+
+            def poll(self):
+                return None
+
+        denied = PermissionError(13, "scheduler denied breakaway")
+        denied.winerror = 5
+        child = FakeProcess()
+        observation = _ProcessObservation("present", "d" * 64)
+        health = {"status": "ready", "pid": 5006, "service_instance_id": "e" * 32}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.service._port_in_use", return_value=False,
+        ), patch(
+            "local_company.service.subprocess.Popen", side_effect=[denied, child],
+        ) as spawn, patch(
+            "local_company.service._observe_process", return_value=observation,
+        ), patch(
+            "local_company.service._probe", return_value=health,
+        ), patch(
+            "local_company.service.secrets.token_hex", return_value="e" * 32,
+        ), patch(
+            "local_company.service.secrets.token_urlsafe",
+            return_value="new-token-value-1234567890",
+        ):
+            result = start_service(
+                Path(tmp), provider="mock", allow_job_inheritance=True,
+            )
+        self.assertTrue(result["live"])
+        self.assertEqual(spawn.call_count, 2)
+        strict = (
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_BREAKAWAY_FROM_JOB
+        )
+        inherited = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        self.assertEqual(spawn.call_args_list[0].kwargs["creationflags"], strict)
+        self.assertEqual(spawn.call_args_list[1].kwargs["creationflags"], inherited)
+
+        denied_again = PermissionError(13, "scheduler denied breakaway")
+        denied_again.winerror = 5
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.service._port_in_use", return_value=False,
+        ), patch(
+            "local_company.service.subprocess.Popen", side_effect=denied_again,
+        ) as strict_spawn:
+            with self.assertRaises(PermissionError):
+                start_service(Path(tmp), provider="mock")
+        strict_spawn.assert_called_once()
+
     def test_start_service_rejects_identity_from_a_reused_child_pid(self):
         class FakeProcess:
             pid = 5004

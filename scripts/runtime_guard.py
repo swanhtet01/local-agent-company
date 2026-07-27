@@ -24,7 +24,8 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from local_company.config import default_company_home  # noqa: E402
 from local_company.service import (  # noqa: E402
-    _open_regular_lock_file, _terminate_owned_child, _windows_detached_creation_flags,
+    _open_regular_lock_file, _terminate_owned_child, _windows_breakaway_denied,
+    _windows_detached_creation_flags, _windows_inherited_creation_flags,
     service_status, start_service,
 )
 
@@ -357,7 +358,9 @@ def _trusted_ollama_executable(explicit: Path | None) -> Path | None:
     return None
 
 
-def _spawn_ollama(executable: Path) -> subprocess.Popen[bytes]:
+def _spawn_ollama(
+    executable: Path, *, allow_job_inheritance: bool = False,
+) -> subprocess.Popen[bytes]:
     creationflags = 0
     popen_kwargs: dict[str, object] = {}
     if os.name == "nt":
@@ -366,11 +369,22 @@ def _spawn_ollama(executable: Path) -> subprocess.Popen[bytes]:
         popen_kwargs["start_new_session"] = True
     environment = os.environ.copy()
     environment["OLLAMA_HOST"] = OLLAMA_HOST
-    return subprocess.Popen(
-        [str(executable), "serve"], cwd=executable.parent, env=environment,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        close_fds=True, creationflags=creationflags, **popen_kwargs,
-    )
+    arguments: dict[str, object] = {
+        "cwd": executable.parent, "env": environment,
+        "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL, "close_fds": True,
+        "creationflags": creationflags, **popen_kwargs,
+    }
+    try:
+        return subprocess.Popen([str(executable), "serve"], **arguments)
+    except OSError as exc:
+        if not (
+            os.name == "nt" and allow_job_inheritance
+            and _windows_breakaway_denied(exc)
+        ):
+            raise
+        arguments["creationflags"] = _windows_inherited_creation_flags()
+        return subprocess.Popen([str(executable), "serve"], **arguments)
 
 
 def _wait_for_ollama(
@@ -520,7 +534,7 @@ def _full_readiness(home: Path, model: str) -> tuple[str, str]:
 def _guard_locked(
     home: Path, pinned_identity: dict[str, str], *, port: int, model: str,
     num_ctx: int, num_predict: int, keep_alive: str, wait_seconds: int,
-    ollama_executable: Path | None,
+    ollama_executable: Path | None, allow_job_inheritance: bool,
 ) -> tuple[dict[str, object], int]:
     components = _empty_components()
     components["company_store"] = "valid"
@@ -581,7 +595,12 @@ def _guard_locked(
                 if executable is None:
                     attempt_events.add("ollama_executable_missing")
                 else:
-                    process = _spawn_ollama(executable)
+                    if allow_job_inheritance:
+                        process = _spawn_ollama(
+                            executable, allow_job_inheritance=True,
+                        )
+                    else:
+                        process = _spawn_ollama(executable)
                     ollama_state, model_installed = _wait_for_ollama(
                         model, process, wait_seconds,
                     )
@@ -633,10 +652,14 @@ def _guard_locked(
             indeterminate.append("disk_manifest_changed")
         else:
             try:
-                started = start_service(
-                    home, port=port, provider="ollama", model=model,
-                    num_ctx=num_ctx, num_predict=num_predict, keep_alive=keep_alive,
-                )
+                start_arguments = {
+                    "port": port, "provider": "ollama", "model": model,
+                    "num_ctx": num_ctx, "num_predict": num_predict,
+                    "keep_alive": keep_alive,
+                }
+                if allow_job_inheritance:
+                    start_arguments["allow_job_inheritance"] = True
+                started = start_service(home, **start_arguments)
                 state, started_relation, started_live = _service_components(
                     started, port=port, model=model, num_ctx=num_ctx,
                     num_predict=num_predict, keep_alive=keep_alive,
@@ -795,9 +818,14 @@ def guard_once(
     home: Path, *, port: int = 8765, model: str = "qwen3.5:0.8b",
     num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
     wait_seconds: int = 10, ollama_executable: Path | None = None,
+    allow_job_inheritance: bool = False,
 ) -> tuple[dict[str, object], int]:
-    if not _valid_runtime_arguments(
-        port, model, num_ctx, num_predict, keep_alive, wait_seconds,
+    if (
+        type(allow_job_inheritance) is not bool
+        or (allow_job_inheritance and os.name != "nt")
+        or not _valid_runtime_arguments(
+            port, model, num_ctx, num_predict, keep_alive, wait_seconds,
+        )
     ):
         raise GuardUsageError("invalid runtime arguments")
     components = _empty_components()
@@ -820,6 +848,7 @@ def guard_once(
                 Path(home), pinned_identity, port=port, model=model,
                 num_ctx=num_ctx, num_predict=num_predict, keep_alive=keep_alive,
                 wait_seconds=wait_seconds, ollama_executable=ollama_executable,
+                allow_job_inheritance=allow_job_inheritance,
             )
     except GuardBusyError:
         return _payload(
@@ -847,6 +876,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--keep-alive", default="30s")
     result.add_argument("--wait-seconds", type=int, default=10)
     result.add_argument("--ollama-executable", type=Path)
+    result.add_argument("--allow-windows-job-inheritance", action="store_true")
     return result
 
 
@@ -858,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:
             home, port=args.port, model=args.model, num_ctx=args.num_ctx,
             num_predict=args.num_predict, keep_alive=args.keep_alive,
             wait_seconds=args.wait_seconds, ollama_executable=args.ollama_executable,
+            allow_job_inheritance=args.allow_windows_job_inheritance,
         )
     except GuardUsageError:
         result = _payload(

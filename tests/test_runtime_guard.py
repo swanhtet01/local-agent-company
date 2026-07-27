@@ -46,6 +46,7 @@ def _locked_arguments(home: Path) -> dict[str, object]:
         "keep_alive": "30s",
         "wait_seconds": 1,
         "ollama_executable": None,
+        "allow_job_inheritance": False,
     }
 
 
@@ -633,6 +634,35 @@ class RuntimeGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "creation flags"):
                 guard._spawn_ollama(executable)
         unavailable_popen.assert_not_called()
+
+        denied = PermissionError(13, "scheduler denied breakaway")
+        denied.winerror = 5
+        with patch.object(guard.os, "name", "nt"), patch.object(
+            guard.subprocess, "DETACHED_PROCESS", 0x01, create=True,
+        ), patch.object(
+            guard.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x02, create=True,
+        ), patch.object(
+            guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x04, create=True,
+        ), patch(
+            "scripts.runtime_guard.subprocess.Popen",
+            side_effect=[denied, child],
+        ) as inherited_popen:
+            result = guard._spawn_ollama(
+                executable, allow_job_inheritance=True,
+            )
+        self.assertIs(result, child)
+        self.assertEqual(inherited_popen.call_count, 2)
+        self.assertEqual(inherited_popen.call_args_list[0].kwargs["creationflags"], 0x07)
+        self.assertEqual(inherited_popen.call_args_list[1].kwargs["creationflags"], 0x03)
+
+        denied_again = PermissionError(13, "scheduler denied breakaway")
+        denied_again.winerror = 5
+        with patch.object(guard.os, "name", "nt"), patch(
+            "scripts.runtime_guard.subprocess.Popen", side_effect=denied_again,
+        ) as strict_popen:
+            with self.assertRaises(PermissionError):
+                guard._spawn_ollama(executable)
+        strict_popen.assert_called_once()
 
     def test_cli_json_is_allowlisted_bounded_and_sanitized(self):
         secret = "SENTINEL-C:/private/service-token"

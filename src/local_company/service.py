@@ -579,6 +579,18 @@ def _windows_detached_creation_flags() -> int:
     return values[0] | values[1] | values[2]
 
 
+def _windows_inherited_creation_flags() -> int:
+    names = ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP")
+    values = tuple(getattr(subprocess, name, None) for name in names)
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise RuntimeError("Required inherited-process creation flags are unavailable")
+    return values[0] | values[1]
+
+
+def _windows_breakaway_denied(error: OSError) -> bool:
+    return getattr(error, "winerror", None) == 5
+
+
 def _existing_state_blocks_start(state: dict[str, object]) -> tuple[bool, str]:
     observation = _observe_process(int(state["pid"]))
     if not _has_current_identity(state):
@@ -596,6 +608,7 @@ def _existing_state_blocks_start(state: dict[str, object]) -> tuple[bool, str]:
 def start_service(
     home: Path, port: int = 8765, provider: str = "ollama", model: str = "qwen3.5:0.8b",
     num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
+    allow_job_inheritance: bool = False,
 ) -> dict[str, object]:
     home = home.resolve()
     if not _valid_int(port, 1, 65535):
@@ -606,6 +619,8 @@ def start_service(
         raise ValueError("num_ctx must be between 1024 and 131072")
     if not _valid_int(num_predict, 32, 4096):
         raise ValueError("num_predict must be between 32 and 4096")
+    if type(allow_job_inheritance) is not bool:
+        raise ValueError("allow_job_inheritance must be a boolean")
     if not _process_identity_supported():
         raise RuntimeError("Detached service process identity is supported only on Windows and Linux")
     with _startup_lock(home):
@@ -645,11 +660,25 @@ def start_service(
         state: dict[str, object] | None = None
         try:
             with log_path.open("ab") as log:
-                process = subprocess.Popen(
-                    command, cwd=project_root, env=environment, stdin=subprocess.DEVNULL,
-                    stdout=log, stderr=subprocess.STDOUT, close_fds=True,
-                    creationflags=creationflags, **popen_kwargs,
-                )
+                try:
+                    process = subprocess.Popen(
+                        command, cwd=project_root, env=environment,
+                        stdin=subprocess.DEVNULL, stdout=log,
+                        stderr=subprocess.STDOUT, close_fds=True,
+                        creationflags=creationflags, **popen_kwargs,
+                    )
+                except OSError as exc:
+                    if not (
+                        os.name == "nt" and allow_job_inheritance
+                        and _windows_breakaway_denied(exc)
+                    ):
+                        raise
+                    process = subprocess.Popen(
+                        command, cwd=project_root, env=environment,
+                        stdin=subprocess.DEVNULL, stdout=log,
+                        stderr=subprocess.STDOUT, close_fds=True,
+                        creationflags=_windows_inherited_creation_flags(),
+                    )
             if process.poll() is not None:
                 raise RuntimeError("Dashboard child exited before identity capture")
             observation = _observe_process(process.pid)
