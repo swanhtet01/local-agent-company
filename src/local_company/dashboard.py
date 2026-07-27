@@ -15,7 +15,8 @@ from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
     Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
-    QUALITY_RECHECK_PREVIEW_SCHEMA, QUALITY_SUPERSESSION_LIST_SCHEMA,
+    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECHECK_PREVIEW_SCHEMA,
+    QUALITY_SUPERSESSION_LIST_SCHEMA,
     QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending,
 )
 
@@ -620,15 +621,47 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 
 
 def render_quality_failure_overview(company: Company) -> str:
-    """Render bounded recovery metadata without objectives, reports, or paths."""
+    """Render stored history beside stable current-evaluator recovery evidence."""
     overview = company.quality_failure_summaries()
     effects = overview.get("effects")
     items = overview.get("items")
     count = overview.get("quality_failed_count")
-    common_checks = overview.get("common_failed_checks")
-    common_actions = overview.get("common_repair_actions")
+    current_failed_count = overview.get("current_failed_count")
+    current_passed_count = overview.get("current_passed_count")
+    changed_count = overview.get("current_preview_changed_count")
+    stored_checks = overview.get("common_stored_failed_checks")
+    stored_actions = overview.get("common_stored_repair_actions")
+    current_checks = overview.get("common_current_failed_checks")
+    current_actions = overview.get("common_current_repair_actions")
+
+    def aggregate_rows_valid(
+        value: object, key: str, *, token_length: int,
+    ) -> bool:
+        return bool(
+            isinstance(value, list)
+            and len(value) <= 128
+            and all(
+                isinstance(item, dict)
+                and set(item) == {key, "count"}
+                and isinstance(item.get(key), str)
+                and re.fullmatch(rf"[a-z0-9_]{{1,{token_length}}}", item[key])
+                is not None
+                and type(item.get("count")) is int
+                and 1 <= item["count"] <= max(count, 1)
+                for item in value
+            )
+        )
+
     if (
-        not isinstance(effects, dict)
+        overview.get("schema") != QUALITY_RECOVERY_LIST_SCHEMA
+        or set(overview) != {
+            "schema", "quality_failed_count", "current_failed_count",
+            "current_passed_count", "current_preview_changed_count", "items",
+            "common_stored_failed_checks", "common_stored_repair_actions",
+            "common_current_failed_checks", "common_current_repair_actions",
+            "next_action", "effects",
+        }
+        or not isinstance(effects, dict)
         or set(effects) != {
             "evaluation_appended", "model_called", "queue_changed", "work_started",
         }
@@ -636,10 +669,16 @@ def render_quality_failure_overview(company: Company) -> str:
         or not isinstance(items, list)
         or any(not isinstance(item, dict) for item in items)
         or type(count) is not int or count != len(items)
-        or not isinstance(common_checks, list)
-        or any(not isinstance(item, dict) for item in common_checks)
-        or not isinstance(common_actions, list)
-        or any(not isinstance(item, dict) for item in common_actions)
+        or type(current_failed_count) is not int or current_failed_count < 0
+        or type(current_passed_count) is not int or current_passed_count < 0
+        or current_failed_count + current_passed_count != count
+        or type(changed_count) is not int or not 0 <= changed_count <= count
+        or not aggregate_rows_valid(stored_checks, "check", token_length=80)
+        or not aggregate_rows_valid(stored_actions, "action", token_length=120)
+        or not aggregate_rows_valid(current_checks, "check", token_length=80)
+        or not aggregate_rows_valid(current_actions, "action", token_length=120)
+        or not isinstance(overview.get("next_action"), str)
+        or re.fullmatch(r"[a-z0-9_]{1,120}", overview["next_action"]) is None
     ):
         raise ValueError("Quality recovery overview is malformed")
 
@@ -653,30 +692,129 @@ def render_quality_failure_overview(company: Company) -> str:
             f"<li><code>{cell(value)}</code></li>" for value in values
         ) + "</ul>"
 
-    rows = "".join(
-        "<tr>"
-        f"<td>{cell(item['priority'])}</td>"
-        f"<td><code>{cell(item['queue_id'])}</code></td>"
-        f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a>'
-        f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview</a>'
-        f'<br><a href="/quality-supersession/{cell(item["queue_id"])}">Supersession proof</a></td>'
-        f"<td>{cell(item['score'])}/100<br><span class=\"meta\"><code>{cell(item['evaluator_version'])}</code><br>{cell(item['evaluated_at'])}</span></td>"
-        f"<td>{token_list(item['failed_checks'])}</td>"
-        f"<td>{cell(item['source_conflict_count'])}</td>"
-        f"<td>{token_list(item['incomplete_specialist_roles'])}</td>"
-        f"<td>{token_list(item['repair_actions'])}</td>"
-        f"<td><code>{cell(item['next_action'])}</code></td>"
-        "</tr>"
-        for item in items
-    ) or '<tr><td colspan="9" class="empty">No quality-failed missions.</td></tr>'
-    common_check_rows = "".join(
+    rows_parts: list[str] = []
+    for item in items:
+        stored = item.get("stored_result")
+        current = item.get("current_preview")
+        comparison = item.get("comparison")
+        if (
+            set(item) != {
+                "queue_id", "job_id", "queue_status", "priority", "stored_result",
+                "current_preview", "comparison", "next_action",
+            }
+            or not isinstance(item.get("queue_id"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", item["queue_id"]) is None
+            or not isinstance(item.get("job_id"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", item["job_id"]) is None
+            or item.get("queue_status") != "quality_failed"
+            or type(item.get("priority")) is not int
+            or not 0 <= item["priority"] <= 100
+            or not isinstance(stored, dict)
+            or set(stored) != {
+                "quality_status", "score", "evaluator_version", "evaluated_at",
+                "failed_checks", "source_conflict_count",
+                "incomplete_specialist_roles", "repair_actions",
+            }
+            or stored.get("quality_status") != "failed"
+            or type(stored.get("score")) is not int
+            or not 0 <= stored["score"] <= 100
+            or not isinstance(stored.get("evaluator_version"), str)
+            or not isinstance(stored.get("evaluated_at"), str)
+            or not isinstance(current, dict)
+            or set(current) != {
+                "quality_status", "score", "evaluator_version", "failed_checks",
+                "source_conflict_count", "incomplete_specialist_roles",
+                "report_integrity_valid", "evidence_manifest_valid",
+                "evidence_manifest_bound_to_report", "repair_actions",
+            }
+            or current.get("quality_status") not in {"passed", "failed"}
+            or type(current.get("score")) is not int
+            or not 0 <= current["score"] <= 100
+            or not isinstance(current.get("evaluator_version"), str)
+            or not isinstance(comparison, dict)
+            or set(comparison) != {
+                "evaluator_changed", "result_changed", "outcome_changed",
+                "score_delta", "resolved_failed_checks", "new_failed_checks",
+                "remaining_failed_checks",
+            }
+            or type(comparison.get("score_delta")) is not int
+            or any(
+                type(comparison.get(key)) is not bool
+                for key in (
+                    "evaluator_changed", "result_changed", "outcome_changed",
+                )
+            )
+            or any(
+                not isinstance(values, list)
+                or any(not isinstance(value, str) for value in values)
+                for values in (
+                    stored.get("failed_checks"), stored.get("incomplete_specialist_roles"),
+                    stored.get("repair_actions"), current.get("failed_checks"),
+                    current.get("incomplete_specialist_roles"),
+                    current.get("repair_actions"),
+                    comparison.get("resolved_failed_checks"),
+                    comparison.get("new_failed_checks"),
+                    comparison.get("remaining_failed_checks"),
+                )
+            )
+            or any(
+                type(current.get(key)) is not bool
+                for key in (
+                    "report_integrity_valid", "evidence_manifest_valid",
+                    "evidence_manifest_bound_to_report",
+                )
+            )
+            or not isinstance(item.get("next_action"), str)
+            or re.fullmatch(r"[a-z0-9_]{1,120}", item["next_action"]) is None
+        ):
+            raise ValueError("Quality recovery overview is malformed")
+        integrity = [
+            f"report_integrity_valid={str(current['report_integrity_valid']).lower()}",
+            f"evidence_manifest_valid={str(current['evidence_manifest_valid']).lower()}",
+            "evidence_manifest_bound_to_report="
+            f"{str(current['evidence_manifest_bound_to_report']).lower()}",
+        ]
+        delta = (
+            f"score_delta={comparison['score_delta']}"
+            + token_list(comparison["new_failed_checks"], "no new failed gates")
+            + token_list(comparison["resolved_failed_checks"], "no resolved gates")
+        )
+        rows_parts.append(
+            "<tr>"
+            f"<td>{cell(item['priority'])}</td>"
+            f"<td><code>{cell(item['queue_id'])}</code></td>"
+            f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a>'
+            f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview detail</a>'
+            f'<br><a href="/quality-supersession/{cell(item["queue_id"])}">Supersession proof</a></td>'
+            f"<td>{cell(stored['score'])}/100<br><code>{cell(stored['evaluator_version'])}</code>"
+            f"<br><span class=\"meta\">{cell(stored['evaluated_at'])}</span>"
+            f"{token_list(stored['failed_checks'], 'no stored failed gates')}</td>"
+            f"<td><strong>{cell(current['quality_status'])}</strong> {cell(current['score'])}/100"
+            f"<br><code>{cell(current['evaluator_version'])}</code>"
+            f"{token_list(current['failed_checks'], 'no current failed gates')}"
+            f"<span class=\"meta\">conflicts={cell(current['source_conflict_count'])}</span>"
+            f"{token_list(current['incomplete_specialist_roles'], 'no incomplete roles')}"
+            f"{token_list(integrity)}</td>"
+            f"<td>{delta}</td>"
+            f"<td>{token_list(current['repair_actions'])}</td>"
+            f"<td><code>{cell(item['next_action'])}</code></td>"
+            "</tr>"
+        )
+    rows = "".join(rows_parts) or (
+        '<tr><td colspan="8" class="empty">No quality-failed missions.</td></tr>'
+    )
+    current_check_rows = "".join(
         f"<tr><td><code>{cell(item['check'])}</code></td><td>{cell(item['count'])}</td></tr>"
-        for item in common_checks
+        for item in current_checks
     ) or '<tr><td colspan="2" class="empty">No shared failed gates.</td></tr>'
-    common_action_rows = "".join(
+    current_action_rows = "".join(
         f"<tr><td><code>{cell(item['action'])}</code></td><td>{cell(item['count'])}</td></tr>"
-        for item in common_actions
+        for item in current_actions
     ) or '<tr><td colspan="2" class="empty">No shared repair actions.</td></tr>'
+    stored_check_rows = "".join(
+        f"<tr><td><code>{cell(item['check'])}</code></td><td>{cell(item['count'])}</td></tr>"
+        for item in stored_checks
+    ) or '<tr><td colspan="2" class="empty">No stored failed gates.</td></tr>'
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -685,7 +823,7 @@ def render_quality_failure_overview(company: Company) -> str:
 body {{ max-width:1280px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
 .meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
 .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
+.grid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }} section {{ margin-top:26px; }}
 table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
 th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
 th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
@@ -694,11 +832,12 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 </style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Quality failure recovery</h1>
 <p><a href="/quality-supersessions">Review retired failure proofs</a></p>
-<p class="metric">{count}</p><p class="meta">quality-failed missions, ordered by queue priority</p>
-<p class="boundary">Stored deterministic findings only. Objectives, projects, reports, source paths, evidence text, claims, and model output are withheld. This view appends no evaluation, calls no model, changes no queue item, and starts no work.</p>
-<section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Score / evaluation</th><th>Failed gates</th><th>Conflicts</th><th>Incomplete roles</th><th>Repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
-<div class="grid"><section><h2>Common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{common_check_rows}</tbody></table></section>
-<section><h2>Common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{common_action_rows}</tbody></table></section></div>
+<div class="grid"><div><p class="metric">{count}</p><p class="meta">active stored failures</p></div><div><p class="metric">{current_failed_count}</p><p class="meta">currently failing</p></div><div><p class="metric">{current_passed_count}</p><p class="meta">currently passing, review only</p></div><div><p class="metric">{changed_count}</p><p class="meta">evaluator or result changed</p></div></div>
+<p class="boundary">Stored results are historical. Current repair guidance comes from the exact current evaluator on a discarded clone for each item and is individually race-checked. Objectives, projects, reports, source paths, evidence text, claims, and model output are withheld. This view appends no evaluation, calls no model, changes no queue item, and starts no work.</p>
+<section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Stored result</th><th>Current preview</th><th>Gate delta</th><th>Current repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+<div class="grid"><section><h2>Current common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{current_check_rows}</tbody></table></section>
+<section><h2>Current common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{current_action_rows}</tbody></table></section>
+<section><h2>Stored historical failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{stored_check_rows}</tbody></table></section></div>
 <p class="meta">Next action: <code>{cell(overview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(overview.get('schema', 'unknown'))}</code></p>
 </body></html>"""
 

@@ -31,7 +31,8 @@ from local_company.config import (
     valid_company_instance_id,
 )
 from local_company.core import (
-    Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS, ROLES,
+    Company, EVALUATOR_VERSION, ExecutionLeaseLost, MockModel, OllamaModel,
+    PLAYBOOKS, ROLES,
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
@@ -4876,13 +4877,30 @@ class CompanyTests(unittest.TestCase):
                 "For the local beta review, " + objective, playbook="operations-improvement",
                 priority=90,
             )
-            observed_high, _, _, high_passed = company.run_next_queue_item()
-            observed_low, _, _, low_passed = company.run_next_queue_item()
+            observed_high, high_job, _, high_passed = company.run_next_queue_item()
+            observed_low, low_job, _, low_passed = company.run_next_queue_item()
             self.assertEqual((observed_high, observed_low), (high_queue, low_queue))
             self.assertFalse(high_passed)
             self.assertFalse(low_passed)
 
-            with closing(sqlite3.connect(company.db_path)) as db:
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                low_checks = json.loads(db.execute(
+                    "SELECT checks_json FROM evaluations WHERE job_id=?", (low_job,),
+                ).fetchone()[0])
+                self.assertFalse(low_checks["facts_assumptions_separated"])
+                low_checks["facts_assumptions_separated"] = True
+                low_score = round(sum(low_checks.values()) * 100 / len(low_checks))
+                encoded = json.dumps(low_checks, sort_keys=True)
+                db.execute(
+                    "UPDATE evaluations SET score=?, checks_json=? WHERE job_id=?",
+                    (low_score, encoded, low_job),
+                )
+                db.execute(
+                    "UPDATE evaluation_history SET score=?, checks_json=?, "
+                    "evaluator_version='local-quality-2026-07-01.1' WHERE id=("
+                    "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
+                    (low_score, encoded, low_job),
+                )
                 history_before = db.execute(
                     "SELECT COUNT(*) FROM evaluation_history"
                 ).fetchone()[0]
@@ -4896,14 +4914,23 @@ class CompanyTests(unittest.TestCase):
                 [high_queue, low_queue],
             )
             self.assertEqual([item["priority"] for item in overview["items"]], [90, 20])
-            failed_counts = {
-                item["check"]: item["count"] for item in overview["common_failed_checks"]
+            self.assertEqual(overview["current_failed_count"], 2)
+            self.assertEqual(overview["current_passed_count"], 0)
+            self.assertEqual(overview["current_preview_changed_count"], 1)
+            stored_counts = {
+                item["check"]: item["count"]
+                for item in overview["common_stored_failed_checks"]
+            }
+            current_counts = {
+                item["check"]: item["count"]
+                for item in overview["common_current_failed_checks"]
             }
             action_counts = {
                 item["action"]: item["count"]
-                for item in overview["common_repair_actions"]
+                for item in overview["common_current_repair_actions"]
             }
-            self.assertEqual(failed_counts["facts_assumptions_separated"], 2)
+            self.assertEqual(stored_counts["facts_assumptions_separated"], 1)
+            self.assertEqual(current_counts["facts_assumptions_separated"], 2)
             self.assertEqual(
                 action_counts[
                     "label_assumptions_and_remove_unperformed_or_placeholder_claims"
@@ -4912,8 +4939,22 @@ class CompanyTests(unittest.TestCase):
             )
             self.assertEqual(
                 overview["next_action"],
-                "review_highest_priority_then_queue_revised_mission",
+                "repair_highest_priority_current_failed_checks",
             )
+            low_item = next(item for item in overview["items"] if item["job_id"] == low_job)
+            self.assertEqual(
+                low_item["stored_result"]["evaluator_version"],
+                "local-quality-2026-07-01.1",
+            )
+            self.assertEqual(
+                low_item["current_preview"]["evaluator_version"], EVALUATOR_VERSION,
+            )
+            self.assertIn(
+                "facts_assumptions_separated",
+                low_item["comparison"]["new_failed_checks"],
+            )
+            self.assertTrue(low_item["comparison"]["evaluator_changed"])
+            self.assertEqual(high_job, overview["items"][0]["job_id"])
             self.assertTrue(all(value is False for value in overview["effects"].values()))
 
             cli_model = CountingMockModel()
@@ -4947,17 +4988,27 @@ class CompanyTests(unittest.TestCase):
             company = Company(Path(tmp), MockModel())
             empty = company.quality_failure_summaries()
             self.assertEqual(empty["quality_failed_count"], 0)
+            self.assertEqual(empty["current_failed_count"], 0)
+            self.assertEqual(empty["current_passed_count"], 0)
             self.assertEqual(empty["items"], [])
             self.assertEqual(empty["next_action"], "none")
 
-            changed = [("a" * 12, "b" * 12, 50, "2026-07-28T00:00:00+00:00")]
+            snapshot = company._quality_failed_queue_snapshot()
+            changed = dict(snapshot)
+            changed["database_sha256"] = "0" * 64
             with patch.object(
-                company, "_quality_failed_queue_snapshot", side_effect=[[], changed],
+                company, "_quality_failed_queue_snapshot",
+                side_effect=[snapshot, changed],
             ), self.assertRaisesRegex(RuntimeError, "changed during observation"):
                 company.quality_failure_summaries()
 
+            row = (
+                "a" * 12, "b" * 12, 50,
+                "2026-07-28T00:00:00+00:00", 1,
+            )
+            overflow = {"database_sha256": "1" * 64, "rows": (row,) * 101}
             with patch.object(
-                company, "_quality_failed_queue_snapshot", return_value=changed * 101,
+                company, "_quality_failed_queue_snapshot", return_value=overflow,
             ), self.assertRaisesRegex(ValueError, "More than 100 quality failures"):
                 company.quality_failure_summaries()
 
@@ -4974,6 +5025,78 @@ class CompanyTests(unittest.TestCase):
                 self.assertEqual(cli_main(), 2)
             self.assertIn("--failed cannot be combined", error.getvalue())
             self.assertEqual(cli_model.calls, 0)
+
+    def test_quality_failure_overview_surfaces_current_pass_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", MockModel())
+            queue_id = company.enqueue(
+                "Private historical failure for current aggregate verification",
+                roles=["quality"], priority=77,
+            )
+            observed, job_id, _, passed = company.run_next_queue_item()
+            self.assertEqual(observed, queue_id)
+            self.assertTrue(passed)
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                checks = json.loads(db.execute(
+                    "SELECT checks_json FROM evaluations WHERE job_id=?", (job_id,),
+                ).fetchone()[0])
+                self.assertTrue(checks["placeholder_artifacts_absent"])
+                checks["placeholder_artifacts_absent"] = False
+                score = round(sum(checks.values()) * 100 / len(checks))
+                encoded = json.dumps(checks, sort_keys=True)
+                db.execute(
+                    "UPDATE evaluations SET passed=0, score=?, checks_json=? "
+                    "WHERE job_id=?", (score, encoded, job_id),
+                )
+                db.execute(
+                    "UPDATE evaluation_history SET passed=0, score=?, checks_json=?, "
+                    "evaluator_version='local-quality-2026-07-01.1' WHERE id=("
+                    "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
+                    (score, encoded, job_id),
+                )
+                db.execute(
+                    "UPDATE mission_queue SET status='quality_failed' WHERE id=?",
+                    (queue_id,),
+                )
+            company.model = CountingMockModel()
+            database_before = company.db_path.read_bytes()
+
+            overview = company.quality_failure_summaries()
+
+            self.assertEqual(overview["quality_failed_count"], 1)
+            self.assertEqual(overview["current_failed_count"], 0)
+            self.assertEqual(overview["current_passed_count"], 1)
+            self.assertEqual(overview["current_preview_changed_count"], 1)
+            self.assertEqual(
+                overview["next_action"], "review_current_passes_before_queue_change",
+            )
+            item = overview["items"][0]
+            self.assertEqual(item["stored_result"]["quality_status"], "failed")
+            self.assertEqual(item["current_preview"]["quality_status"], "passed")
+            self.assertEqual(item["current_preview"]["failed_checks"], [])
+            self.assertEqual(item["current_preview"]["repair_actions"], [])
+            self.assertTrue(item["comparison"]["outcome_changed"])
+            self.assertEqual(
+                item["comparison"]["resolved_failed_checks"],
+                ["placeholder_artifacts_absent"],
+            )
+            self.assertEqual(item["next_action"], "review_then_run_quality_evaluation")
+            self.assertEqual(
+                company.quality_recovery_summary(job_id)["queue_status"],
+                "quality_failed",
+            )
+            malformed_preview = company.quality_recheck_preview(job_id)
+            malformed_preview["effects"] = {"model_called": True}
+            with patch.object(
+                company, "quality_recheck_preview", return_value=malformed_preview,
+            ), self.assertRaisesRegex(
+                ValueError, "Current quality recovery preview is malformed",
+            ):
+                company.quality_failure_summaries()
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.model.calls, 0)
 
     def test_quality_failure_dashboard_is_pathless_read_only_and_http_exact(self):
         objective = (
@@ -5002,6 +5125,9 @@ class CompanyTests(unittest.TestCase):
 
             page = render_quality_failure_overview(company)
             self.assertIn("Quality failure recovery", page)
+            self.assertIn(QUALITY_RECOVERY_LIST_SCHEMA, page)
+            self.assertIn("Stored result", page)
+            self.assertIn("Current common failed gates", page)
             self.assertIn(queue_id, page)
             self.assertIn(f'href="/missions/{job_id}"', page)
             self.assertIn("facts_assumptions_separated", page)

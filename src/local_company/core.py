@@ -201,7 +201,7 @@ QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
-QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
+QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v2"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
@@ -7656,6 +7656,63 @@ class Company:
         with closing(self._connect()) as db:
             return list(db.execute("SELECT id, status, created_at, objective FROM jobs ORDER BY created_at DESC"))
 
+    @staticmethod
+    def _quality_repair_actions(failed_checks: list[str]) -> list[str]:
+        """Map bounded deterministic gate tokens to code-owned repair actions."""
+        repair_groups = (
+            (
+                {
+                    "evidence_filename_pairs_valid", "evidence_ids_valid",
+                    "verified_facts_cited", "verified_facts_evidence_cited",
+                    "verification_claims_evidence_bound",
+                },
+                "pair_verified_claims_with_exact_filenames_and_evidence_ids",
+            ),
+            (
+                {"source_limitations_respected"},
+                "remove_or_rewrite_claims_that_conflict_with_frozen_source_limitations",
+            ),
+            (
+                {
+                    "executive_synthesis_present", "facts_assumptions_separated",
+                    "owner_gate_present", "requested_concepts_present",
+                    "required_ending_present", "synthesis_present",
+                    "task_template_count_present", "team_plan_present",
+                },
+                "make_requested_sections_counts_labels_and_ending_explicit",
+            ),
+            (
+                {"specialists_within_word_limit", "synthesis_within_word_limit"},
+                "shorten_sections_to_requested_word_limits",
+            ),
+            (
+                {
+                    "evidence_manifest_bound_to_report", "evidence_manifest_valid",
+                    "report_integrity_valid", "report_path_local", "report_present",
+                },
+                "repair_sealed_report_or_evidence_integrity_before_retry",
+            ),
+            (
+                {"assignments_complete", "job_complete", "model_stopped_cleanly"},
+                "recover_incomplete_or_interrupted_work_before_retry",
+            ),
+            (
+                {
+                    "numeric_claims_labeled", "placeholder_artifacts_absent",
+                    "unperformed_action_claims_absent",
+                },
+                "label_assumptions_and_remove_unperformed_or_placeholder_claims",
+            ),
+        )
+        failed_set = set(failed_checks)
+        repair_actions = [
+            action for group, action in repair_groups if failed_set.intersection(group)
+        ]
+        covered = set().union(*(group for group, _ in repair_groups))
+        if failed_set - covered:
+            repair_actions.append("review_remaining_failed_checks_before_retry")
+        return repair_actions
+
     def quality_recovery_summary(self, job_id: str) -> dict[str, object]:
         """Return bounded stored quality findings without evaluating or exposing report data."""
         if not re.fullmatch(r"[0-9a-f]{12}", job_id):
@@ -7745,58 +7802,7 @@ class Company:
             source_conflict_count = len(conflicts)
             incomplete_roles = sorted({role for role in roles if role in ROLES})
 
-        repair_groups = (
-            (
-                {
-                    "evidence_filename_pairs_valid", "evidence_ids_valid",
-                    "verified_facts_cited", "verified_facts_evidence_cited",
-                    "verification_claims_evidence_bound",
-                },
-                "pair_verified_claims_with_exact_filenames_and_evidence_ids",
-            ),
-            (
-                {"source_limitations_respected"},
-                "remove_or_rewrite_claims_that_conflict_with_frozen_source_limitations",
-            ),
-            (
-                {
-                    "executive_synthesis_present", "facts_assumptions_separated",
-                    "owner_gate_present", "requested_concepts_present",
-                    "required_ending_present", "synthesis_present",
-                    "task_template_count_present", "team_plan_present",
-                },
-                "make_requested_sections_counts_labels_and_ending_explicit",
-            ),
-            (
-                {"specialists_within_word_limit", "synthesis_within_word_limit"},
-                "shorten_sections_to_requested_word_limits",
-            ),
-            (
-                {
-                    "evidence_manifest_bound_to_report", "evidence_manifest_valid",
-                    "report_integrity_valid", "report_path_local", "report_present",
-                },
-                "repair_sealed_report_or_evidence_integrity_before_retry",
-            ),
-            (
-                {"assignments_complete", "job_complete", "model_stopped_cleanly"},
-                "recover_incomplete_or_interrupted_work_before_retry",
-            ),
-            (
-                {
-                    "numeric_claims_labeled", "placeholder_artifacts_absent",
-                    "unperformed_action_claims_absent",
-                },
-                "label_assumptions_and_remove_unperformed_or_placeholder_claims",
-            ),
-        )
-        failed_set = set(failed_checks)
-        repair_actions = [
-            action for group, action in repair_groups if failed_set.intersection(group)
-        ]
-        covered = set().union(*(group for group, _ in repair_groups))
-        if failed_set - covered:
-            repair_actions.append("review_remaining_failed_checks_before_retry")
+        repair_actions = self._quality_repair_actions(failed_checks)
 
         return {
             "schema": QUALITY_RECOVERY_SCHEMA,
@@ -7816,10 +7822,10 @@ class Company:
             "effects": effects,
         }
 
-    def _quality_failed_queue_snapshot(self) -> list[tuple[object, ...]]:
-        """Read a deterministic, bounded sentinel snapshot of failed queue links."""
+    def _quality_failed_queue_snapshot(self) -> dict[str, object]:
+        """Read failed queue links and the full store digest from one snapshot."""
         with closing(self._connect()) as db:
-            return list(db.execute(
+            rows = tuple(tuple(row) for row in db.execute(
                 "SELECT q.id, q.job_id, q.priority, q.scheduled_at, "
                 "COALESCE((SELECT MAX(h.id) FROM evaluation_history h "
                 "WHERE h.job_id=q.job_id), 0) FROM mission_queue q "
@@ -7828,21 +7834,53 @@ class Company:
                 "LIMIT ?",
                 (MAX_QUALITY_RECOVERY_ITEMS + 1,),
             ))
+            database_sha256 = hashlib.sha256(db.serialize()).hexdigest()
+        return {"database_sha256": database_sha256, "rows": rows}
 
     def quality_failure_summaries(self) -> dict[str, object]:
-        """Return one stable, pathless recovery view for all failed queue missions."""
+        """Return stored and current recovery evidence for all failed queue missions."""
         self.initialize()
         before = self._quality_failed_queue_snapshot()
-        if len(before) > MAX_QUALITY_RECOVERY_ITEMS:
+        rows = before.get("rows") if isinstance(before, dict) else None
+        if (
+            not isinstance(before, dict)
+            or set(before) != {"database_sha256", "rows"}
+            or not isinstance(before.get("database_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", before["database_sha256"]) is None
+            or not isinstance(rows, tuple)
+            or any(not isinstance(row, tuple) or len(row) != 5 for row in rows)
+        ):
+            raise ValueError("Stored quality-failure queue index is malformed")
+        if len(rows) > MAX_QUALITY_RECOVERY_ITEMS:
             raise ValueError(
                 f"More than {MAX_QUALITY_RECOVERY_ITEMS} quality failures; narrow the queue first"
             )
 
         seen_jobs: set[str] = set()
         items: list[dict[str, object]] = []
-        failed_check_counts: dict[str, int] = {}
-        repair_action_counts: dict[str, int] = {}
-        for queue_id, job_id, priority, scheduled_at, history_id in before:
+        stored_check_counts: dict[str, int] = {}
+        stored_action_counts: dict[str, int] = {}
+        current_check_counts: dict[str, int] = {}
+        current_action_counts: dict[str, int] = {}
+        current_failed_count = 0
+        current_passed_count = 0
+        current_preview_changed_count = 0
+
+        def bounded_tokens(
+            value: object, *, maximum: int, token_length: int,
+        ) -> bool:
+            return bool(
+                isinstance(value, list)
+                and len(value) <= maximum
+                and all(
+                    isinstance(token, str)
+                    and re.fullmatch(rf"[a-z0-9_]{{1,{token_length}}}", token)
+                    for token in value
+                )
+                and value == sorted(set(value))
+            )
+
+        for queue_id, job_id, priority, scheduled_at, history_id in rows:
             if (
                 not isinstance(queue_id, str) or not re.fullmatch(r"[0-9a-f]{12}", queue_id)
                 or not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{12}", job_id)
@@ -7860,19 +7898,23 @@ class Company:
             seen_jobs.add(job_id)
 
             summary = self.quality_recovery_summary(job_id)
+            preview = self.quality_recheck_preview(job_id)
             if (
-                summary["quality_status"] != "failed"
-                or summary["queue_id"] != queue_id
-                or summary["queue_status"] != "quality_failed"
+                not isinstance(summary, dict)
+                or summary.get("schema") != QUALITY_RECOVERY_SCHEMA
+                or summary.get("job_id") != job_id
+                or summary.get("quality_status") != "failed"
+                or summary.get("queue_id") != queue_id
+                or summary.get("queue_status") != "quality_failed"
             ):
                 raise RuntimeError("Quality-failure queue link changed during observation")
-            failed_checks = summary["failed_checks"]
-            repair_actions = summary["repair_actions"]
-            score = summary["score"]
-            evaluator_version = summary["evaluator_version"]
-            evaluated_at = summary["evaluated_at"]
-            conflict_count = summary["source_conflict_count"]
-            incomplete_roles = summary["incomplete_specialist_roles"]
+            failed_checks = summary.get("failed_checks")
+            repair_actions = summary.get("repair_actions")
+            score = summary.get("score")
+            evaluator_version = summary.get("evaluator_version")
+            evaluated_at = summary.get("evaluated_at")
+            conflict_count = summary.get("source_conflict_count")
+            incomplete_roles = summary.get("incomplete_specialist_roles")
             if (
                 type(score) is not int or not 0 <= score <= 100
                 or not isinstance(evaluator_version, str)
@@ -7899,47 +7941,197 @@ class Company:
                 datetime.fromisoformat(evaluated_at)
             except ValueError as exc:
                 raise ValueError("Stored quality recovery summary is not bounded") from exc
+            if not isinstance(preview, dict):
+                raise ValueError("Current quality recovery preview is malformed")
+            preview_stored = preview.get("stored")
+            current = preview.get("current_preview")
+            comparison = preview.get("comparison")
+            preview_effects = preview.get("effects")
+            expected_current_keys = {
+                "quality_status", "score", "evaluator_version", "failed_checks",
+                "source_conflict_count", "incomplete_specialist_roles",
+                "report_integrity_valid", "evidence_manifest_valid",
+                "evidence_manifest_bound_to_report",
+            }
+            expected_comparison_keys = {
+                "evaluator_changed", "result_changed", "outcome_changed",
+                "score_delta", "resolved_failed_checks", "new_failed_checks",
+                "remaining_failed_checks",
+            }
+            if (
+                preview.get("schema") != QUALITY_RECHECK_PREVIEW_SCHEMA
+                or preview.get("job_id") != job_id
+                or preview.get("observed_state_stable") is not True
+                or not isinstance(preview_stored, dict)
+                or preview_stored != {
+                    "quality_status": "failed", "score": score,
+                    "evaluator_version": evaluator_version,
+                    "failed_checks": failed_checks, "queue_id": queue_id,
+                    "queue_status": "quality_failed",
+                }
+                or not isinstance(current, dict)
+                or set(current) != expected_current_keys
+                or current.get("quality_status") not in {"passed", "failed"}
+                or type(current.get("score")) is not int
+                or not 0 <= current["score"] <= 100
+                or current.get("evaluator_version") != EVALUATOR_VERSION
+                or not bounded_tokens(
+                    current.get("failed_checks"), maximum=64, token_length=80,
+                )
+                or (
+                    (current["quality_status"] == "passed")
+                    != (not current["failed_checks"])
+                )
+                or type(current.get("source_conflict_count")) is not int
+                or not 0 <= current["source_conflict_count"] <= 1_024
+                or not isinstance(current.get("incomplete_specialist_roles"), list)
+                or any(
+                    not isinstance(role, str) or role not in ROLES
+                    for role in current["incomplete_specialist_roles"]
+                )
+                or current["incomplete_specialist_roles"]
+                != sorted(set(current["incomplete_specialist_roles"]))
+                or any(
+                    type(current.get(key)) is not bool
+                    for key in (
+                        "report_integrity_valid", "evidence_manifest_valid",
+                        "evidence_manifest_bound_to_report",
+                    )
+                )
+                or not isinstance(comparison, dict)
+                or set(comparison) != expected_comparison_keys
+                or any(
+                    type(comparison.get(key)) is not bool
+                    for key in (
+                        "evaluator_changed", "result_changed", "outcome_changed",
+                    )
+                )
+                or type(comparison.get("score_delta")) is not int
+                or not all(
+                    bounded_tokens(comparison.get(key), maximum=64, token_length=80)
+                    for key in (
+                        "resolved_failed_checks", "new_failed_checks",
+                        "remaining_failed_checks",
+                    )
+                )
+                or not isinstance(preview_effects, dict)
+                or set(preview_effects) != {
+                    "evaluation_appended", "model_called", "queue_changed",
+                    "work_started",
+                }
+                or any(value is not False for value in preview_effects.values())
+                or preview.get("next_action") != (
+                    "repair_current_failed_checks_before_retry"
+                    if current.get("quality_status") == "failed"
+                    else "review_then_run_quality_evaluation"
+                )
+            ):
+                raise ValueError("Current quality recovery preview is malformed")
+
+            stored_set = set(failed_checks)
+            current_set = set(current["failed_checks"])
+            expected_outcome_changed = current["quality_status"] != "failed"
+            expected_result_changed = bool(
+                expected_outcome_changed
+                or score != current["score"]
+                or failed_checks != current["failed_checks"]
+            )
+            if (
+                comparison["evaluator_changed"] != (evaluator_version != EVALUATOR_VERSION)
+                or comparison["result_changed"] != expected_result_changed
+                or comparison["outcome_changed"] != expected_outcome_changed
+                or comparison["score_delta"] != current["score"] - score
+                or comparison["resolved_failed_checks"] != sorted(stored_set - current_set)
+                or comparison["new_failed_checks"] != sorted(current_set - stored_set)
+                or comparison["remaining_failed_checks"] != sorted(stored_set & current_set)
+            ):
+                raise ValueError("Current quality recovery comparison is malformed")
+
+            current_actions = self._quality_repair_actions(current["failed_checks"])
+            if (
+                not isinstance(current_actions, list)
+                or len(current_actions) > 16
+                or len(current_actions) != len(set(current_actions))
+                or any(
+                    not isinstance(action, str)
+                    or re.fullmatch(r"[a-z0-9_]{1,120}", action) is None
+                    for action in current_actions
+                )
+            ):
+                raise ValueError("Current quality recovery actions are malformed")
             for check in failed_checks:
-                failed_check_counts[check] = failed_check_counts.get(check, 0) + 1
+                stored_check_counts[check] = stored_check_counts.get(check, 0) + 1
             for action in repair_actions:
-                repair_action_counts[action] = repair_action_counts.get(action, 0) + 1
+                stored_action_counts[action] = stored_action_counts.get(action, 0) + 1
+            for check in current["failed_checks"]:
+                current_check_counts[check] = current_check_counts.get(check, 0) + 1
+            for action in current_actions:
+                current_action_counts[action] = current_action_counts.get(action, 0) + 1
+            if current["quality_status"] == "failed":
+                current_failed_count += 1
+            else:
+                current_passed_count += 1
+            if comparison["evaluator_changed"] or comparison["result_changed"]:
+                current_preview_changed_count += 1
             items.append({
                 "queue_id": queue_id,
                 "job_id": job_id,
                 "queue_status": "quality_failed",
                 "priority": priority,
-                "score": score,
-                "evaluator_version": evaluator_version,
-                "evaluated_at": evaluated_at,
-                "failed_checks": failed_checks,
-                "source_conflict_count": conflict_count,
-                "incomplete_specialist_roles": incomplete_roles,
-                "repair_actions": repair_actions,
-                "next_action": summary["next_action"],
+                "stored_result": {
+                    "quality_status": "failed", "score": score,
+                    "evaluator_version": evaluator_version,
+                    "evaluated_at": evaluated_at, "failed_checks": failed_checks,
+                    "source_conflict_count": conflict_count,
+                    "incomplete_specialist_roles": incomplete_roles,
+                    "repair_actions": repair_actions,
+                },
+                "current_preview": {**current, "repair_actions": current_actions},
+                "comparison": comparison,
+                "next_action": preview["next_action"],
             })
 
         after = self._quality_failed_queue_snapshot()
         if after != before:
-            raise RuntimeError("Quality-failure queue changed during observation; retry")
+            raise RuntimeError(
+                "Quality-failure recovery inputs changed during observation; retry"
+            )
 
         return {
             "schema": QUALITY_RECOVERY_LIST_SCHEMA,
             "quality_failed_count": len(items),
+            "current_failed_count": current_failed_count,
+            "current_passed_count": current_passed_count,
+            "current_preview_changed_count": current_preview_changed_count,
             "items": items,
-            "common_failed_checks": [
+            "common_stored_failed_checks": [
                 {"check": check, "count": count}
                 for check, count in sorted(
-                    failed_check_counts.items(), key=lambda item: (-item[1], item[0])
+                    stored_check_counts.items(), key=lambda item: (-item[1], item[0])
                 )
             ],
-            "common_repair_actions": [
+            "common_stored_repair_actions": [
                 {"action": action, "count": count}
                 for action, count in sorted(
-                    repair_action_counts.items(), key=lambda item: (-item[1], item[0])
+                    stored_action_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "common_current_failed_checks": [
+                {"check": check, "count": count}
+                for check, count in sorted(
+                    current_check_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "common_current_repair_actions": [
+                {"action": action, "count": count}
+                for action, count in sorted(
+                    current_action_counts.items(), key=lambda item: (-item[1], item[0])
                 )
             ],
             "next_action": (
-                "review_highest_priority_then_queue_revised_mission" if items else "none"
+                "review_current_passes_before_queue_change"
+                if current_passed_count else
+                "repair_highest_priority_current_failed_checks" if items else "none"
             ),
             "effects": {
                 "evaluation_appended": False,
