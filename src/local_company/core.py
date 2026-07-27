@@ -116,6 +116,7 @@ EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.13"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
+DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v2"
 
 
 def count_words(text: str) -> int:
@@ -2345,10 +2346,12 @@ class Company:
         if isinstance(value, int):
             return "integer"
         if isinstance(value, float):
-            return "number"
+            return "number" if math.isfinite(value) else "non_finite_number"
         if isinstance(value, (dict, list)):
             return "object" if isinstance(value, dict) else "array"
         text = str(value).strip()
+        if not text:
+            return "missing"
         if text.lower() in {"true", "false"}:
             return "boolean"
         try:
@@ -2357,10 +2360,104 @@ class Company:
         except ValueError:
             pass
         try:
-            float(text)
-            return "number"
+            numeric = float(text)
+            return "number" if math.isfinite(numeric) else "non_finite_number"
         except ValueError:
             return "string"
+
+    @staticmethod
+    def _profile_rate(numerator: int, denominator: int) -> float:
+        return round(numerator / denominator, 6) if denominator else 0.0
+
+    @staticmethod
+    def _reject_non_finite_json_number(value: str) -> None:
+        raise ValueError(f"non-finite number {value}")
+
+    @staticmethod
+    def _finite_numeric_value(value: object) -> float | None:
+        if value is None or isinstance(value, (bool, dict, list)):
+            return None
+        text_or_number: object = value.strip() if isinstance(value, str) else value
+        if text_or_number == "":
+            return None
+        try:
+            numeric = float(text_or_number)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) else None
+
+    @staticmethod
+    def _compact_profile_number(value: float) -> int | float:
+        if not math.isfinite(value):
+            raise ValueError("Numeric profile exceeded the finite summary range")
+        compact = float(f"{value:.12g}")
+        if compact == 0:
+            return 0
+        if compact.is_integer() and abs(compact) <= 9_007_199_254_740_991:
+            return int(compact)
+        return compact
+
+    @staticmethod
+    def _profile_percentile(sorted_values: list[float], fraction: float) -> float:
+        position = (len(sorted_values) - 1) * fraction
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return sorted_values[lower]
+        weight = position - lower
+        try:
+            return math.fsum(
+                (sorted_values[lower] * (1 - weight), sorted_values[upper] * weight)
+            )
+        except OverflowError as exc:
+            raise ValueError("Numeric profile exceeded the finite summary range") from exc
+
+    @classmethod
+    def _numeric_profile(
+        cls,
+        values: list[object],
+        non_missing_count: int,
+    ) -> dict[str, int | float] | None:
+        numeric_values = [
+            numeric
+            for value in values
+            if (numeric := cls._finite_numeric_value(value)) is not None
+        ]
+        if not numeric_values:
+            return None
+        numeric_values.sort()
+        first_quartile = cls._profile_percentile(numeric_values, 0.25)
+        median = cls._profile_percentile(numeric_values, 0.5)
+        third_quartile = cls._profile_percentile(numeric_values, 0.75)
+        interquartile_range = third_quartile - first_quartile
+        lower_bound = first_quartile - 1.5 * interquartile_range
+        upper_bound = third_quartile + 1.5 * interquartile_range
+        outliers = sum(
+            value < lower_bound or value > upper_bound for value in numeric_values
+        )
+        count = len(numeric_values)
+        zero_count = sum(value == 0 for value in numeric_values)
+        negative_count = sum(value < 0 for value in numeric_values)
+        try:
+            mean = math.fsum(value / count for value in numeric_values)
+        except OverflowError as exc:
+            raise ValueError("Numeric profile exceeded the finite summary range") from exc
+        return {
+            "count": count,
+            "rate_of_non_missing": cls._profile_rate(count, non_missing_count),
+            "minimum": cls._compact_profile_number(numeric_values[0]),
+            "p25": cls._compact_profile_number(first_quartile),
+            "median": cls._compact_profile_number(median),
+            "p75": cls._compact_profile_number(third_quartile),
+            "maximum": cls._compact_profile_number(numeric_values[-1]),
+            "mean": cls._compact_profile_number(mean),
+            "zero_count": zero_count,
+            "zero_rate": cls._profile_rate(zero_count, count),
+            "negative_count": negative_count,
+            "negative_rate": cls._profile_rate(negative_count, count),
+            "iqr_outlier_count": outliers,
+            "iqr_outlier_rate": cls._profile_rate(outliers, count),
+        }
 
     def profile_dataset(
         self,
@@ -2369,9 +2466,23 @@ class Company:
         *,
         allowed_root: Path | None = None,
         sheet: str | None = None,
+        key_columns: list[str] | None = None,
     ) -> tuple[str, Path, dict[str, object]]:
         self.initialize()
         project_id, project_name = self._resolve_project(project)
+        normalized_keys: list[str] = []
+        for raw_key in key_columns or []:
+            key = str(raw_key).strip()
+            if (
+                not key
+                or len(key) > 256
+                or any(ord(character) < 32 for character in key)
+                or key.casefold() in {item.casefold() for item in normalized_keys}
+            ):
+                raise ValueError("Dataset key columns must be unique non-empty names")
+            normalized_keys.append(key)
+        if len(normalized_keys) > 8:
+            raise ValueError("Dataset key checks support at most 8 columns")
         suffix = source.suffix.lower()
         if suffix not in {".csv", ".json", ".xlsx"}:
             raise ValueError("Datasets must be CSV, JSON, or XLSX")
@@ -2401,8 +2512,11 @@ class Company:
                 rows.append(dict(row))
         elif suffix == ".json":
             try:
-                payload = json.loads(raw.decode("utf-8", errors="strict"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                payload = json.loads(
+                    raw.decode("utf-8", errors="strict"),
+                    parse_constant=self._reject_non_finite_json_number,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                 raise ValueError(f"Invalid JSON dataset: {exc}") from exc
             if isinstance(payload, dict):
                 payload = [payload]
@@ -2420,36 +2534,113 @@ class Company:
         if not rows:
             raise ValueError("Dataset contains no data rows")
 
+        row_count = len(rows)
         columns = sorted({str(key) for row in rows for key in row})
         column_profiles: dict[str, object] = {}
         for column in columns:
             values = [row.get(column) for row in rows]
             type_counts: dict[str, int] = {}
             unique_values: set[str] = set()
+            value_types: list[str] = []
             for value in values:
                 value_type = self._profile_value_type(value)
+                value_types.append(value_type)
                 type_counts[value_type] = type_counts.get(value_type, 0) + 1
                 if value_type != "missing":
                     unique_values.add(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str))
             non_missing_types = sorted(key for key in type_counts if key != "missing")
-            column_profiles[column] = {
-                "missing": type_counts.get("missing", 0),
+            missing = type_counts.get("missing", 0)
+            non_missing = row_count - missing
+            numeric_values_excluded = sum(
+                value_type in {"integer", "number"}
+                and self._finite_numeric_value(value) is None
+                for value, value_type in zip(values, value_types)
+            )
+            item: dict[str, object] = {
+                "missing": missing,
+                "missing_rate": self._profile_rate(missing, row_count),
                 "unique_non_missing": len(unique_values),
+                "unique_rate": self._profile_rate(len(unique_values), non_missing),
                 "types": dict(sorted(type_counts.items())),
                 "mixed_types": len(non_missing_types) > 1,
+                "non_finite_numeric": type_counts.get("non_finite_number", 0),
+                "numeric_values_excluded": numeric_values_excluded,
             }
+            numeric_profile = self._numeric_profile(values, non_missing)
+            if numeric_profile is not None:
+                item["numeric"] = numeric_profile
+            column_profiles[column] = item
+
+        unknown_keys = [key for key in normalized_keys if key not in columns]
+        if unknown_keys:
+            raise ValueError(
+                "Unknown dataset key column: " + ", ".join(unknown_keys)
+            )
+        key_check: dict[str, object] = {
+            "configured": bool(normalized_keys),
+            "columns": normalized_keys,
+        }
+        if normalized_keys:
+            key_counts: dict[str, int] = {}
+            missing_key_rows = 0
+            for row in rows:
+                values = [row.get(key) for key in normalized_keys]
+                if any(self._profile_value_type(value) == "missing" for value in values):
+                    missing_key_rows += 1
+                    continue
+                token = json.dumps(
+                    values,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                )
+                key_counts[token] = key_counts.get(token, 0) + 1
+            complete_key_rows = row_count - missing_key_rows
+            duplicate_key_counts = [count for count in key_counts.values() if count > 1]
+            key_check.update({
+                "complete_rows": complete_key_rows,
+                "completeness_rate": self._profile_rate(complete_key_rows, row_count),
+                "missing_rows": missing_key_rows,
+                "distinct_complete_values": len(key_counts),
+                "uniqueness_rate": self._profile_rate(len(key_counts), complete_key_rows),
+                "duplicate_values": len(duplicate_key_counts),
+                "duplicate_rows": sum(duplicate_key_counts),
+            })
         canonical_rows = [json.dumps(row, sort_keys=True, ensure_ascii=False, default=str) for row in rows]
-        duplicate_rows = len(canonical_rows) - len(set(canonical_rows))
+        canonical_row_counts: dict[str, int] = {}
+        for canonical_row in canonical_rows:
+            canonical_row_counts[canonical_row] = canonical_row_counts.get(canonical_row, 0) + 1
+        duplicate_row_counts = [
+            count for count in canonical_row_counts.values() if count > 1
+        ]
+        duplicate_rows = sum(count - 1 for count in duplicate_row_counts)
+        duplicate_rows_affected = sum(duplicate_row_counts)
         quality_flags = {
             "duplicate_rows": duplicate_rows,
-            "all_missing_columns": [name for name, item in column_profiles.items() if item["missing"] == len(rows)],
+            "duplicate_row_groups": len(duplicate_row_counts),
+            "duplicate_rows_affected": duplicate_rows_affected,
+            "duplicate_row_rate": self._profile_rate(duplicate_rows_affected, row_count),
+            "all_missing_columns": [name for name, item in column_profiles.items() if item["missing"] == row_count],
             "mixed_type_columns": [name for name, item in column_profiles.items() if item["mixed_types"]],
+            "non_finite_numeric_columns": [
+                name for name, item in column_profiles.items()
+                if item["non_finite_numeric"]
+            ],
+            "numeric_values_excluded_columns": [
+                name for name, item in column_profiles.items()
+                if item["numeric_values_excluded"]
+            ],
             "truncated": truncated,
         }
+        if normalized_keys:
+            quality_flags["missing_key_rows"] = key_check["missing_rows"]
+            quality_flags["duplicate_key_rows"] = key_check["duplicate_rows"]
         if suffix == ".xlsx":
             quality_flags["formula_cells_ignored"] = formula_cells_ignored
             quality_flags["error_cells_ignored"] = error_cells_ignored
         profile: dict[str, object] = {
+            "schema": DATASET_PROFILE_SCHEMA,
             "source": str(source),
             "project": project_name,
             "sha256": digest,
@@ -2458,6 +2649,8 @@ class Company:
             "profiled_rows": len(rows),
             "column_count": len(columns),
             "columns": column_profiles,
+            "grain_assumption": "one parsed source record per profiled row",
+            "key_check": key_check,
             "quality_flags": quality_flags,
         }
         if sheet_name is not None:
@@ -2473,30 +2666,74 @@ class Company:
         brief_dir.mkdir(parents=True, exist_ok=True)
         brief_path = brief_dir / f"{dataset_id}.md"
         lines = [
-            "# Local Dataset Profile", "", f"Dataset ID: `{dataset_id}`", f"Project: {project_name}",
-            f"Source: `{source}`", f"SHA-256: `{digest}`", "",
-            f"Profiled rows: {len(rows)}{' (truncated)' if truncated else ''}",
-            f"Columns: {len(columns)}", f"Duplicate rows in profile: {duplicate_rows}", "", "## Columns", "",
+            "# Local Dataset Profile",
+            "",
+            f"Dataset ID: `{dataset_id}`",
+            f"Project: {project_name}",
+            f"Source: `{source}`",
+            f"SHA-256: `{digest}`",
         ]
         if sheet_name is not None:
-            lines[7:7] = [f"Sheet: `{sheet_name}`"]
+            lines.append(f"Sheet: `{sheet_name}`")
+        lines.extend([
+            "",
+            f"Profiled rows: {row_count}{' (truncated)' if truncated else ''}",
+            f"Columns: {len(columns)}",
+            "Grain assumption: one parsed source record per profiled row",
+            f"Declared key: {', '.join(normalized_keys) if normalized_keys else 'not configured'}",
+            "",
+            "## Columns",
+            "",
+        ])
         for name, item in column_profiles.items():
+            description = (
+                f"- **{name}**: missing={item['missing']} "
+                f"({float(item['missing_rate']):.2%}), "
+                f"unique_non_missing={item['unique_non_missing']} "
+                f"({float(item['unique_rate']):.2%}), "
+                f"types={json.dumps(item['types'], sort_keys=True)}, "
+                f"mixed_types={str(item['mixed_types']).lower()}"
+            )
+            if "numeric" in item:
+                description += ", numeric=" + json.dumps(item["numeric"], sort_keys=True)
+            lines.append(description)
+        lines.extend(["", "## Declared key check", ""])
+        if normalized_keys:
+            lines.extend([
+                f"- Complete key rows: {key_check['complete_rows']} "
+                f"({float(key_check['completeness_rate']):.2%})",
+                f"- Distinct complete key values: {key_check['distinct_complete_values']}",
+                f"- Complete-key uniqueness rate: {float(key_check['uniqueness_rate']):.2%}",
+                f"- Missing key rows: {key_check['missing_rows']}",
+                f"- Duplicate key values: {key_check['duplicate_values']}",
+                f"- Rows affected by duplicate keys: {key_check['duplicate_rows']}",
+            ])
+        else:
             lines.append(
-                f"- **{name}**: missing={item['missing']}, unique_non_missing={item['unique_non_missing']}, "
-                f"types={json.dumps(item['types'], sort_keys=True)}, mixed_types={str(item['mixed_types']).lower()}"
+                "- Not configured; no primary-key uniqueness or completeness claim was made."
             )
         lines.extend([
             "", "## Quality flags", "",
             f"- All-missing columns: {', '.join(quality_flags['all_missing_columns']) or 'none'}",
             f"- Mixed-type columns: {', '.join(quality_flags['mixed_type_columns']) or 'none'}",
-            f"- Duplicate rows: {duplicate_rows}", f"- Profile truncated: {str(truncated).lower()}", "",
-            "This brief contains statistics only. It does not copy source rows and does not modify the source file.",
+            f"- Non-finite numeric columns: {', '.join(quality_flags['non_finite_numeric_columns']) or 'none'}",
+            f"- Numeric-summary exclusions: {', '.join(quality_flags['numeric_values_excluded_columns']) or 'none'}",
+            f"- Duplicate row groups: {quality_flags['duplicate_row_groups']}",
+            f"- Excess duplicate rows: {duplicate_rows}",
+            f"- Rows affected by exact duplicates: {duplicate_rows_affected} "
+            f"({float(quality_flags['duplicate_row_rate']):.2%})",
+            f"- Profile truncated: {str(truncated).lower()}",
         ])
         if sheet_name is not None:
-            lines[-2:-2] = [
+            lines.extend([
                 f"- Formula cells ignored: {formula_cells_ignored}",
                 f"- Error cells ignored: {error_cells_ignored}",
-            ]
+            ])
+        lines.extend([
+            "",
+            "This brief contains aggregate statistics only. It does not copy source rows or modify the source file.",
+            "Business validity rules, required fields, date semantics, units, and freshness thresholds are not inferred; configure and review them for the intended use.",
+        ])
         brief_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         with closing(self._connect(immediate=True)) as db, db:
             db.execute(

@@ -293,7 +293,8 @@ modifying the source:
 .\local-company.cmd datasets add "C:\approved-data\sales.xlsx" `
   --project "Yangon Tyre" `
   --allow-root "C:\approved-data" `
-  --sheet "Sales"
+  --sheet "Sales" `
+  --key "invoice_id"
 .\local-company.cmd datasets list --project "Yangon Tyre"
 ```
 
@@ -305,8 +306,13 @@ profiled columns, and malformed relationships. It reads at most 10,000 data
 rows from one explicitly named sheet, or the first visible sheet. Formula and
 error cells are counted but ignored: formulas, macros, links, and cached formula
 results are never executed or treated as data. Generated briefs contain only
-statistics, not copied source rows. `--allow-root` is optional but available as
-the same containment check for CSV and JSON; `--sheet` is XLSX-only.
+statistics, not copied source rows. Profiles include missing and uniqueness
+rates, exact-duplicate impact, compact numeric min/quartile/median/max/mean,
+zero/negative rates, and IQR outlier counts. Repeat `--key` for a composite key
+to measure declared-grain completeness and uniqueness without storing key
+values. Business keys, required fields, units, date semantics, validity rules,
+and freshness limits are never guessed. `--allow-root` is optional but available
+as the same containment check for CSV and JSON; `--sheet` is XLSX-only.
 
 All runtime data stays under `.local-company` by default:
 

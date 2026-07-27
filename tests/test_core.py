@@ -3610,14 +3610,29 @@ class CompanyTests(unittest.TestCase):
             original = source.read_bytes()
             company = Company(root / "state", MockModel())
             company.create_project("Data Lab")
-            dataset_id, brief, profile = company.profile_dataset(source, "Data Lab")
+            dataset_id, brief, profile = company.profile_dataset(
+                source, "Data Lab", key_columns=["id"]
+            )
             self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(profile["schema"], "local-company.dataset-profile.v2")
             self.assertEqual(profile["profiled_rows"], 4)
             self.assertEqual(profile["quality_flags"]["duplicate_rows"], 1)
+            self.assertEqual(profile["quality_flags"]["duplicate_rows_affected"], 2)
+            self.assertEqual(profile["quality_flags"]["duplicate_row_rate"], 0.5)
             self.assertIn("value", profile["quality_flags"]["mixed_type_columns"])
             self.assertEqual(profile["columns"]["note"]["missing"], 1)
+            self.assertEqual(profile["columns"]["note"]["missing_rate"], 0.25)
+            self.assertEqual(profile["columns"]["value"]["numeric"]["count"], 2)
+            self.assertEqual(profile["columns"]["value"]["numeric"]["mean"], 10.5)
+            self.assertEqual(profile["columns"]["value"]["numeric"]["median"], 10.5)
+            self.assertEqual(
+                profile["columns"]["value"]["numeric"]["rate_of_non_missing"], 0.5
+            )
+            self.assertEqual(profile["key_check"]["duplicate_rows"], 2)
+            self.assertEqual(profile["key_check"]["uniqueness_rate"], 0.75)
             brief_text = brief.read_text(encoding="utf-8")
             self.assertIn("Mixed-type columns: value", brief_text)
+            self.assertIn("Rows affected by duplicate keys: 2", brief_text)
             self.assertNotIn("oops", brief_text)
             self.assertEqual(company.dataset_items("Data Lab")[0][0], dataset_id)
             self.assertTrue(company.search_knowledge("duplicate mixed type", project="Data Lab"))
@@ -3631,7 +3646,72 @@ class CompanyTests(unittest.TestCase):
             company.create_project("JSON Lab")
             dataset_id, _, profile = company.profile_dataset(source, "JSON Lab")
             self.assertEqual(profile["columns"]["active"]["types"], {"boolean": 2})
+            self.assertEqual(profile["columns"]["count"]["numeric"]["mean"], 1.5)
             self.assertEqual(company.dataset_detail(dataset_id)["project"], "JSON Lab")
+
+            invalid = root / "invalid.json"
+            invalid.write_text('[{"count": NaN}]', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-finite number"):
+                company.profile_dataset(invalid, "JSON Lab")
+
+    def test_dataset_numeric_profile_uses_iqr_and_explicit_composite_grain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "measures.csv"
+            source.write_text(
+                "region,id,amount\n"
+                "north,1,1\n"
+                "north,2,2\n"
+                "north,3,3\n"
+                "north,4,100\n"
+                "north,  ,5\n",
+                encoding="utf-8",
+            )
+            company = Company(root / "state", MockModel())
+            company.create_project("Measure Lab")
+            _, brief, profile = company.profile_dataset(
+                source,
+                "Measure Lab",
+                allowed_root=root,
+                key_columns=["region", "id"],
+            )
+
+            numeric = profile["columns"]["amount"]["numeric"]
+            self.assertEqual(numeric["minimum"], 1)
+            self.assertEqual(numeric["median"], 3)
+            self.assertEqual(numeric["maximum"], 100)
+            self.assertEqual(numeric["mean"], 22.2)
+            self.assertEqual(numeric["iqr_outlier_count"], 1)
+            self.assertEqual(numeric["iqr_outlier_rate"], 0.2)
+            self.assertEqual(profile["key_check"]["missing_rows"], 1)
+            self.assertEqual(profile["key_check"]["completeness_rate"], 0.8)
+            self.assertEqual(profile["key_check"]["uniqueness_rate"], 1.0)
+            brief_text = brief.read_text(encoding="utf-8")
+            self.assertIn("Declared key: region, id", brief_text)
+            self.assertIn("Complete key rows: 4 (80.00%)", brief_text)
+            self.assertNotIn("north", brief_text)
+
+    def test_dataset_non_finite_text_is_flagged_and_never_emitted_as_json_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "non-finite.csv"
+            source.write_text(
+                "value\nNaN\nInfinity\n-Infinity\n1\n", encoding="utf-8"
+            )
+            company = Company(root / "state", MockModel())
+            company.create_project("Finite Lab")
+            _, brief, profile = company.profile_dataset(source, "Finite Lab")
+
+            value_profile = profile["columns"]["value"]
+            self.assertEqual(value_profile["non_finite_numeric"], 3)
+            self.assertEqual(value_profile["numeric"]["count"], 1)
+            self.assertEqual(
+                profile["quality_flags"]["non_finite_numeric_columns"], ["value"]
+            )
+            json.dumps(profile, allow_nan=False)
+            brief_text = brief.read_text(encoding="utf-8")
+            self.assertIn("Non-finite numeric columns: value", brief_text)
+            self.assertNotIn("Infinity", brief_text)
 
     def test_quality_rejects_model_length_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

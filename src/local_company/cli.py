@@ -136,6 +136,12 @@ def parser() -> argparse.ArgumentParser:
         help="Constrain the source to this local directory; required for XLSX",
     )
     dataset_add.add_argument("--sheet", help="XLSX sheet name; defaults to the first visible sheet")
+    dataset_add.add_argument(
+        "--key",
+        action="append",
+        dest="key_columns",
+        help="Declare one key column for completeness/uniqueness checks; repeat for a composite key",
+    )
     dataset_list = dataset_sub.add_parser("list", help="List profiled datasets")
     dataset_list.add_argument("--project")
     dataset_show = dataset_sub.add_parser("show", help="Show one statistical profile")
@@ -333,6 +339,7 @@ def main() -> int:
                     args.project,
                     allowed_root=args.allow_root,
                     sheet=args.sheet,
+                    key_columns=args.key_columns,
                 )
                 print(
                     f"Dataset {dataset_id}: rows={profile['profiled_rows']}, columns={profile['column_count']}\n"

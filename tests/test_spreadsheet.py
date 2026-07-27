@@ -71,10 +71,13 @@ class SpreadsheetDatasetTests(unittest.TestCase):
                 "approved",
                 "--sheet",
                 "Sales",
+                "--key",
+                "name",
             ]
         )
         self.assertEqual(args.allow_root, Path("approved"))
         self.assertEqual(args.sheet, "Sales")
+        self.assertEqual(args.key_columns, ["name"])
 
     def test_xlsx_profile_is_allowlisted_read_only_and_formula_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,6 +95,7 @@ class SpreadsheetDatasetTests(unittest.TestCase):
                 "Spreadsheet Lab",
                 allowed_root=approved,
                 sheet="sales",
+                key_columns=["name"],
             )
 
             self.assertEqual(source.read_bytes(), original)
@@ -102,10 +106,15 @@ class SpreadsheetDatasetTests(unittest.TestCase):
             self.assertEqual(profile["quality_flags"]["formula_cells_ignored"], 1)
             self.assertEqual(profile["quality_flags"]["error_cells_ignored"], 1)
             self.assertEqual(profile["columns"]["amount"]["missing"], 1)
+            self.assertEqual(profile["columns"]["amount"]["missing_rate"], 0.333333)
             self.assertEqual(profile["columns"]["amount"]["types"], {"integer": 2, "missing": 1})
+            self.assertEqual(profile["columns"]["amount"]["numeric"]["mean"], 10)
+            self.assertEqual(profile["key_check"]["duplicate_rows"], 2)
+            self.assertEqual(profile["key_check"]["uniqueness_rate"], 0.666667)
             brief_text = brief.read_text(encoding="utf-8")
             self.assertIn("Sheet: `Sales`", brief_text)
             self.assertIn("Formula cells ignored: 1", brief_text)
+            self.assertIn("Rows affected by duplicate keys: 2", brief_text)
             self.assertNotIn("alpha", brief_text)
             self.assertNotIn("1+2", brief_text)
             self.assertEqual(company.dataset_detail(dataset_id)["profile"]["sheet"], "Sales")
@@ -129,6 +138,20 @@ class SpreadsheetDatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not found uniquely"):
                 company.profile_dataset(
                     source, "Guarded Data", allowed_root=approved, sheet="Missing"
+                )
+            with self.assertRaisesRegex(ValueError, "Unknown dataset key column"):
+                company.profile_dataset(
+                    source,
+                    "Guarded Data",
+                    allowed_root=approved,
+                    key_columns=["missing_key"],
+                )
+            with self.assertRaisesRegex(ValueError, "unique non-empty names"):
+                company.profile_dataset(
+                    source,
+                    "Guarded Data",
+                    allowed_root=approved,
+                    key_columns=["name", "Name"],
                 )
 
             unsafe = approved / "unsafe.xlsx"
