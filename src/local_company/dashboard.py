@@ -368,6 +368,13 @@ def render_mission_detail(company: Company, job_id: str) -> str:
             if failed else "<p>No automated gates failed.</p>"
         )
         conflicts = evaluation.get("source_conflicts", [])
+        incomplete_roles = evaluation.get("incomplete_specialist_roles", [])
+        incomplete_html = (
+            '<p class="warning"><strong>Degraded specialist output safely withheld:</strong> '
+            f'{cell(", ".join(incomplete_roles))}. This is visible but does not fail the '
+            'deterministic synthesis when the isolation proof is intact.</p>'
+            if incomplete_roles else ""
+        )
         conflict_html = ""
         if conflicts:
             conflict_html = "<h3>Source conflicts</h3>" + "".join(
@@ -385,7 +392,7 @@ def render_mission_detail(company: Company, job_id: str) -> str:
             f'Evidence manifest SHA-256: <code>{cell(evaluation.get("manifest_sha256", "legacy-unmanifested"))}</code></p>'
             '<p class="warning">This is a deterministic format, safety, and evidence-consistency screen. '
             'It is not factual, customer, production, or revenue verification.</p>'
-            f"<h3>Failed gates</h3>{failed_html}{conflict_html}"
+            f"{incomplete_html}<h3>Failed gates</h3>{failed_html}{conflict_html}"
         )
     else:
         quality_html = '<p class="warning">This report has not been evaluated.</p>'

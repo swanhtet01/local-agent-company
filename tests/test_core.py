@@ -29,7 +29,9 @@ from local_company.core import (
     source_limitation_conflicts,
     truncate_words,
 )
-from local_company.dashboard import LocalQueueWorker, create_dashboard_server, render_dashboard
+from local_company.dashboard import (
+    LocalQueueWorker, create_dashboard_server, render_dashboard, render_mission_detail,
+)
 from local_company.service import _read_state, _startup_lock, _write_state
 
 
@@ -87,6 +89,15 @@ class TruncatedModel(MockModel):
         result = super().complete(system, prompt)
         self.last_metrics = {"done_reason": "length", "output_tokens": 64}
         return result
+
+
+class OfflineOllamaModel(OllamaModel):
+    def cache_identity(self):
+        return {
+            "provider": "offline-test-ollama",
+            "implementation": type(self).__qualname__,
+            "num_predict": self.num_predict,
+        }
 
 
 class BlockingModel(MockModel):
@@ -426,6 +437,71 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(body["options"]["temperature"], 0.0)
         self.assertEqual(body["options"]["seed"], 42)
         self.assertEqual(model.last_metrics["done_reason"], "stop")
+
+    def test_ollama_bounded_completion_caps_only_that_request(self):
+        model = OllamaModel("qwen3.5:0.8b", num_predict=2048)
+        response_payload = {
+            "message": {"content": "bounded local draft"},
+            "done": True,
+            "done_reason": "stop", "eval_count": 4, "eval_duration": 1_000_000_000,
+            "total_duration": 2_000_000_000, "load_duration": 0,
+            "prompt_eval_count": 12,
+        }
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        plain_payload = {**response_payload, "message": {"content": "plain local draft"}}
+        structured_payload = {
+            **response_payload,
+            "message": {"content": json.dumps({"items": ["one"]})},
+        }
+        schema = {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+        model.opener = Mock()
+        model.opener.open.side_effect = [
+            Response(json.dumps(payload).encode())
+            for payload in (response_payload, plain_payload, structured_payload)
+        ]
+
+        self.assertEqual(
+            model.complete_bounded("system", "prompt", num_predict=512),
+            "bounded local draft",
+        )
+        self.assertEqual(model.last_metrics["num_predict"], 512)
+        self.assertEqual(model.complete("system", "prompt"), "plain local draft")
+        self.assertEqual(
+            model.complete_structured("system", "prompt", schema), {"items": ["one"]},
+        )
+        request_bodies = [
+            json.loads(call.args[0].data.decode("utf-8"))
+            for call in model.opener.open.call_args_list
+        ]
+        self.assertEqual(
+            [body["options"]["num_predict"] for body in request_bodies],
+            [512, 2048, 2048],
+        )
+        self.assertNotIn("format", request_bodies[0])
+        self.assertNotIn("format", request_bodies[1])
+        self.assertEqual(request_bodies[2]["format"], schema)
+        self.assertEqual(model.num_predict, 2048)
+        low_budget = OllamaModel("qwen3.5:0.8b", num_predict=256)
+        low_budget.opener = Mock()
+        for invalid in (True, 16, 512):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "configured limit"):
+                    low_budget.complete_bounded(
+                        "system", "prompt", num_predict=invalid,
+                    )
+        low_budget.opener.open.assert_not_called()
 
     def test_ollama_structured_completion_rejects_incomplete_or_invalid_json(self):
         schema = {
@@ -2418,20 +2494,106 @@ class CompanyTests(unittest.TestCase):
             self.assertFalse(evaluation["passed"])
             self.assertFalse(evaluation["checks"]["model_stopped_cleanly"])
 
-    def test_strict_quality_withholds_and_excludes_incomplete_specialist_draft(self):
-        class IncompleteSpecialistModel(MockModel):
+    def test_nonstrict_ollama_generation_keeps_the_configured_budget_path(self):
+        class RoutingOllamaModel(OfflineOllamaModel):
             def __init__(self):
-                self.last_metrics = {}
+                super().__init__("qwen3.5:0.8b", num_predict=2048)
+                self.complete_calls = 0
+                self.bounded_calls = 0
 
             def complete(self, system, prompt):
+                self.complete_calls += 1
                 self.last_metrics = {
-                    "done": True, "done_reason": "length", "output_tokens": 500,
+                    "done": True, "done_reason": "stop", "num_predict": self.num_predict,
                 }
-                return "Partial specialist text that must never enter trusted synthesis " * 20
+                return MockModel().complete(system, prompt)
+
+            def complete_bounded(self, system, prompt, *, num_predict):
+                self.bounded_calls += 1
+                return super().complete_bounded(
+                    system, prompt, num_predict=num_predict,
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = RoutingOllamaModel()
+            company = Company(Path(tmp), model)
+            company.run("Plan local inventory", roles=["operations"])
+            self.assertEqual(model.complete_calls, 2)
+            self.assertEqual(model.bounded_calls, 0)
+            self.assertNotIn(
+                "specialist_generation_policy",
+                {event[0] for event in company.job_detail(company.jobs()[0][0])["events"]},
+            )
+
+    def test_strict_bounded_transport_failure_records_policy_without_result_proof(self):
+        class FailingBoundedOllama(OfflineOllamaModel):
+            def __init__(self):
+                super().__init__("qwen3.5:0.8b", num_predict=256)
+                self.bounded_caps = []
+
+            def complete(self, system, prompt):
+                raise AssertionError("strict Ollama specialist must use bounded completion")
+
+            def complete_bounded(self, system, prompt, *, num_predict):
+                self.bounded_caps.append(num_predict)
+                raise RuntimeError("bounded transport failure")
+
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Every verified "
+            "claim must name its exact source filename and matching supplied evidence ID."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Hosted activation remains pending owner review.", encoding="utf-8",
+            )
+            model = FailingBoundedOllama()
+            company = Company(root / "state", model)
+            project = company.create_project("Bounded Transport Failure")
+            company.add_knowledge(source, project)
+            with self.assertRaisesRegex(RuntimeError, "bounded transport failure"):
+                company.run(objective, roles=["operations"], project=project)
+            self.assertEqual(model.bounded_caps, [256])
+            job_id = company.jobs()[0][0]
+            detail = company.job_detail(job_id)
+            self.assertEqual(detail["job"][2], "failed")
+            self.assertEqual(detail["assignments"][0][2], "failed")
+            kinds = [event[0] for event in detail["events"]]
+            self.assertIn("specialist_generation_policy", kinds)
+            self.assertNotIn("specialist_draft_isolated", kinds)
+            self.assertNotIn("model_metrics", kinds)
+            self.assertFalse(detail["report"])
+            policy = next(
+                json.loads(event[1]) for event in detail["events"]
+                if event[0] == "specialist_generation_policy"
+            )
+            self.assertEqual(policy["configured_num_predict"], 256)
+            self.assertEqual(policy["effective_num_predict"], 256)
+
+    def test_strict_quality_withholds_and_excludes_incomplete_specialist_draft(self):
+        class IncompleteSpecialistModel(OfflineOllamaModel):
+            def __init__(self):
+                super().__init__("qwen3.5:0.8b", num_predict=2048)
+                self.bounded_caps = []
+                self.structured_prompts = []
+
+            def complete(self, system, prompt):
+                raise AssertionError("strict Ollama specialist must use bounded completion")
+
+            def complete_bounded(self, system, prompt, *, num_predict):
+                self.bounded_caps.append(num_predict)
+                self.last_metrics = {
+                    "done": True, "done_reason": "length", "output_tokens": num_predict,
+                    "num_predict": num_predict,
+                }
+                return "UNTRUSTED_RAW_PARTIAL must never enter trusted synthesis " * 20
 
             def complete_structured(self, system, prompt, schema):
+                self.structured_prompts.append(prompt)
                 self.last_metrics = {
                     "done": True, "done_reason": "stop", "output_tokens": 60,
+                    "num_predict": self.num_predict,
                 }
                 return {
                     "task_templates": [
@@ -2460,15 +2622,24 @@ class CompanyTests(unittest.TestCase):
             source.write_text(
                 "Hosted activation remains pending owner review.", encoding="utf-8",
             )
-            company = Company(root / "state", IncompleteSpecialistModel())
+            model = IncompleteSpecialistModel()
+            company = Company(root / "state", model)
             project = company.create_project("Incomplete Isolation")
             company.add_knowledge(source, project)
-            job_id, _ = company.run(objective, roles=["operations"], project=project)
+            job_id, report_path = company.run(
+                objective, roles=["operations"], project=project,
+            )
             evaluation = company.evaluate_job(job_id)
             self.assertTrue(evaluation["passed"], {
                 key: value for key, value in evaluation["checks"].items() if not value
             })
             self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
+            self.assertEqual(evaluation["incomplete_specialist_roles"], ["operations"])
+            self.assertEqual(model.bounded_caps, [512])
+            self.assertNotIn("UNTRUSTED_RAW_PARTIAL", model.structured_prompts[0])
+            self.assertNotIn(
+                "UNTRUSTED_RAW_PARTIAL", report_path.read_text(encoding="utf-8"),
+            )
             with closing(sqlite3.connect(company.db_path)) as db:
                 result = db.execute(
                     "SELECT result FROM assignments WHERE job_id=?", (job_id,),
@@ -2479,16 +2650,46 @@ class CompanyTests(unittest.TestCase):
                 if event[0] == "specialist_draft_isolated"
             ]
             self.assertEqual(isolated[0]["status"], "incomplete_withheld")
+            metrics = [
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "model_metrics"
+            ]
+            operations_metrics = next(
+                metric for metric in metrics if metric.get("stage") == "operations"
+            )
+            self.assertEqual(operations_metrics["num_predict"], 512)
+            self.assertEqual(operations_metrics["done_reason"], "length")
+            policy_events = [
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "specialist_generation_policy"
+            ]
+            self.assertEqual(policy_events, [{
+                "configured_num_predict": 2048,
+                "effective_num_predict": 512,
+                "policy": "strict-bounded-v1",
+                "role": "operations",
+            }])
+            projected = company.job_detail(job_id)["evaluation"]
+            self.assertEqual(projected["incomplete_specialist_roles"], ["operations"])
+            mission_page = render_mission_detail(company, job_id)
+            self.assertIn("Degraded specialist output safely withheld", mission_page)
+            self.assertIn("operations", mission_page)
 
     def test_strict_resume_rebinds_legacy_incomplete_specialist_draft(self):
-        class LegacyIncompleteModel(MockModel):
+        class LegacyIncompleteModel(OfflineOllamaModel):
             def __init__(self):
-                self.last_metrics = {}
+                super().__init__("qwen3.5:0.8b", num_predict=2048)
                 self.fail_structured = True
+                self.bounded_calls = 0
 
             def complete(self, system, prompt):
+                raise AssertionError("strict Ollama specialist must use bounded completion")
+
+            def complete_bounded(self, system, prompt, *, num_predict):
+                self.bounded_calls += 1
                 self.last_metrics = {
-                    "done": True, "done_reason": "length", "output_tokens": 500,
+                    "done": True, "done_reason": "length", "output_tokens": num_predict,
+                    "num_predict": num_predict,
                 }
                 return "Legacy partial claim that must be withheld on recovery."
 
@@ -2544,6 +2745,7 @@ class CompanyTests(unittest.TestCase):
             model.fail_structured = False
             resumed_id, _ = company.resume(job_id)
             self.assertEqual(resumed_id, job_id)
+            self.assertEqual(model.bounded_calls, 1)
             evaluation = company.evaluate_job(job_id)
             self.assertTrue(evaluation["passed"], {
                 key: value for key, value in evaluation["checks"].items() if not value
@@ -3202,6 +3404,60 @@ class CompanyTests(unittest.TestCase):
                 evaluation = company.evaluate_job(job_id)
                 self.assertEqual(evaluation["checks"]["verified_facts_cited"], expected)
                 self.assertEqual(evaluation["passed"], expected)
+
+    def test_job_detail_sanitizes_malformed_quality_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, _ = company.run("Plan local inventory", roles=["operations"])
+            durable_findings = {
+                "incomplete_specialist_roles": ["operations", 7, "<script>"],
+                "manifest_reason": ["invalid nested value"],
+                "source_conflicts": [
+                    {
+                        "claim": "A bounded local claim",
+                        "limitation": "The capability remains pending.",
+                        "source": "alpha.md",
+                    },
+                    "invalid conflict",
+                ],
+            }
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE evaluation_history SET findings_json=? WHERE id=("
+                    "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
+                    (json.dumps(durable_findings), job_id),
+                )
+                company._event(
+                    db, job_id, "quality_evaluated",
+                    json.dumps({
+                        "incomplete_specialist_roles": "operations",
+                        "source_conflicts": "invalid",
+                    }),
+                )
+                company._event(db, job_id, "quality_evaluated", "[]")
+                company._event(db, job_id, "quality_evaluated", "{malformed")
+
+            detail = company.job_detail(job_id)
+            self.assertEqual(
+                detail["evaluation"]["incomplete_specialist_roles"], ["operations"],
+            )
+            self.assertEqual(len(detail["evaluation"]["source_conflicts"]), 1)
+            self.assertIsNone(detail["evaluation"]["manifest_reason"])
+            page = render_mission_detail(company, job_id)
+            self.assertIn("Degraded specialist output safely withheld", page)
+            self.assertIn("A bounded local claim", page)
+            self.assertNotIn("&lt;script&gt;", page)
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE evaluation_history SET findings_json='[]' WHERE id=("
+                    "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
+                    (job_id,),
+                )
+            fallback = company.job_detail(job_id)["evaluation"]
+            self.assertEqual(fallback["incomplete_specialist_roles"], [])
+            self.assertEqual(fallback["source_conflicts"], [])
+            render_mission_detail(company, job_id)
 
     def test_dashboard_can_recheck_completed_job_quality(self):
         objective = (

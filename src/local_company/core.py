@@ -104,9 +104,10 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.5"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.3"
+EVALUATOR_VERSION = "local-quality-2026-07-27.6"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.4"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
+STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
 
 
 def count_words(text: str) -> int:
@@ -876,15 +877,21 @@ class OllamaModel:
 
     def _chat(
         self, system: str, prompt: str, format_schema: dict[str, object] | None = None,
+        *, num_predict_override: int | None = None,
     ) -> str:
         self.last_metrics = {}
+        effective_num_predict = (
+            self.num_predict
+            if num_predict_override is None
+            else min(self.num_predict, num_predict_override)
+        )
         request_payload: dict[str, object] = {
             "model": self.model,
             "stream": False,
             "think": False,
             "keep_alive": self.keep_alive,
             "options": {
-                "num_ctx": self.num_ctx, "num_predict": self.num_predict,
+                "num_ctx": self.num_ctx, "num_predict": effective_num_predict,
                 "temperature": self.temperature, "seed": self.seed,
             },
             "messages": [
@@ -910,6 +917,7 @@ class OllamaModel:
             "load_seconds": round(int(payload.get("load_duration", 0)) / 1_000_000_000, 3),
             "prompt_tokens": int(payload.get("prompt_eval_count", 0)),
             "output_tokens": eval_count,
+            "num_predict": effective_num_predict,
             "tokens_per_second": round(eval_count / (eval_duration / 1_000_000_000), 2) if eval_duration else 0.0,
             "done_reason": str(payload.get("done_reason", "")),
             "done": bool(payload.get("done", False)),
@@ -922,6 +930,18 @@ class OllamaModel:
 
     def complete(self, system: str, prompt: str) -> str:
         return self._chat(system, prompt)
+
+    def complete_bounded(self, system: str, prompt: str, *, num_predict: int) -> str:
+        if (
+            isinstance(num_predict, bool)
+            or not isinstance(num_predict, int)
+            or num_predict < 32
+            or num_predict > self.num_predict
+        ):
+            raise ValueError(
+                "bounded num_predict must be an integer between 32 and the configured limit"
+            )
+        return self._chat(system, prompt, num_predict_override=num_predict)
 
     def complete_structured(
         self, system: str, prompt: str, schema: dict[str, object],
@@ -2698,6 +2718,7 @@ class Company:
             if isinstance(metric, dict):
                 parsed_metrics.append(metric)
         isolated_event_roles: set[str] = set()
+        incomplete_event_roles: set[str] = set()
         for detail in isolation_details:
             try:
                 isolated = json.loads(detail)
@@ -2712,12 +2733,17 @@ class Company:
                 and isinstance(isolated.get("role"), str)
             ):
                 isolated_event_roles.add(isolated["role"])
+                if isolated["status"] == "incomplete_withheld":
+                    incomplete_event_roles.add(isolated["role"])
         isolated_assignment_roles = {
             role for role, status, result in assignment_rows
             if status == "complete"
             and result.startswith("Not verified or performed:")
         }
         safely_isolated_roles = isolated_event_roles & isolated_assignment_roles
+        incomplete_specialist_roles = sorted(
+            incomplete_event_roles & isolated_assignment_roles
+        )
         relevant_metrics = [
             metric for metric in parsed_metrics
             if (
@@ -2941,7 +2967,11 @@ class Company:
                 (
                     job_id, int(passed), score, json.dumps(checks, sort_keys=True),
                     json.dumps(
-                        {"manifest_reason": manifest_reason, "source_conflicts": source_conflicts},
+                        {
+                            "incomplete_specialist_roles": incomplete_specialist_roles,
+                            "manifest_reason": manifest_reason,
+                            "source_conflicts": source_conflicts,
+                        },
                         sort_keys=True,
                     ),
                     EVALUATOR_VERSION, current_report_sha256, job[5], evaluated_at,
@@ -2956,6 +2986,7 @@ class Company:
                 "evaluator_version": EVALUATOR_VERSION,
                 "report_sha256": current_report_sha256,
                 "manifest_sha256": job[5], "manifest_reason": manifest_reason,
+                "incomplete_specialist_roles": incomplete_specialist_roles,
             }
             if source_conflicts:
                 quality_detail["source_conflicts"] = source_conflicts
@@ -2991,6 +3022,7 @@ class Company:
         return {
             "job_id": job_id, "passed": passed, "score": score, "checks": checks,
             "source_conflicts": source_conflicts, "evaluator_version": EVALUATOR_VERSION,
+            "incomplete_specialist_roles": incomplete_specialist_roles,
             "report_sha256": current_report_sha256, "manifest_sha256": job[5],
             "manifest_reason": manifest_reason, "evaluated_at": evaluated_at,
             "evaluation_history_id": history_cursor.lastrowid,
@@ -3046,6 +3078,7 @@ class Company:
                 "objective": objective,
                 "project_id": project_id,
                 "execution_fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
+                "strict_specialist_num_predict_cap": STRICT_SPECIALIST_NUM_PREDICT_CAP,
                 "runtime": runtime_identity or {
                     "uncacheable": f"{type(self.model).__module__}.{type(self.model).__qualname__}"
                 },
@@ -3297,6 +3330,11 @@ class Company:
                 if item.role in completed_roles:
                     continue
                 current_role = item.role
+                strict_specialist_num_predict = (
+                    min(STRICT_SPECIALIST_NUM_PREDICT_CAP, self.model.num_predict)
+                    if strict_evidence_pairs_required and isinstance(self.model, OllamaModel)
+                    else None
+                )
                 with closing(self._connect()) as db, db:
                     lease_active = self._renew_execution_lease(
                         db, job_id, run_token, f"{item.role}:start",
@@ -3307,6 +3345,19 @@ class Company:
                             (job_id, item.role),
                         )
                         self._event(db, job_id, "assignment_started", item.role)
+                        if strict_specialist_num_predict is not None:
+                            self._event(
+                                db, job_id, "specialist_generation_policy",
+                                json.dumps(
+                                    {
+                                        "configured_num_predict": self.model.num_predict,
+                                        "effective_num_predict": strict_specialist_num_predict,
+                                        "policy": "strict-bounded-v1",
+                                        "role": item.role,
+                                    },
+                                    sort_keys=True,
+                                ),
+                            )
                 if not lease_active:
                     raise ExecutionLeaseLost(
                         f"Execution lease for job {job_id} was recovered or superseded"
@@ -3335,7 +3386,14 @@ class Company:
                         f"COMPLETED {prior.role} WORK\n{result}" for prior, result in results
                     ], 12_000)
                     prompt += f"\n\nEarlier team work to build on or challenge:\n{prior_work}"
-                result = self.model.complete(system, prompt)
+                if strict_specialist_num_predict is not None:
+                    result = self.model.complete_bounded(
+                        system,
+                        prompt,
+                        num_predict=strict_specialist_num_predict,
+                    )
+                else:
+                    result = self.model.complete(system, prompt)
                 original_word_count = count_words(result)
                 result_trimmed = False
                 applied_word_limit = specialist_word_limit
@@ -4021,6 +4079,11 @@ class Company:
                 "SELECT passed, score, evaluator_version, report_sha256, manifest_sha256, evaluated_at "
                 "FROM evaluation_history WHERE job_id=? ORDER BY id DESC LIMIT 20", (job_id,),
             ))
+            latest_findings_row = db.execute(
+                "SELECT findings_json FROM evaluation_history WHERE job_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
         evaluation = None
         if evaluation_row:
             evaluation = {
@@ -4031,16 +4094,49 @@ class Company:
                 evaluation["evaluator_version"] = evaluation_history[0][2]
                 evaluation["report_sha256"] = evaluation_history[0][3]
                 evaluation["manifest_sha256"] = evaluation_history[0][4]
-            for kind, detail, _ in reversed(events):
-                if kind != "quality_evaluated":
-                    continue
+
+            assignment_roles = {row[1] for row in assignments}
+
+            def project_findings(payload: object) -> bool:
+                if not isinstance(payload, dict):
+                    return False
+                raw_conflicts = payload.get("source_conflicts", [])
+                evaluation["source_conflicts"] = (
+                    [item for item in raw_conflicts if isinstance(item, dict)]
+                    if isinstance(raw_conflicts, list) else []
+                )
+                manifest_reason = payload.get("manifest_reason")
+                evaluation["manifest_reason"] = (
+                    manifest_reason if isinstance(manifest_reason, str) else None
+                )
+                incomplete_roles = payload.get("incomplete_specialist_roles", [])
+                evaluation["incomplete_specialist_roles"] = (
+                    sorted({
+                        role for role in incomplete_roles
+                        if isinstance(role, str) and role in assignment_roles
+                    })
+                    if isinstance(incomplete_roles, list) else []
+                )
+                return True
+
+            findings_projected = False
+            if latest_findings_row:
                 try:
-                    quality_detail = json.loads(detail)
+                    findings_projected = project_findings(
+                        json.loads(latest_findings_row[0])
+                    )
                 except json.JSONDecodeError:
-                    break
-                evaluation["source_conflicts"] = quality_detail.get("source_conflicts", [])
-                evaluation["manifest_reason"] = quality_detail.get("manifest_reason")
-                break
+                    pass
+            if not findings_projected:
+                for kind, detail, _ in reversed(events):
+                    if kind != "quality_evaluated":
+                        continue
+                    try:
+                        quality_detail = json.loads(detail)
+                    except json.JSONDecodeError:
+                        continue
+                    if project_findings(quality_detail):
+                        break
 
         report = ""
         report_error = ""
