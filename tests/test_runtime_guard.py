@@ -2,7 +2,10 @@ import contextlib
 import errno
 import io
 import json
+import os
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,6 +51,26 @@ def _locked_arguments(home: Path) -> dict[str, object]:
         "ollama_executable": None,
         "allow_job_inheritance": False,
     }
+
+
+def _ready_guard_result(*changes: str) -> dict[str, object]:
+    return guard._payload(
+        status="recovered" if changes else "ready",
+        ready=True,
+        components={
+            "company_store": "valid",
+            "disk_manifest": "valid",
+            "service": "live",
+            "process_identity": "match",
+            "ollama": "reachable",
+            "model": "installed",
+            "readiness": "ready",
+        },
+        blockers=[],
+        action="none",
+        changes=list(changes),
+        model=MODEL,
+    )
 
 
 class RuntimeGuardTests(unittest.TestCase):
@@ -664,6 +687,235 @@ class RuntimeGuardTests(unittest.TestCase):
                 guard._spawn_ollama(executable)
         strict_popen.assert_called_once()
 
+    def test_opt_in_result_journal_is_fixed_matches_stdout_and_uses_mode_0600(self):
+        result = _ready_guard_result()
+        real_open = os.open
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name)
+        with patch(
+            "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+        ), patch(
+            "scripts.runtime_guard._guard_locked", return_value=(result, 0),
+        ), patch(
+            "scripts.runtime_guard.os.open", wraps=real_open,
+        ) as open_spy, contextlib.redirect_stdout(
+            stdout := io.StringIO()
+        ), contextlib.redirect_stderr(stderr := io.StringIO()):
+            code = guard.main(["--home", temporary.name, "--record-result"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        target = home / guard.RESULT_JOURNAL_NAME
+        self.assertEqual(target.name, "runtime-guard-last.json")
+        self.assertEqual(target.read_bytes(), stdout.getvalue().encode("utf-8"))
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), result)
+        metadata = target.lstat()
+        self.assertTrue(stat.S_ISREG(metadata.st_mode))
+        self.assertEqual(metadata.st_nlink, 1)
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
+        temporary_opens = [
+            call for call in open_spy.call_args_list
+            if Path(call.args[0]).name.startswith(
+                f".{guard.RESULT_JOURNAL_NAME}.",
+            )
+        ]
+        self.assertEqual(len(temporary_opens), 1)
+        self.assertEqual(temporary_opens[0].args[2], 0o600)
+        self.assertEqual(list(home.glob("runtime-guard-*.json")), [target])
+        self.assertEqual(list(home.glob(f".{guard.RESULT_JOURNAL_NAME}.*.tmp")), [])
+
+    def test_binary_stdout_is_lf_only_and_exactly_matches_recorded_journal(self):
+        child_source = """
+import contextlib
+import sys
+from pathlib import Path
+from scripts import runtime_guard as guard
+
+home = Path(sys.argv[1])
+identity = {
+    "schema": "local-company.store.v1",
+    "instance_id": "123e4567e89b42d3a456426614174000",
+}
+result = guard._payload(
+    status="ready",
+    ready=True,
+    components={
+        "company_store": "valid",
+        "disk_manifest": "valid",
+        "service": "live",
+        "process_identity": "match",
+        "ollama": "reachable",
+        "model": "installed",
+        "readiness": "ready",
+    },
+    blockers=[],
+    action="none",
+    changes=[],
+    model="qwen3.5:0.8b",
+)
+guard.read_company_identity = lambda selected_home: identity
+guard._runtime_guard_lock = lambda selected_home: contextlib.nullcontext()
+guard._guard_locked = lambda *args, **kwargs: (result, 0)
+raise SystemExit(guard.main([
+    "--home", str(home), "--record-result", "--wait-seconds", "1",
+]))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [sys.executable, "-c", child_source, tmp],
+                cwd=guard.PROJECT_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            journal = Path(tmp) / guard.RESULT_JOURNAL_NAME
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode(
+                "utf-8", errors="replace",
+            ))
+            self.assertEqual(completed.stderr, b"")
+            self.assertEqual(completed.stdout.count(b"\n"), 1)
+            self.assertTrue(completed.stdout.endswith(b"\n"))
+            self.assertNotIn(b"\r", completed.stdout)
+            self.assertEqual(completed.stdout, journal.read_bytes())
+            payload = json.loads(completed.stdout.decode("utf-8", errors="strict"))
+            self.assertTrue(payload["ready"])
+            self.assertEqual(payload["status"], "ready")
+
+    def test_default_and_untrusted_outcomes_do_not_write_result_journal(self):
+        result = _ready_guard_result()
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+        ), patch(
+            "scripts.runtime_guard._runtime_guard_lock",
+            return_value=contextlib.nullcontext(),
+        ), patch(
+            "scripts.runtime_guard._guard_locked", return_value=(result, 0),
+        ), patch("scripts.runtime_guard._write_result_journal") as journal:
+            payload, code = guard.guard_once(Path(tmp))
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, result)
+        journal.assert_not_called()
+        self.assertFalse((Path(tmp) / guard.RESULT_JOURNAL_NAME).exists())
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.runtime_guard.read_company_identity", return_value=None,
+        ), patch("scripts.runtime_guard._runtime_guard_lock") as lock, patch(
+            "scripts.runtime_guard._write_result_journal",
+        ) as journal:
+            payload, code = guard.guard_once(Path(tmp), record_result=True)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["blockers"], ["company_store_invalid"])
+        lock.assert_not_called()
+        journal.assert_not_called()
+        self.assertFalse((Path(tmp) / guard.RESULT_JOURNAL_NAME).exists())
+
+        lifecycle_failures = (
+            (guard.GuardBusyError("SENTINEL busy"), 1, "runtime_guard_busy"),
+            (guard.GuardLockError("SENTINEL lock"), 2, "runtime_guard_lock_invalid"),
+        )
+        for failure, expected_code, blocker in lifecycle_failures:
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp, patch(
+                "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+            ), patch(
+                "scripts.runtime_guard._runtime_guard_lock", side_effect=failure,
+            ), patch("scripts.runtime_guard._write_result_journal") as journal:
+                payload, code = guard.guard_once(Path(tmp), record_result=True)
+            self.assertEqual(code, expected_code)
+            self.assertEqual(payload["blockers"], [blocker])
+            journal.assert_not_called()
+            self.assertFalse((Path(tmp) / guard.RESULT_JOURNAL_NAME).exists())
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+        ), patch(
+            "scripts.runtime_guard._runtime_guard_lock",
+            return_value=contextlib.nullcontext(),
+        ), patch(
+            "scripts.runtime_guard._guard_locked", return_value=(result, 0),
+        ), patch(
+            "scripts.runtime_guard._store_unchanged", return_value=False,
+        ), patch("scripts.runtime_guard._write_result_journal") as journal:
+            payload, code = guard.guard_once(Path(tmp), record_result=True)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["blockers"], ["company_store_changed"])
+        self.assertEqual(payload["components"]["company_store"], "changed")
+        journal.assert_not_called()
+        self.assertFalse((Path(tmp) / guard.RESULT_JOURNAL_NAME).exists())
+
+    def test_atomic_replace_failure_preserves_old_journal_and_completed_changes(self):
+        result = _ready_guard_result("ollama_started", "service_started")
+        old_bytes = b'{"old":"journal-sentinel"}\n'
+        failure = OSError("SENTINEL C:/private/replace failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            target = home / guard.RESULT_JOURNAL_NAME
+            target.write_bytes(old_bytes)
+            with patch(
+                "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+            ), patch(
+                "scripts.runtime_guard._guard_locked", return_value=(result, 0),
+            ), patch(
+                "scripts.runtime_guard.os.replace", side_effect=failure,
+            ), contextlib.redirect_stdout(
+                stdout := io.StringIO()
+            ), contextlib.redirect_stderr(stderr := io.StringIO()):
+                code = guard.main(["--home", tmp, "--record-result"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(stderr.getvalue(), "")
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ready"])
+            self.assertEqual(payload["status"], "indeterminate")
+            self.assertEqual(payload["blockers"], ["result_journal_write_failed"])
+            self.assertEqual(payload["action"], "inspect_runtime_guard")
+            self.assertEqual(
+                payload["changes"], ["ollama_started", "service_started"],
+            )
+            self.assertEqual(target.read_bytes(), old_bytes)
+            self.assertEqual(
+                list(home.glob(f".{guard.RESULT_JOURNAL_NAME}.*.tmp")), [],
+            )
+            self.assertNotIn("SENTINEL", stdout.getvalue())
+            self.assertNotIn("private", stdout.getvalue().lower())
+            self.assertLess(len(stdout.getvalue().encode("utf-8")), 2048)
+
+    def test_hardlinked_result_destination_is_refused_without_write_through(self):
+        result = _ready_guard_result("service_started")
+        old_bytes = b"external-journal-sentinel\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            external = home / "external-sentinel.bin"
+            target = home / guard.RESULT_JOURNAL_NAME
+            external.write_bytes(old_bytes)
+            try:
+                os.link(external, target)
+            except OSError as exc:
+                self.skipTest(f"hardlinks unavailable: {exc}")
+            self.assertEqual(target.stat().st_nlink, 2)
+            with patch(
+                "scripts.runtime_guard.read_company_identity", return_value=IDENTITY,
+            ), patch(
+                "scripts.runtime_guard._guard_locked", return_value=(result, 0),
+            ), contextlib.redirect_stdout(
+                stdout := io.StringIO()
+            ), contextlib.redirect_stderr(stderr := io.StringIO()):
+                code = guard.main(["--home", tmp, "--record-result"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(stderr.getvalue(), "")
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["blockers"], ["result_journal_write_failed"])
+            self.assertEqual(payload["changes"], ["service_started"])
+            self.assertEqual(external.read_bytes(), old_bytes)
+            self.assertEqual(target.read_bytes(), old_bytes)
+            self.assertTrue(os.path.samefile(external, target))
+            self.assertEqual(
+                list(home.glob(f".{guard.RESULT_JOURNAL_NAME}.*.tmp")), [],
+            )
+
     def test_cli_json_is_allowlisted_bounded_and_sanitized(self):
         secret = "SENTINEL-C:/private/service-token"
         raw_service = _live_service_result(
@@ -713,9 +965,12 @@ class RuntimeGuardTests(unittest.TestCase):
         cases = (
             (["--unknown", "C:/private/SENTINEL"], 3, "invalid_arguments"),
             (["--model", "C:/private/SENTINEL"], 3, "invalid_arguments"),
+            (["--result-path", "C:/private/SENTINEL"], 3, "invalid_arguments"),
         )
         for argv, expected_code, blocker in cases:
-            with self.subTest(argv=argv), contextlib.redirect_stdout(
+            with self.subTest(argv=argv), patch(
+                "scripts.runtime_guard._write_result_journal",
+            ) as journal, contextlib.redirect_stdout(
                 stdout := io.StringIO()
             ), contextlib.redirect_stderr(stderr := io.StringIO()):
                 code = guard.main(argv)
@@ -725,6 +980,7 @@ class RuntimeGuardTests(unittest.TestCase):
             self.assertNotIn("SENTINEL", stdout.getvalue())
             self.assertNotIn("private", stdout.getvalue().lower())
             self.assertLess(len(stdout.getvalue().encode("utf-8")), 2048)
+            journal.assert_not_called()
 
         with patch(
             "scripts.runtime_guard.guard_once",

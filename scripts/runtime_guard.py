@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -46,6 +47,8 @@ else:
 
 
 GUARD_SCHEMA = "local-company.runtime-guard.v1"
+RESULT_JOURNAL_NAME = "runtime-guard-last.json"
+MAX_RENDERED_RESULT_BYTES = 2048
 KNOWN_PROCESS_RELATIONS = {
     "match", "mismatch", "absent", "unavailable", "legacy",
 }
@@ -81,6 +84,14 @@ class GuardLockError(RuntimeError):
 
 
 class GuardExecutableError(RuntimeError):
+    pass
+
+
+class GuardResultJournalError(RuntimeError):
+    pass
+
+
+class GuardStoreChangedError(RuntimeError):
     pass
 
 
@@ -142,6 +153,221 @@ def _valid_store_identity(identity: object) -> bool:
         and type(identity.get("instance_id")) is str
         and re.fullmatch(r"[0-9a-f]{32}", identity["instance_id"])
     )
+
+
+def _normalized_company_home(home: Path) -> Path:
+    candidate = Path(home).expanduser()
+    raw = str(candidate)
+    if os.name == "nt":
+        windows_raw = raw.replace("/", "\\")
+        if windows_raw.startswith(("\\\\", "\\?\\", "\\.\\", "\\??\\")):
+            raise CompanyIdentityError("nonlocal_home")
+        if candidate.drive and not candidate.root:
+            raise CompanyIdentityError("unsafe_home")
+        if candidate.root and not candidate.drive:
+            raise CompanyIdentityError("unsafe_home")
+    return Path(os.path.abspath(os.fspath(candidate)))
+
+
+def _safe_result_parts(
+    result: object,
+) -> tuple[dict[str, str], list[str]]:
+    components = _empty_components()
+    changes: list[str] = []
+    if not isinstance(result, dict):
+        return components, changes
+    raw_components = result.get("components")
+    if (
+        isinstance(raw_components, dict)
+        and set(raw_components) == set(components)
+        and all(
+            type(value) is str
+            and re.fullmatch(r"[a-z][a-z_]{0,39}", value) is not None
+            for value in raw_components.values()
+        )
+    ):
+        components = dict(raw_components)
+    raw_changes = result.get("changes")
+    if isinstance(raw_changes, list):
+        changes = [
+            value for value in raw_changes
+            if value in {"ollama_started", "service_started"}
+        ][:2]
+    return components, list(dict.fromkeys(changes))
+
+
+def _result_journal_failure(
+    result: object, model: str,
+) -> tuple[dict[str, object], int]:
+    components, changes = _safe_result_parts(result)
+    return _payload(
+        status="indeterminate", ready=False, components=components,
+        blockers=["result_journal_write_failed"], action="inspect_runtime_guard",
+        changes=changes, model=model,
+    ), 2
+
+
+def _store_changed_after_result(
+    result: object, model: str,
+) -> tuple[dict[str, object], int]:
+    components, changes = _safe_result_parts(result)
+    components["company_store"] = "changed"
+    return _payload(
+        status="indeterminate", ready=False, components=components,
+        blockers=["company_store_changed"], action="inspect_company_store",
+        changes=changes, model=model,
+    ), 2
+
+
+def _render_result(result: object) -> bytes:
+    expected_keys = {
+        "schema", "status", "ready", "components", "blockers", "action",
+        "changes", "required_model", "missions_started", "models_pulled",
+    }
+    if not isinstance(result, dict) or set(result) != expected_keys:
+        raise GuardResultJournalError("invalid result payload")
+    components = result.get("components")
+    blockers = result.get("blockers")
+    changes = result.get("changes")
+    required_model = result.get("required_model")
+    if (
+        result.get("schema") != GUARD_SCHEMA
+        or result.get("status") not in {
+            "ready", "recovered", "action_required", "indeterminate",
+        }
+        or type(result.get("ready")) is not bool
+        or not isinstance(components, dict)
+        or set(components) != set(_empty_components())
+        or any(
+            type(value) is not str
+            or re.fullmatch(r"[a-z][a-z_]{0,39}", value) is None
+            for value in components.values()
+        )
+        or not isinstance(blockers, list) or len(blockers) > 16
+        or any(
+            type(value) is not str
+            or re.fullmatch(r"[a-z][a-z_]{0,63}", value) is None
+            for value in blockers
+        )
+        or type(result.get("action")) is not str
+        or re.fullmatch(r"[a-z][a-z_]{0,63}", result["action"]) is None
+        or not isinstance(changes, list) or len(changes) > 2
+        or any(value not in {"ollama_started", "service_started"} for value in changes)
+        or not (required_model is None or _valid_model_name(required_model))
+        or result.get("missions_started") != 0
+        or result.get("models_pulled") != 0
+    ):
+        raise GuardResultJournalError("invalid result payload")
+    try:
+        rendered = (
+            json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise GuardResultJournalError("invalid result payload") from exc
+    if len(rendered) > MAX_RENDERED_RESULT_BYTES:
+        raise GuardResultJournalError("result payload is too large")
+    return rendered
+
+
+def _write_stdout(rendered: bytes) -> None:
+    binary = getattr(sys.stdout, "buffer", None)
+    if binary is not None:
+        binary.write(rendered)
+        binary.flush()
+        return
+    sys.stdout.write(rendered.decode("utf-8", errors="strict"))
+    sys.stdout.flush()
+
+
+def _record_metadata(path: Path) -> os.stat_result | None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if (
+        _is_link_or_reparse_metadata(metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise GuardResultJournalError("unsafe result journal")
+    return metadata
+
+
+def _same_record(metadata: os.stat_result, current: os.stat_result) -> bool:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns,
+    ) == (
+        current.st_dev, current.st_ino, current.st_mode, current.st_nlink,
+        current.st_size, current.st_mtime_ns,
+    )
+
+
+def _write_result_journal(
+    home: Path, pinned_identity: dict[str, str], rendered: bytes,
+) -> None:
+    if not isinstance(rendered, bytes) or not rendered or len(rendered) > MAX_RENDERED_RESULT_BYTES:
+        raise GuardResultJournalError("invalid rendered result")
+    target = home / RESULT_JOURNAL_NAME
+    temporary: Path | None = None
+    try:
+        home_metadata = os.lstat(home)
+        if (
+            _is_link_or_reparse_metadata(home_metadata)
+            or not stat.S_ISDIR(home_metadata.st_mode)
+        ):
+            raise GuardResultJournalError("unsafe company home")
+        previous = _record_metadata(target)
+        temporary = home / f".{RESULT_JOURNAL_NAME}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_metadata = os.lstat(temporary)
+        if (
+            _is_link_or_reparse_metadata(temporary_metadata)
+            or not stat.S_ISREG(temporary_metadata.st_mode)
+            or temporary_metadata.st_nlink != 1
+            or temporary_metadata.st_size != len(rendered)
+        ):
+            raise GuardResultJournalError("unsafe result journal temporary file")
+        current_home = os.lstat(home)
+        if (
+            _is_link_or_reparse_metadata(current_home)
+            or not stat.S_ISDIR(current_home.st_mode)
+            or (current_home.st_dev, current_home.st_ino)
+            != (home_metadata.st_dev, home_metadata.st_ino)
+        ):
+            raise GuardResultJournalError("company home changed before commit")
+        current = _record_metadata(target)
+        if (previous is None) != (current is None) or (
+            previous is not None and current is not None
+            and not _same_record(previous, current)
+        ):
+            raise GuardResultJournalError("result journal changed before commit")
+        if not _store_unchanged(home, pinned_identity):
+            raise GuardStoreChangedError("company store changed before journal commit")
+        os.replace(temporary, target)
+        temporary = None
+        if os.name != "nt":
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_descriptor = os.open(home, directory_flags)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+    except (GuardResultJournalError, GuardStoreChangedError):
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError) as exc:
+        raise GuardResultJournalError("could not write result journal") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @contextmanager
@@ -819,9 +1045,11 @@ def guard_once(
     num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
     wait_seconds: int = 10, ollama_executable: Path | None = None,
     allow_job_inheritance: bool = False,
+    record_result: bool = False,
 ) -> tuple[dict[str, object], int]:
     if (
         type(allow_job_inheritance) is not bool
+        or type(record_result) is not bool
         or (allow_job_inheritance and os.name != "nt")
         or not _valid_runtime_arguments(
             port, model, num_ctx, num_predict, keep_alive, wait_seconds,
@@ -830,7 +1058,8 @@ def guard_once(
         raise GuardUsageError("invalid runtime arguments")
     components = _empty_components()
     try:
-        identity = read_company_identity(Path(home))
+        normalized_home = _normalized_company_home(Path(home))
+        identity = read_company_identity(normalized_home)
         if not _valid_store_identity(identity):
             raise CompanyIdentityError("invalid_identity")
         pinned_identity = dict(identity)
@@ -843,13 +1072,29 @@ def guard_once(
             changes=[], model=model,
         ), 2
     try:
-        with _runtime_guard_lock(Path(home)):
-            return _guard_locked(
-                Path(home), pinned_identity, port=port, model=model,
+        with _runtime_guard_lock(normalized_home):
+            result, code = _guard_locked(
+                normalized_home, pinned_identity, port=port, model=model,
                 num_ctx=num_ctx, num_predict=num_predict, keep_alive=keep_alive,
                 wait_seconds=wait_seconds, ollama_executable=ollama_executable,
                 allow_job_inheritance=allow_job_inheritance,
             )
+            result_components = result.get("components") if isinstance(result, dict) else None
+            if (
+                record_result and isinstance(result_components, dict)
+                and result_components.get("company_store") == "valid"
+            ):
+                if not _store_unchanged(normalized_home, pinned_identity):
+                    return _store_changed_after_result(result, model)
+                try:
+                    _write_result_journal(
+                        normalized_home, pinned_identity, _render_result(result),
+                    )
+                except GuardStoreChangedError:
+                    return _store_changed_after_result(result, model)
+                except GuardResultJournalError:
+                    return _result_journal_failure(result, model)
+            return result, code
     except GuardBusyError:
         return _payload(
             status="action_required", ready=False, components=components,
@@ -877,6 +1122,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--wait-seconds", type=int, default=10)
     result.add_argument("--ollama-executable", type=Path)
     result.add_argument("--allow-windows-job-inheritance", action="store_true")
+    result.add_argument("--record-result", action="store_true")
     return result
 
 
@@ -889,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
             num_predict=args.num_predict, keep_alive=args.keep_alive,
             wait_seconds=args.wait_seconds, ollama_executable=args.ollama_executable,
             allow_job_inheritance=args.allow_windows_job_inheritance,
+            record_result=args.record_result,
         )
     except GuardUsageError:
         result = _payload(
@@ -904,7 +1151,17 @@ def main(argv: list[str] | None = None) -> int:
             changes=[], model=None,
         )
         code = 2
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    try:
+        rendered = _render_result(result)
+    except GuardResultJournalError:
+        result = _payload(
+            status="indeterminate", ready=False, components=_empty_components(),
+            blockers=["internal_guard_error"], action="inspect_runtime_guard",
+            changes=[], model=None,
+        )
+        code = 2
+        rendered = _render_result(result)
+    _write_stdout(rendered)
     return code
 
 
