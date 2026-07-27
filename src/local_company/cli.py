@@ -123,11 +123,19 @@ def parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--project")
 
-    datasets = sub.add_parser("datasets", help="Profile project-scoped CSV and JSON files read-only")
+    datasets = sub.add_parser(
+        "datasets", help="Profile project-scoped CSV, JSON, and XLSX files read-only"
+    )
     dataset_sub = datasets.add_subparsers(dest="dataset_command", required=True)
     dataset_add = dataset_sub.add_parser("add", help="Profile one explicit local dataset")
     dataset_add.add_argument("path", type=Path)
     dataset_add.add_argument("--project", required=True)
+    dataset_add.add_argument(
+        "--allow-root",
+        type=Path,
+        help="Constrain the source to this local directory; required for XLSX",
+    )
+    dataset_add.add_argument("--sheet", help="XLSX sheet name; defaults to the first visible sheet")
     dataset_list = dataset_sub.add_parser("list", help="List profiled datasets")
     dataset_list.add_argument("--project")
     dataset_show = dataset_sub.add_parser("show", help="Show one statistical profile")
@@ -320,7 +328,12 @@ def main() -> int:
                     print(f"[{hit.score}] {hit.path}\n{hit.excerpt}\n")
         elif args.command == "datasets":
             if args.dataset_command == "add":
-                dataset_id, brief_path, profile = company.profile_dataset(args.path, args.project)
+                dataset_id, brief_path, profile = company.profile_dataset(
+                    args.path,
+                    args.project,
+                    allowed_root=args.allow_root,
+                    sheet=args.sheet,
+                )
                 print(
                     f"Dataset {dataset_id}: rows={profile['profiled_rows']}, columns={profile['column_count']}\n"
                     f"Brief: {brief_path}\nSource was read-only."

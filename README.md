@@ -286,6 +286,28 @@ Approval is a recorded decision only. This version deliberately has no side-effe
 
 ## Local data
 
+Profile an explicitly selected CSV, JSON, or standard `.xlsx` workbook without
+modifying the source:
+
+```powershell
+.\local-company.cmd datasets add "C:\approved-data\sales.xlsx" `
+  --project "Yangon Tyre" `
+  --allow-root "C:\approved-data" `
+  --sheet "Sales"
+.\local-company.cmd datasets list --project "Yangon Tyre"
+```
+
+XLSX input requires `--allow-root`; the resolved workbook must stay inside that
+normal local directory. The dependency-free reader rejects links, reparse
+points, remote roots, path-traversing or encrypted ZIP members, unsupported
+workbook types, unsafe XML declarations, oversized expansion, more than 512
+profiled columns, and malformed relationships. It reads at most 10,000 data
+rows from one explicitly named sheet, or the first visible sheet. Formula and
+error cells are counted but ignored: formulas, macros, links, and cached formula
+results are never executed or treated as data. Generated briefs contain only
+statistics, not copied source rows. `--allow-root` is optional but available as
+the same containment check for CSV and JSON; `--sheet` is XLSX-only.
+
 All runtime data stays under `.local-company` by default:
 
 ```text
@@ -300,4 +322,4 @@ Use `--home D:\somewhere` before the command to choose another state directory.
 
 The coordinator is dependency-free Python using SQLite and Ollama's localhost HTTP API. Specialists work in sequence, then an executive-chair pass turns their outputs into one decision-ready synthesis. This PC remains the authority. Future worker machines should be named nodes receiving scoped assignments; they should never inherit blanket permissions.
 
-The next safe capability is a read-only file/spreadsheet tool with per-path allowlists. External connectors and action executors should come later, one narrow tool at a time, with explicit approvals and durable receipts.
+The read-only spreadsheet boundary is local and path-allowlisted. External connectors and action executors should come later, one narrow tool at a time, with explicit approvals and durable receipts.

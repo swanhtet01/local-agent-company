@@ -25,6 +25,7 @@ from .config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA,
     read_validated_company_instance_id, valid_company_instance_id,
 )
+from .spreadsheet import profile_xlsx, read_stable_local_file
 
 
 ROLES = {
@@ -2361,22 +2362,34 @@ class Company:
         except ValueError:
             return "string"
 
-    def profile_dataset(self, source: Path, project: str) -> tuple[str, Path, dict[str, object]]:
+    def profile_dataset(
+        self,
+        source: Path,
+        project: str,
+        *,
+        allowed_root: Path | None = None,
+        sheet: str | None = None,
+    ) -> tuple[str, Path, dict[str, object]]:
         self.initialize()
         project_id, project_name = self._resolve_project(project)
-        source = source.resolve()
-        if not source.is_file():
-            raise ValueError(f"Dataset source is not a file: {source}")
         suffix = source.suffix.lower()
-        if suffix not in {".csv", ".json"}:
-            raise ValueError("Datasets must be CSV or JSON")
-        size = source.stat().st_size
-        if size > MAX_DATASET_BYTES:
-            raise ValueError(f"Dataset exceeds {MAX_DATASET_BYTES} bytes")
-        raw = source.read_bytes()
+        if suffix not in {".csv", ".json", ".xlsx"}:
+            raise ValueError("Datasets must be CSV, JSON, or XLSX")
+        if sheet is not None and suffix != ".xlsx":
+            raise ValueError("Sheet selection is available only for XLSX datasets")
+        source, raw = read_stable_local_file(
+            source,
+            allowed_root=allowed_root,
+            max_bytes=MAX_DATASET_BYTES,
+            require_allowed_root=suffix == ".xlsx",
+        )
+        size = len(raw)
         digest = hashlib.sha256(raw).hexdigest()
         rows: list[dict[str, object]] = []
         truncated = False
+        sheet_name: str | None = None
+        formula_cells_ignored = 0
+        error_cells_ignored = 0
         if suffix == ".csv":
             reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig", errors="replace")))
             if not reader.fieldnames:
@@ -2386,7 +2399,7 @@ class Company:
                     truncated = True
                     break
                 rows.append(dict(row))
-        else:
+        elif suffix == ".json":
             try:
                 payload = json.loads(raw.decode("utf-8", errors="strict"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2397,6 +2410,13 @@ class Company:
                 raise ValueError("JSON dataset must be an object or a list of objects")
             truncated = len(payload) > MAX_PROFILE_ROWS
             rows = [dict(item) for item in payload[:MAX_PROFILE_ROWS]]
+        else:
+            spreadsheet = profile_xlsx(raw, sheet=sheet, max_rows=MAX_PROFILE_ROWS)
+            rows = spreadsheet.rows
+            truncated = spreadsheet.truncated
+            sheet_name = spreadsheet.sheet
+            formula_cells_ignored = spreadsheet.formula_cells_ignored
+            error_cells_ignored = spreadsheet.error_cells_ignored
         if not rows:
             raise ValueError("Dataset contains no data rows")
 
@@ -2426,6 +2446,9 @@ class Company:
             "mixed_type_columns": [name for name, item in column_profiles.items() if item["mixed_types"]],
             "truncated": truncated,
         }
+        if suffix == ".xlsx":
+            quality_flags["formula_cells_ignored"] = formula_cells_ignored
+            quality_flags["error_cells_ignored"] = error_cells_ignored
         profile: dict[str, object] = {
             "source": str(source),
             "project": project_name,
@@ -2437,6 +2460,8 @@ class Company:
             "columns": column_profiles,
             "quality_flags": quality_flags,
         }
+        if sheet_name is not None:
+            profile["sheet"] = sheet_name
         with closing(self._connect()) as db:
             existing = db.execute(
                 "SELECT id FROM datasets WHERE project_id=? AND path=?", (project_id, str(source))
@@ -2453,6 +2478,8 @@ class Company:
             f"Profiled rows: {len(rows)}{' (truncated)' if truncated else ''}",
             f"Columns: {len(columns)}", f"Duplicate rows in profile: {duplicate_rows}", "", "## Columns", "",
         ]
+        if sheet_name is not None:
+            lines[7:7] = [f"Sheet: `{sheet_name}`"]
         for name, item in column_profiles.items():
             lines.append(
                 f"- **{name}**: missing={item['missing']}, unique_non_missing={item['unique_non_missing']}, "
@@ -2465,6 +2492,11 @@ class Company:
             f"- Duplicate rows: {duplicate_rows}", f"- Profile truncated: {str(truncated).lower()}", "",
             "This brief contains statistics only. It does not copy source rows and does not modify the source file.",
         ])
+        if sheet_name is not None:
+            lines[-2:-2] = [
+                f"- Formula cells ignored: {formula_cells_ignored}",
+                f"- Error cells ignored: {error_cells_ignored}",
+            ]
         brief_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         with closing(self._connect(immediate=True)) as db, db:
             db.execute(
