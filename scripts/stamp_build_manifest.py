@@ -220,7 +220,7 @@ def _read_bounded_text(path: Path, maximum: int, label: str) -> str:
         raise ManifestError(f"Could not read {label}: {exc}") from exc
 
 
-def _parse_build_id(build_id: str) -> tuple[date, int]:
+def parse_build_id(build_id: str) -> tuple[date, int]:
     match = BUILD_ID_PATTERN.fullmatch(build_id)
     if match is None:
         raise ManifestError("Build ID must match local-build-YYYYMMDD.N with N from 1 to 9999")
@@ -267,7 +267,7 @@ def _manifest_values(path: Path) -> tuple[str, str, str, str]:
     source_hash = values["SOURCE_SHA256"]
     if schema != EXPECTED_SCHEMA:
         raise ManifestError("Embedded runtime build schema is unsupported")
-    _parse_build_id(build_id)
+    parse_build_id(build_id)
     if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
         raise ManifestError("Embedded SOURCE_SHA256 is malformed")
     return text, schema, build_id, source_hash
@@ -392,12 +392,12 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def stamp_project(project_root: Path, build_id: str) -> dict[str, object]:
-    requested_order = _parse_build_id(build_id)
+    requested_order = parse_build_id(build_id)
     root, source_root, manifest_path = _validated_layout(project_root)
     digest = calculate_source_digest(source_root)
     package_version = _package_version(root)
     text, schema, previous_build_id, previous_hash = _manifest_values(manifest_path)
-    previous_order = _parse_build_id(previous_build_id)
+    previous_order = parse_build_id(previous_build_id)
     if requested_order < previous_order:
         raise ManifestError("Build ID must not move backward")
     if digest.sha256 != previous_hash and build_id == previous_build_id:
@@ -447,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--build-id is valid only with --write")
     if args.write:
         try:
-            _parse_build_id(args.build_id)
+            parse_build_id(args.build_id)
         except ManifestError as exc:
             parser.error(str(exc))
     try:

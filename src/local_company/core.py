@@ -2822,6 +2822,47 @@ class Company:
                 created.append((schedule_id, queue_id))
         return created
 
+    def work_state_snapshot(self) -> dict[str, int]:
+        """Return bounded restart-guard counters from one SQLite snapshot."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM jobs WHERE status='running'),
+                    (SELECT COUNT(*) FROM mission_queue WHERE status='queued'),
+                    (SELECT COUNT(*) FROM mission_queue WHERE status='running'),
+                    (SELECT COUNT(*) FROM action_requests WHERE status='pending'),
+                    (
+                        SELECT COUNT(*)
+                        FROM report_finalizations rf
+                        LEFT JOIN mission_queue q
+                          ON q.job_id=rf.job_id AND q.status='running'
+                    ),
+                    (
+                        SELECT COUNT(*)
+                        FROM jobs j
+                        LEFT JOIN evaluations e ON e.job_id=j.id
+                        LEFT JOIN report_finalizations rf ON rf.job_id=j.id
+                        LEFT JOIN mission_queue q
+                          ON q.job_id=j.id AND q.status='running'
+                        WHERE j.status='complete'
+                          AND (e.job_id IS NULL OR q.id IS NOT NULL)
+                          AND rf.job_id IS NULL
+                    )
+                """
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Could not read local work-state counters")
+        return {
+            "active_jobs": int(row[0]),
+            "queued_missions": int(row[1]),
+            "running_missions": int(row[2]),
+            "pending_approvals": int(row[3]),
+            "pending_report_finalizations": int(row[4]),
+            "pending_evaluations": int(row[5]),
+        }
+
     def health_snapshot(self) -> dict[str, object]:
         self.initialize()
         disk = shutil.disk_usage(self.home)
@@ -2832,6 +2873,7 @@ class Company:
         output_files = [path for path in self.output_dir.rglob("*.md") if path.is_file()]
         models = self.model.models() if isinstance(self.model, OllamaModel) else None
         pending_completion = self.pending_completion_items()
+        work_state = self.work_state_snapshot()
         return {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -2842,16 +2884,8 @@ class Company:
             "disk_total_bytes": disk.total,
             "ollama_model_storage_bytes": model_bytes,
             "installed_models": models,
-            "active_jobs": sum(1 for row in self.jobs() if row[1] == "running"),
-            "queued_missions": len(self.queue_items("queued")),
-            "pending_approvals": len(self.action_requests("pending")),
             "dataset_count": len(self.dataset_items()),
-            "pending_report_finalizations": sum(
-                item["state"] == "report_finalization_pending" for item in pending_completion
-            ),
-            "pending_evaluations": sum(
-                item["state"] == "evaluation_pending" for item in pending_completion
-            ),
+            **work_state,
             "pending_completion": pending_completion,
         }
 

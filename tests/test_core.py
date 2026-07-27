@@ -36,8 +36,8 @@ from local_company.core import (
     truncate_words,
 )
 from local_company.dashboard import (
-    LocalQueueWorker, create_dashboard_server, render_dashboard, render_mission_detail,
-    runtime_build_identity,
+    LocalQueueWorker, build_status_snapshot, create_dashboard_server, render_dashboard,
+    render_mission_detail, runtime_build_identity,
 )
 from local_company.service import _read_state, _startup_lock, _write_state
 
@@ -1950,11 +1950,52 @@ class CompanyTests(unittest.TestCase):
             company = Company(Path(tmp), MockModel())
             company.create_project("<script>alert(1)</script>")
             company.request_action("Review <unsafe> text")
-            page = render_dashboard(company)
+            page = render_dashboard(company, build_identity={
+                "schema": "local-company.runtime-build.v2",
+                "package_version": "0.1.0",
+                "build_id": "<script>build</script>",
+                "source_sha256": "a" * 64,
+            })
             self.assertIn("Local Agent Company", page)
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
             self.assertIn("Review &lt;unsafe&gt; text", page)
             self.assertNotIn("<script>alert(1)</script>", page)
+            self.assertIn("&lt;script&gt;build&lt;/script&gt;", page)
+            self.assertNotIn("<script>build</script>", page)
+
+    def test_build_status_snapshot_is_bounded_and_covers_worker_transition(self):
+        class Worker:
+            status = "idle"
+
+            def snapshot(self):
+                return {"status": self.status, "output": "x" * (2 * 1024 * 1024)}
+
+        worker = Worker()
+
+        class CompanyState:
+            def work_state_snapshot(self):
+                worker.status = "running"
+                return {
+                    "active_jobs": 0,
+                    "queued_missions": 0,
+                    "running_missions": 0,
+                    "pending_approvals": 0,
+                    "pending_report_finalizations": 0,
+                    "pending_evaluations": 0,
+                }
+
+        snapshot = build_status_snapshot(
+            CompanyState(), worker, {
+                "schema": "local-company.runtime-build.v2",
+                "package_version": "0.1.0",
+                "build_id": "local-build-20260727.4",
+                "git_commit": None,
+                "source_dirty": None,
+                "source_sha256": "a" * 64,
+            },
+        )
+        self.assertEqual(snapshot["worker"], {"status": "running"})
+        self.assertLess(len(json.dumps(snapshot).encode("utf-8")), 2048)
 
     def test_dashboard_http_is_local_and_rejects_posts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1982,8 +2023,25 @@ class CompanyTests(unittest.TestCase):
                     health = json.load(response)
                 self.assertEqual(health["status"], "ready")
                 self.assertEqual(health["build"], build_identity)
+                with opener.open(
+                    base + "/health.json?view=build-status", timeout=3,
+                ) as response:
+                    build_status = json.load(response)
+                    self.assertLess(int(response.headers["Content-Length"]), 4096)
+                self.assertEqual(
+                    set(build_status), {"status", "pid", "build", "health", "worker"},
+                )
+                self.assertEqual(build_status["build"], build_identity)
+                self.assertEqual(build_status["worker"], {"status": "disabled"})
+                with opener.open(base + "/build-status.json", timeout=3) as response:
+                    self.assertEqual(json.load(response), build_status)
                 with opener.open(base + "/health.json", timeout=3) as response:
                     self.assertEqual(json.load(response)["build"], build_identity)
+                with opener.open(base + "/", timeout=3) as response:
+                    page = response.read().decode("utf-8")
+                self.assertIn("local-build-test", page)
+                self.assertIn("b" * 64, page)
+                self.assertIn("/build-status.json", page)
                 build_snapshot.assert_called_once_with()
                 request = urllib.request.Request(base + "/", data=b"", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -2347,6 +2405,20 @@ class CompanyTests(unittest.TestCase):
             while worker.snapshot()["status"] == "running" and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertEqual(worker.snapshot()["status"], "complete")
+
+    def test_worker_is_non_idle_before_queue_claim_mutation(self):
+        company = Mock()
+        worker = LocalQueueWorker(company)
+
+        def fail_claim(_queue_id):
+            self.assertEqual(worker.snapshot()["status"], "running")
+            raise ValueError("claim refused")
+
+        company.claim_next_queue_item.side_effect = fail_claim
+        with self.assertRaisesRegex(ValueError, "claim refused"):
+            worker.start("reviewed-queue")
+        self.assertEqual(worker.snapshot()["status"], "failed")
+        company.abandon_queue_claim.assert_not_called()
 
     def test_worker_exposes_durable_completion_pending_state(self):
         with tempfile.TemporaryDirectory() as tmp:

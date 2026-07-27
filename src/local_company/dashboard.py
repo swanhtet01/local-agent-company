@@ -55,8 +55,8 @@ class LocalQueueWorker:
         try:
             if not queue_id:
                 raise ValueError("Reviewed queue mission ID is required")
-            claim = self.company.claim_next_queue_item(queue_id)
             self._set_state(status="running", queue_id=queue_id, started_at=_utc_now())
+            claim = self.company.claim_next_queue_item(queue_id)
             threading.Thread(
                 target=self._run, args=(claim,), name="local-company-worker", daemon=False,
             ).start()
@@ -66,10 +66,10 @@ class LocalQueueWorker:
                     self.company.abandon_queue_claim(
                         claim, f"Local worker thread did not start: {type(exc).__name__}: {exc}",
                     )
-                    self._set_state(
-                        status="failed", queue_id=claim.queue_id,
-                        error=f"{type(exc).__name__}: {exc}", finished_at=_utc_now(),
-                    )
+                self._set_state(
+                    status="failed", queue_id=claim.queue_id if claim else queue_id,
+                    error=f"{type(exc).__name__}: {exc}", finished_at=_utc_now(),
+                )
             finally:
                 self._run_lock.release()
             raise
@@ -134,11 +134,32 @@ def dashboard_snapshot(
     }
 
 
+def build_status_snapshot(
+    company: Company,
+    worker: LocalQueueWorker | None,
+    build_identity: dict[str, object],
+) -> dict[str, object]:
+    """Return the bounded state required to decide whether restart is safe."""
+    work_state = company.work_state_snapshot()
+    worker_state = worker.snapshot() if worker else {"status": "disabled"}
+    return {
+        "status": "ready",
+        "pid": os.getpid(),
+        "build": dict(build_identity),
+        "health": work_state,
+        "worker": {"status": worker_state.get("status")},
+    }
+
+
 def render_dashboard(
     company: Company, service_token: str | None = None, notice: str = "",
     worker: LocalQueueWorker | None = None,
+    build_identity: dict[str, object] | None = None,
 ) -> str:
     snapshot = dashboard_snapshot(company, worker)
+    live_build = dict(
+        runtime_build_identity() if build_identity is None else build_identity
+    )
 
     def cell(value: object) -> str:
         return html.escape(str(value))
@@ -288,6 +309,22 @@ def render_dashboard(
             'Wait for an active worker; use stale recovery only after its heartbeat ages out.</p>'
             f"<ul>{completion_rows}</ul></section>"
         )
+    build_html = (
+        '<section class="build-banner"><h2>Live build</h2>'
+        f'<p><strong>{cell(live_build.get("build_id", "unknown"))}</strong> &middot; '
+        f'package {cell(live_build.get("package_version", "unknown"))} &middot; '
+        f'{cell(live_build.get("schema", "unknown"))}</p>'
+        f'<p class="build-hash">Operational source SHA-256: '
+        f'<code>{cell(live_build.get("source_sha256", "unknown"))}</code></p>'
+        f'<p class="hint">Git commit: '
+        f'{cell(live_build.get("git_commit") or "unavailable")} &middot; '
+        f'source dirty state: '
+        f'{cell("unknown" if live_build.get("source_dirty") is None else live_build.get("source_dirty"))}</p>'
+        '<p class="hint">Captured at service startup. Use the local live-build checker '
+        'after a release to detect whether a restart is required. Compact build status: '
+        '<a href="/build-status.json">build-status.json</a>; raw health: '
+        '<a href="/health.json">health.json</a>.</p></section>'
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -309,6 +346,9 @@ code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }
 .empty {{ color:#6f7d95; text-align:center; }} .gate,.completion-pending {{ color:#ffd479; }}
 .notice {{ padding:12px 14px; background:#143520; border:1px solid #27693d; border-radius:9px; color:#a7f3bd; }}
 .completion-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
+.build-banner {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.build-banner h2 {{ margin-bottom:8px; }} .build-banner p {{ margin:6px 0; }}
+.build-hash code {{ overflow-wrap:anywhere; }}
 .hint {{ color:#9aa7bd; margin-top:-6px; }} label {{ display:block; color:#cbd5e1; font-size:13px; }}
 textarea,input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
 textarea {{ min-height:108px; resize:vertical; }} .form-grid {{ display:grid; grid-template-columns:2fr 2fr 1fr; gap:12px; margin:12px 0; }}
@@ -318,7 +358,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 @media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} th:nth-child(4),td:nth-child(4) {{ display:none; }} }}
 </style></head><body>
 <h1>Local Agent Company</h1><p class="sub">Owner-controlled task intake &middot; localhost only <a class="refresh" href="/">Refresh</a><br>Scores are automated format, safety, and evidence-consistency checks—not factual or production verification.</p>
-{notice_html}{completion_html}{intake}
+{notice_html}{completion_html}{build_html}{intake}
 <div class="grid">
 <div class="card"><div class="metric">{len(snapshot['projects'])}</div><div class="label">Projects</div></div>
 <div class="card"><div class="metric">{len(snapshot['jobs'])}</div><div class="label">Missions</div></div>
@@ -518,9 +558,19 @@ def create_dashboard_server(
             parsed = urlsplit(self.path)
             if parsed.path == "/":
                 notice = parse_qs(parsed.query, max_num_fields=4).get("notice", [""])[0]
-                body = render_dashboard(company, service_token, notice, worker).encode("utf-8")
+                body = render_dashboard(
+                    company, service_token, notice, worker, build_identity,
+                ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path == "/build-status.json" or (
+                parsed.path == "/health.json" and parsed.query == "view=build-status"
+            ):
+                body = json.dumps(
+                    build_status_snapshot(company, worker, build_identity)
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
             elif parsed.path == "/health.json":
                 body = json.dumps(
                     {
