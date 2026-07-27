@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -104,10 +105,10 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.7"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.6"
+EVALUATOR_VERSION = "local-quality-2026-07-27.14"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.13"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
-STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v3"
+STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
 
 
@@ -459,7 +460,8 @@ _STRICT_SECTION_FIELDS = {
     "Owner gates": "owner_gates",
 }
 _CODE_OWNED_STRUCTURED_LABELS = {
-    "Verified facts", "Assumptions", "Daily review cadence", "Success checks", "Owner gates",
+    "Verified facts", "Assumptions", "Daily review cadence", "Success checks", "Failure modes",
+    "Owner gates",
 }
 _SENSITIVE_PROPOSAL_PATTERN = re.compile(
     r"\b(?:send|contact|notify|message|email|post)\b.{0,80}\b(?:reports?|results?|data|"
@@ -492,29 +494,105 @@ _PROPOSAL_PREFIX_PATTERN = re.compile(
     r"^(?:proposed,\s*)?not verified or performed:\s*", flags=re.IGNORECASE,
 )
 _TASK_ACTION_VERBS = (
-    "analyze", "analyse", "assess", "audit", "build", "calculate", "capture", "check",
-    "classify", "collect", "compare", "compile", "configure", "confirm", "consolidate",
-    "coordinate", "create", "cross-check", "define", "design", "develop", "diagnose",
-    "document", "draft", "ensure", "establish", "evaluate", "examine", "extract", "flag",
-    "gather", "generate", "identify", "implement", "inspect", "intake", "interview",
-    "investigate", "list", "maintain", "map", "measure", "model", "monitor", "organize",
-    "outline", "perform", "plan", "prepare", "preserve", "prioritize", "produce", "profile",
-    "propose", "reconcile", "record", "refine", "report", "research", "resolve", "review",
-    "route", "run", "scan", "score", "simulate", "summarize", "synthesize", "test", "track",
-    "triage", "update", "use", "validate", "verify", "write",
+    "act", "address", "administer", "analyze", "analyse", "assess", "audit", "avoid", "build",
+    "calculate", "capture", "check", "classify", "collect", "compare", "compile", "configure",
+    "confirm", "consolidate", "contain", "control", "coordinate", "correct", "create",
+    "cross-check", "define", "design", "detect", "develop", "diagnose", "document", "draft",
+    "eliminate", "enforce", "ensure", "escalate", "establish", "evaluate", "examine",
+    "extract", "fix", "flag", "gather", "generate", "handle", "identify", "implement", "inspect",
+    "intake", "interview", "investigate", "isolate", "list", "maintain", "manage", "map",
+    "measure", "mitigate", "model", "monitor", "organize", "outline", "oversee", "perform",
+    "plan", "prepare", "preserve", "prioritize", "produce", "profile", "prevent", "propose",
+    "protect", "quarantine", "reconcile", "record", "recover", "reduce", "refine", "remediate",
+    "repair", "replace", "report", "research", "resolve", "respond", "restore", "review",
+    "route", "run", "safeguard", "scan", "score", "secure", "simulate", "summarize",
+    "supervise", "synthesize", "test", "track", "treat", "triage", "update", "use", "validate",
+    "verify", "write",
 )
 _TASK_ACTION_PATTERN = re.compile(
     rf"^(?:{'|'.join(re.escape(verb) for verb in _TASK_ACTION_VERBS)})\b",
     flags=re.IGNORECASE,
 )
-_FAILURE_CONDITION_PATTERN = re.compile(
-    r"\b(?:absent|block(?:ed|er|ing)?|cannot|conflict(?:s|ing)?|denied|does not|"
-    r"error|expired|fail(?:ed|s|ure)?|incomplete|invalid|malformed|mismatch(?:es)?|"
-    r"missing|not\s+(?:available|complete|current|found|present|ready|valid|verified|"
-    r"working)|outdated|pending|reject(?:ed|s)?|stale|stop|timeout|unavailable|"
-    r"unreachable|unsupported|violation)\b",
+
+
+def _action_verb_forms(verb: str) -> set[str]:
+    forms = {verb, f"{verb}s", f"{verb}ed", f"{verb}ing"}
+    if verb.endswith(("s", "x", "z", "ch", "sh", "o")):
+        forms.add(f"{verb}es")
+    if verb.endswith("e"):
+        forms.update({f"{verb}d", f"{verb[:-1]}ing"})
+    if verb.endswith("y") and len(verb) > 1:
+        forms.update({f"{verb[:-1]}ies", f"{verb[:-1]}ied"})
+    if len(verb) > 2 and verb[-1] not in "aeiouwxy" and verb[-2] in "aeiou":
+        forms.update({f"{verb}{verb[-1]}ed", f"{verb}{verb[-1]}ing"})
+    return forms
+
+
+_TASK_ACTION_FORMS = frozenset(
+    form for verb in _TASK_ACTION_VERBS for form in _action_verb_forms(verb)
+)
+_TASK_ACTION_FORM_PATTERN = re.compile(
+    rf"^(?:{'|'.join(re.escape(form) for form in sorted(_TASK_ACTION_FORMS, key=len, reverse=True))})\b",
     flags=re.IGNORECASE,
 )
+_FAILURE_CONDITION_PATTERN = re.compile(
+    r"\b(?:absent|block(?:ed|er|ing)?|breach(?:ed|es|ing)?|cannot|conflict(?:s|ing)?|"
+    r"corrupt(?:ed|ing|ion|ions)?|denied|discrepanc(?:y|ies)|does not|"
+    r"drift(?:ed|ing|s)?|error(?:s)?|expired|"
+    r"fail(?:ed|s|ure)?|incomplete|invalid|malformed|mismatch(?:es)?|"
+    r"missing|not\s+(?:available|complete|current|found|present|ready|valid|verified|"
+    r"working)|outdated|pending|reject(?:ed|s)?|stale|stop|timeout|unavailable|"
+    r"unreachable|unsupported|tamper(?:ed|ing|s)?|violation(?:s)?)\b",
+    flags=re.IGNORECASE,
+)
+_FAILURE_PREDICATE_PATTERN = re.compile(
+    r"\b(?:cannot|could\s+not\s+be\s+(?:found|verified)|does not|fails?|failed|stops?|"
+    r"stopped|timed\s+out|blocks?|crash(?:ed|es)|rejects?|return(?:ed|s)\s+(?:an?\s+)?"
+    r"(?:corrupt(?:ed)?|incomplete|invalid|malformed|missing|unsupported)|"
+    r"(?:is|are|was|were|became|becomes?|remain(?:ed|s)?)\s+"
+    r"(?:not\s+(?:found|verified)|absent|blocked|corrupt(?:ed)?|denied|expired|incomplete|invalid|missing|"
+    r"outdated|pending|stale|unavailable|unreachable|unsupported|unverified))\b",
+    flags=re.IGNORECASE,
+)
+_FAILURE_EVENT_PATTERN = re.compile(
+    r"\b(?:appear(?:ed|s)?|ar(?:ise|ises|ose)|detect(?:ed|s)|drift(?:ed|ing|s)?|"
+    r"emerg(?:ed|es)|found|happen(?:ed|s)?|observ(?:ed|es)|occur(?:red|s)?|"
+    r"report(?:ed|s)|return(?:ed|s)|surfac(?:ed|es))\b",
+    flags=re.IGNORECASE,
+)
+_FAILURE_NOUN_PATTERN = re.compile(r"\bfailures?\b", flags=re.IGNORECASE)
+_PREVENTION_TASK_PATTERN = re.compile(
+    r"\b(?:assessments?|avoidance|checklists?|checks?|concerns?|containment|controls?|"
+    r"detection|documentation|logs?|management|mitigation|monitoring|plans?|planning|"
+    r"prevention|procedures?|protection|recovery|reduction|remediation|responses?|"
+    r"safeguards?|tickets?)\b",
+    flags=re.IGNORECASE,
+)
+_FAILURE_SUBJECT_CONNECTORS = {
+    "after", "and", "as", "because", "before", "by", "during", "for", "how", "if",
+    "or", "that", "through", "to", "unless", "when", "whether", "while", "why", "with",
+}
+_FAILURE_ACTION_SUBJECT_NOUNS = {
+    "agent", "audit", "execution", "failure", "generation", "job", "model", "operation",
+    "pipeline", "process", "queue", "record", "report", "review", "run", "service", "system",
+    "task", "workflow",
+}
+_FAILURE_SINGLE_SUBJECT_NOUNS = {
+    "address", "audit", "control", "document", "monitor", "record", "report", "review",
+}
+_FAILURE_STATE_TAIL_WORDS = {
+    "after", "at", "before", "because", "during", "from", "in", "on", "under", "when",
+    "while", "within",
+}
+_MODEL_METRIC_NUMERIC_LIMITS = {
+    "total_seconds": 86_400.0,
+    "load_seconds": 86_400.0,
+    "prompt_tokens": 100_000_000,
+    "output_tokens": 100_000_000,
+    "num_predict": 4_096,
+    "tokens_per_second": 1_000_000.0,
+}
+_MODEL_DONE_REASONS = {"stop", "length", "load", "unload"}
 
 
 def _strip_evidence_tokens(text: str) -> str:
@@ -636,7 +714,149 @@ def _task_template_is_substantive(text: str) -> bool:
 
 def _failure_mode_is_substantive(text: str) -> bool:
     body = _plain_proposal_body(text)
-    return count_words(body) >= 3 and bool(_FAILURE_CONDITION_PATTERN.search(body))
+    if count_words(body) < 3:
+        return False
+    predicate = _FAILURE_PREDICATE_PATTERN.search(body)
+    has_predicate = False
+    if predicate is not None:
+        subject_words = [
+            word.casefold()
+            for word in re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)?", body[:predicate.start()])
+        ]
+        ambiguous_action_predicate = (
+            bool(subject_words)
+            and bool(_TASK_ACTION_FORM_PATTERN.match(body))
+            and predicate.group(0).casefold() in {"block", "fail", "reject", "stop"}
+        )
+        if subject_words and _TASK_ACTION_FORM_PATTERN.match(body):
+            action_subject_is_noun = (
+                (
+                    len(subject_words) == 1
+                    and subject_words[0] in _FAILURE_SINGLE_SUBJECT_NOUNS
+                )
+                or bool(
+                    _FAILURE_ACTION_SUBJECT_NOUNS.intersection(subject_words[1:])
+                )
+            )
+            if not action_subject_is_noun:
+                ambiguous_action_predicate = True
+        if predicate.group(0).casefold() in {"failed", "stopped"}:
+            tail_words = re.findall(
+                r"[A-Za-z]+(?:-[A-Za-z]+)?", body[predicate.end():], flags=re.IGNORECASE,
+            )
+            if (
+                subject_words
+                and _TASK_ACTION_FORM_PATTERN.match(body)
+                and tail_words
+                and tail_words[0].casefold() not in {
+                    "after", "as", "because", "before", "due", "during", "if", "when", "while",
+                }
+                and not tail_words[0].casefold().endswith("ly")
+            ):
+                ambiguous_action_predicate = True
+        has_predicate = (
+            not ambiguous_action_predicate
+            and (
+                not subject_words
+                or (
+                    len(subject_words) <= 4
+                    and not _FAILURE_SUBJECT_CONNECTORS.intersection(subject_words)
+                )
+            )
+        )
+    if has_predicate:
+        return True
+    prefix = " ".join(re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)?", body)[:3])
+    failure_noun = _FAILURE_NOUN_PATTERN.search(body)
+    if failure_noun and _FAILURE_NOUN_PATTERN.search(prefix):
+        tail_words = re.findall(
+            r"[A-Za-z]+(?:-[A-Za-z]+)?", body[failure_noun.end():], flags=re.IGNORECASE,
+        )
+        return bool(
+            not tail_words
+            or tail_words[0].casefold() in _FAILURE_STATE_TAIL_WORDS
+            or _FAILURE_EVENT_PATTERN.match(" ".join(tail_words))
+        )
+    if _PREVENTION_TASK_PATTERN.search(body) or _TASK_ACTION_FORM_PATTERN.match(body):
+        return False
+    return bool(
+        _FAILURE_CONDITION_PATTERN.search(prefix) and _FAILURE_EVENT_PATTERN.search(body)
+    )
+
+
+def _structured_validation_code(error: BaseException) -> str:
+    try:
+        message = " ".join(str(error).casefold().split())
+    except BaseException:
+        message = ""
+    mappings = (
+        ("serialized metadata", "serialized_metadata"),
+        ("action verb", "task_action"),
+        ("failure condition", "failure_condition"),
+        ("fields do not match", "field_set"),
+        ("must contain strings", "item_type"),
+        ("duplicate items", "duplicate_item"),
+        ("evidence citations", "evidence_injection"),
+        ("reserved labels", "label_injection"),
+        ("forbidden artifact", "forbidden_artifact"),
+        ("sensitive or gate-bypassing", "sensitive_action"),
+        ("source filenames", "source_filename"),
+        ("control characters", "control_character"),
+        ("prompt or redaction metadata", "prompt_metadata"),
+        ("daily cadence", "daily_cadence"),
+        ("word budget", "word_budget"),
+        ("must contain", "item_count"),
+        ("exceeds", "limit"),
+    )
+    for fragment, code in mappings:
+        if fragment in message:
+            return code
+    if isinstance(error, TypeError):
+        return "type_error"
+    if isinstance(error, ValueError):
+        return "value_error"
+    return "runtime_error"
+
+
+def _safe_model_metrics(metrics: object) -> dict[str, bool | float | int | str]:
+    if type(metrics) is not dict:
+        return {}
+    safe: dict[str, bool | float | int | str] = {}
+    for key, maximum in _MODEL_METRIC_NUMERIC_LIMITS.items():
+        value = metrics.get(key)
+        if key in {"prompt_tokens", "output_tokens", "num_predict"}:
+            valid = type(value) is int and 0 <= value <= maximum
+        else:
+            valid = (
+                type(value) is int and 0 <= value <= maximum
+            ) or (
+                type(value) is float and math.isfinite(value) and 0 <= value <= maximum
+            )
+        if valid:
+            safe[key] = value
+    done = metrics.get("done")
+    if type(done) is bool:
+        safe["done"] = done
+    done_reason = metrics.get("done_reason")
+    if type(done_reason) is str and done_reason in _MODEL_DONE_REASONS:
+        safe["done_reason"] = done_reason
+    return safe
+
+
+def _safe_model_metrics_snapshot(model: object) -> dict[str, bool | float | int | str]:
+    try:
+        return _safe_model_metrics(getattr(model, "last_metrics", None))
+    except Exception:
+        return {}
+
+
+def _reset_model_metrics(model: object) -> bool:
+    try:
+        setattr(model, "last_metrics", {})
+        reset_value = getattr(model, "last_metrics", None)
+    except Exception:
+        return False
+    return type(reset_value) is dict and len(reset_value) == 0
 
 
 def structured_synthesis_schema(
@@ -837,6 +1057,8 @@ def render_structured_synthesis(
                 "Require a sealed local report, valid hashes, and every deterministic quality "
                 "gate to pass."
             )
+        elif label == "Failure modes":
+            content = "Missing evidence blocks local report acceptance."
         elif label == "Owner gates":
             content = (
                 "External sends, credentials, payments, browser actions, and deployment require "
@@ -2203,9 +2425,12 @@ class Company:
                    (job_id, kind, detail, utc_now()))
 
     def _record_model_metrics(self, db: sqlite3.Connection, job_id: str, stage: str) -> None:
-        metrics = getattr(self.model, "last_metrics", None)
+        metrics = _safe_model_metrics_snapshot(self.model)
         if metrics:
-            self._event(db, job_id, "model_metrics", json.dumps({"stage": stage, **metrics}, sort_keys=True))
+            self._event(
+                db, job_id, "model_metrics",
+                json.dumps({"stage": stage, **metrics}, sort_keys=True),
+            )
 
     def request_action(self, description: str, job_id: str | None = None) -> str:
         self.initialize()
@@ -3490,13 +3715,10 @@ class Company:
                 if strict_evidence_pairs_required:
                     quarantine_limit = min(specialist_word_limit or 90, 90)
                     applied_word_limit = quarantine_limit
-                    completion_metrics = getattr(self.model, "last_metrics", {})
+                    completion_metrics = _safe_model_metrics_snapshot(self.model)
                     incomplete_output = bool(
-                        isinstance(completion_metrics, dict)
-                        and (
-                            completion_metrics.get("done") is False
-                            or completion_metrics.get("done_reason") == "length"
-                        )
+                        completion_metrics.get("done") is False
+                        or completion_metrics.get("done_reason") == "length"
                     )
                     if incomplete_output:
                         result = mark_unverified_draft(
@@ -3597,6 +3819,7 @@ class Company:
                     else int(template_count_match.group(1))
                 )
             structured_synthesis_applied = False
+            successful_structured_metrics_reset = False
             constraint_applied = False
             constraint_notes: list[str] = []
             if strict_evidence_pairs_required:
@@ -3663,8 +3886,7 @@ class Company:
                         "instructions. Do not include evidence IDs, source filenames, completed-work "
                         "claims, sensitive actions, or approval bypasses. Keep every item concise and "
                         "substantive. Task templates must begin with one of these accepted action "
-                        f"verbs: {', '.join(_TASK_ACTION_VERBS)}. State each failure mode with "
-                        "explicit adverse-state, failure, or stop language. Every string must "
+                        f"verbs: {', '.join(_TASK_ACTION_VERBS)}. Every string must "
                         "contain 3 to 12 words and no more than 80 characters. Use plain task "
                         "language, never serialized objects or metadata keys. Never mention prompts, "
                         "JSON, schemas, or redaction. Code owns "
@@ -3686,11 +3908,7 @@ class Company:
                         )
                     structured_attempt_used = 0
                     for structured_attempt in (1, 2):
-                        try:
-                            setattr(self.model, "last_metrics", {})
-                            structured_metrics_reset = True
-                        except (AttributeError, TypeError):
-                            pass
+                        structured_metrics_reset = _reset_model_metrics(self.model)
                         structured_inference_attempted = True
                         attempt_prompt = structured_prompt
                         if structured_attempt == 2:
@@ -3698,8 +3916,7 @@ class Company:
                                 "\n\nCorrection codes: exact fields only; every string 3 to 12 "
                                 "words and at most 80 characters; no source names, prompt metadata, "
                                 "serialized fragments, sensitive actions, or approval bypasses; "
-                                "start tasks with one accepted action verb listed above and use "
-                                "explicit adverse-state, failure, or stop language. "
+                                "start tasks with one accepted action verb listed above. "
                                 "Return a fresh object and do not reproduce the rejected object."
                             )
                         structured = complete_structured(
@@ -3729,7 +3946,7 @@ class Company:
                                 raise ValueError(
                                     "Structured synthesis exceeds its final deterministic word budget"
                                 )
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError) as validation_error:
                             if structured_attempt == 2:
                                 raise
                             with closing(self._connect()) as db, db:
@@ -3747,6 +3964,9 @@ class Company:
                                         db, job_id, "structured_synthesis_retry_scheduled",
                                         json.dumps(
                                             {
+                                                "code": _structured_validation_code(
+                                                    validation_error,
+                                                ),
                                                 "next_attempt": 2,
                                                 "reason": "local_validation",
                                             },
@@ -3760,6 +3980,7 @@ class Company:
                             continue
                         synthesis = candidate_synthesis
                         structured_attempt_used = structured_attempt
+                        successful_structured_metrics_reset = structured_metrics_reset
                         break
                     if structured_attempt_used == 0:
                         raise RuntimeError("Structured synthesis did not produce a valid result")
@@ -3806,7 +4027,10 @@ class Company:
                             self._event(
                                 db, job_id, "structured_synthesis_rejected",
                                 json.dumps(
-                                    {"error_type": type(exc).__name__}, sort_keys=True,
+                                    {
+                                        "code": _structured_validation_code(exc),
+                                    },
+                                    sort_keys=True,
                                 ),
                             )
                     if not lease_active:
@@ -3962,7 +4186,11 @@ class Company:
                             db, job_id, "objective_constraint_applied",
                             "; ".join(constraint_notes),
                         )
-                    self._record_model_metrics(db, job_id, "executive-synthesis")
+                    if (
+                        not structured_synthesis_applied
+                        or successful_structured_metrics_reset
+                    ):
+                        self._record_model_metrics(db, job_id, "executive-synthesis")
             if not lease_active:
                 raise ExecutionLeaseLost(
                     f"Execution lease for job {job_id} was recovered or superseded"

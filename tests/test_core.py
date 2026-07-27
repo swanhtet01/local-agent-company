@@ -20,6 +20,7 @@ from local_company.cli import parser
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
     ReportFinalizationPending, SourceHit,
+    _failure_mode_is_substantive,
     bounded_context_blocks,
     compact_labeled_sections,
     evidence_filename_pairs_valid,
@@ -137,7 +138,8 @@ class ConstraintModel(MockModel):
                     "3. Audit records results and owner gates. "
                     "Daily review cadence: inspect once each day. "
                 "Success checks: one accepted report and zero bypassed gates. "
-                "Failure modes: truncation or unsupported claims. Owner gates: review every proposed action. "
+                "Failure modes: unsupported claims block report acceptance. "
+                "Owner gates: review every proposed action. "
                 "Owner review required."
             )
         return (
@@ -155,7 +157,7 @@ class RevisionModel(MockModel):
                 ("Task templates (three internal options)", "use intake review and audit templates for reversible work"),
                 ("Daily review cadence", "inspect queue health and reports once every day"),
                 ("Success checks (must pass)", "accept one grounded report with zero bypassed gates"),
-                ("Failure modes", "watch for truncation missing evidence and unsupported claims"),
+                ("Failure modes", "missing evidence blocks local report acceptance"),
                 ("Owner gates", "review every proposed action before any real execution"),
             ]
             return "\n\n".join(
@@ -184,7 +186,8 @@ class CitationModel(MockModel):
         return (
             f"Verified facts: {citation}. Assumptions: adoption remains unmeasured. "
             "Task templates: intake review and audit. Daily review cadence: inspect work every day. "
-            "Success checks: one accepted grounded report. Failure modes: missing evidence or truncation. "
+            "Success checks: one accepted grounded report. "
+            "Failure modes: missing evidence blocks report acceptance. "
             "Owner gates: review every proposed action. Owner review required."
         )
 
@@ -338,7 +341,6 @@ class StructuredRepairModel(MockModel):
                 "Perform the bounded local analysis and save its output",
                 "Review evidence limitations quality checks and owner decisions",
             ],
-            "failure_modes": ["Stop on stale sources malformed structure or unsupported claims"],
         }
 
 
@@ -2600,9 +2602,6 @@ class CompanyTests(unittest.TestCase):
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
                     ],
-                    "failure_modes": [
-                        "Stop on stale inputs malformed structure or unsupported claims"
-                    ],
                 }
 
         objective = (
@@ -2700,9 +2699,6 @@ class CompanyTests(unittest.TestCase):
                         "Capture the objective frozen inputs and local owner gate",
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
-                    ],
-                    "failure_modes": [
-                        "Stop on stale inputs malformed structure or unsupported claims"
                     ],
                 }
 
@@ -2865,6 +2861,7 @@ class CompanyTests(unittest.TestCase):
                 model.schemas[0]["properties"]["task_templates"]["items"]["maxLength"],
                 80,
             )
+            self.assertEqual(set(model.schemas[0]["properties"]), {"task_templates"})
             self.assertNotIn("success_checks", model.schemas[0]["properties"])
             self.assertNotIn("alpha.md", model.structured_prompts[0][1].lower())
             self.assertIn("3 to 12 words", model.structured_prompts[0][0])
@@ -2911,14 +2908,32 @@ class CompanyTests(unittest.TestCase):
                 json.loads(event[1]) for event in detail["events"]
                 if event[0] == "structured_synthesis_validated"
             )
-            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v3")
+            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v9")
             self.assertNotIn("success_checks", validated["fields"])
+            self.assertNotIn("failure_modes", validated["fields"])
 
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Every verified "
             "claim must name its exact source filename and matching supplied evidence ID."
         )
+
+        audit_sentinel = "REJECTED_PAYLOAD_SECRET_7E91"
+        SecretAdapterError = type(audit_sentinel, (RuntimeError,), {})
+
+        class SpoofedReason(str):
+            def __new__(cls):
+                return super().__new__(cls, audit_sentinel)
+
+            def __hash__(self):
+                return hash("stop")
+
+            def __eq__(self, other):
+                return other == "stop"
+
+        class UnstringableAdapterError(RuntimeError):
+            def __str__(self):
+                raise RuntimeError(audit_sentinel)
 
         class RejectingStructuredModel(MockModel):
             def __init__(self, behavior):
@@ -2928,13 +2943,25 @@ class CompanyTests(unittest.TestCase):
 
             def complete(self, system, prompt):
                 self.complete_calls.append((system, prompt))
-                self.last_metrics = {"marker": "specialist-only", "output_tokens": 777}
+                self.last_metrics = {
+                    "raw_payload": audit_sentinel, "output_tokens": 777,
+                }
                 return "Review the frozen source locally and preserve owner control."
 
             def complete_structured(self, system, prompt, schema):
-                self.last_metrics = {"marker": "structured-current", "output_tokens": 3}
+                self.last_metrics = {
+                    "raw_payload": audit_sentinel,
+                    "output_tokens": 3,
+                    "prompt_tokens": 10 ** 10000,
+                    "num_predict": 3.5,
+                    "total_seconds": -(10 ** 10000),
+                    "done_reason": SpoofedReason(),
+                    "stage": audit_sentinel,
+                }
                 if self.behavior == "raises":
-                    raise RuntimeError("malformed structured response")
+                    raise SecretAdapterError(audit_sentinel)
+                if self.behavior == "unstringable":
+                    raise UnstringableAdapterError()
                 return {
                     "assumptions": ["Operator adoption remains unknown pending observation"],
                     "unexpected": ["This field must be rejected locally"],
@@ -2945,12 +2972,15 @@ class CompanyTests(unittest.TestCase):
                 self.last_metrics = {}
 
             def complete(self, system, prompt):
-                self.last_metrics = {"marker": "specialist-only", "output_tokens": 777}
+                self.last_metrics = {
+                    "raw_payload": audit_sentinel, "output_tokens": 777,
+                }
                 return "Review the frozen source locally and preserve owner control."
 
         for name, model in (
             ("missing-capability", StaleMetricsModel()),
             ("adapter-error", RejectingStructuredModel("raises")),
+            ("unstringable-error", RejectingStructuredModel("unstringable")),
             ("wrong-fields", RejectingStructuredModel("wrong-fields")),
         ):
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
@@ -2979,6 +3009,19 @@ class CompanyTests(unittest.TestCase):
                 self.assertIsNone(job[3])
                 self.assertIn("structured_synthesis_rejected", {event[0] for event in events})
                 self.assertIn("job_failed", {event[0] for event in events})
+                rejected_event = next(
+                    json.loads(detail) for kind, detail in events
+                    if kind == "structured_synthesis_rejected"
+                )
+                self.assertEqual(
+                    rejected_event["code"],
+                    "field_set" if name == "wrong-fields" else "runtime_error",
+                )
+                self.assertEqual(set(rejected_event), {"code"})
+                self.assertNotIn(
+                    audit_sentinel,
+                    "\n".join(detail for _, detail in events),
+                )
                 rejection_metrics = [
                     json.loads(detail) for kind, detail in events
                     if kind == "model_metrics"
@@ -2989,7 +3032,11 @@ class CompanyTests(unittest.TestCase):
                     self.assertEqual(rejection_metrics, [])
                 else:
                     self.assertEqual(len(rejection_metrics), 1)
-                    self.assertEqual(rejection_metrics[0]["marker"], "structured-current")
+                    self.assertEqual(rejection_metrics[0]["output_tokens"], 3)
+                    self.assertNotIn("raw_payload", rejection_metrics[0])
+                    self.assertEqual(
+                        set(rejection_metrics[0]), {"stage", "output_tokens"},
+                    )
                 if isinstance(model, RejectingStructuredModel):
                     self.assertFalse(any(
                         "executive chair" in system or "report editor" in system
@@ -3008,6 +3055,22 @@ class CompanyTests(unittest.TestCase):
         class RetryingStructuredModel(MockModel):
             def __init__(self):
                 self.structured_prompts = []
+                self.metrics_reset_calls = 0
+
+            @property
+            def last_metrics(self):
+                return {
+                    "done": True,
+                    "done_reason": "length",
+                    "output_tokens": 512,
+                    "num_predict": 512,
+                }
+
+            @last_metrics.setter
+            def last_metrics(self, value):
+                self.metrics_reset_calls += 1
+                if self.metrics_reset_calls == 1:
+                    raise RuntimeError("OPTIONAL_METRICS_SECRET_42D8")
 
             def complete(self, system, prompt):
                 return "Review the frozen evidence locally and preserve owner control."
@@ -3025,9 +3088,6 @@ class CompanyTests(unittest.TestCase):
                         "Capture the objective frozen inputs and local owner gate",
                         "Perform bounded analysis and preserve the local output",
                         third_template,
-                    ],
-                    "failure_modes": [
-                        "Stop on stale inputs malformed structure or unsupported claims"
                     ],
                 }
 
@@ -3047,6 +3107,7 @@ class CompanyTests(unittest.TestCase):
 
             self.assertTrue(evaluation["passed"])
             self.assertEqual(len(model.structured_prompts), 2)
+            self.assertEqual(model.metrics_reset_calls, 2)
             self.assertNotIn("frozen_local_evidence", model.structured_prompts[1])
             self.assertNotIn("frozen_local_evidence", company.job_detail(job_id)["job"][7])
             self.assertIn("Correction codes:", model.structured_prompts[1])
@@ -3054,6 +3115,20 @@ class CompanyTests(unittest.TestCase):
                 "structured_synthesis_retry_scheduled",
                 {event[0] for event in detail["events"]},
             )
+            retry_event = next(
+                json.loads(event[1]) for event in detail["events"]
+                if event[0] == "structured_synthesis_retry_scheduled"
+            )
+            self.assertEqual(retry_event["code"], "serialized_metadata")
+            self.assertNotIn(
+                "OPTIONAL_METRICS_SECRET_42D8",
+                "\n".join(event[1] for event in detail["events"]),
+            )
+            self.assertFalse(any(
+                event[0] == "model_metrics"
+                and json.loads(event[1]).get("stage") == "executive-synthesis"
+                for event in detail["events"]
+            ))
             validated = next(
                 json.loads(event[1]) for event in detail["events"]
                 if event[0] == "structured_synthesis_validated"
@@ -3090,7 +3165,6 @@ class CompanyTests(unittest.TestCase):
                 "Perform bounded analysis and preserve the local output",
                 "Review evidence limitations checks and owner decisions",
             ],
-            "failure_modes": ["Stop on stale inputs malformed structure or unsupported claims"],
         }
 
         rendered = render_structured_synthesis(
@@ -3122,6 +3196,9 @@ class CompanyTests(unittest.TestCase):
             "Success checks: Require a sealed local report, valid hashes, and every "
             "deterministic quality gate to pass.",
             rendered,
+        )
+        self.assertIn(
+            "Failure modes: Missing evidence blocks local report acceptance.", rendered,
         )
         self.assertNotIn("until.", rendered)
         self.assertNotRegex(rendered, r"\[EVIDENCE:[^\]]*$")
@@ -3166,7 +3243,7 @@ class CompanyTests(unittest.TestCase):
         for unsafe in unsafe_values:
             with self.subTest(value=unsafe):
                 invalid = json.loads(json.dumps(payload))
-                invalid["failure_modes"] = [unsafe]
+                invalid["task_templates"][0] = unsafe
                 with self.assertRaises(ValueError):
                     render_structured_synthesis(
                         invalid, labels, 3, sources, "Use frozen evidence", 177,
@@ -3219,15 +3296,78 @@ class CompanyTests(unittest.TestCase):
             "Review local evidence each morning",
             "Review local evidence if convenient",
             "Review local evidence unless convenient",
+            "Document evidence tampering safeguards for owner review",
+            "Review corruption controls during daily audit",
+            "Document failure modes for owner review",
+            "Document why evidence is missing for owner review",
+            "Review failed checks and document owner response",
+            "Review stop procedures after evidence tampering",
+            "Document blocked items for owner review",
+            "Prevent evidence tampering through daily reviews",
+            "Avoid evidence corruption with routine documentation",
+            "Mitigate security breaches through local checklists",
+            "Detect source discrepancies during daily review",
+            "Address evidence tampering through owner review",
+            "Manage source discrepancies during daily review",
+            "Handle evidence corruption concerns locally",
+            "Oversee evidence tampering response locally",
+            "Addresses evidence tampering through owner review",
+            "Document that evidence is missing for owner review",
+            "Document whether evidence is missing for owner review",
+            "Addressing why evidence is missing for owner review",
+            "Managing source discrepancies during daily review",
+            "Failure response planning for owner review",
+            "Corruption risk assessment for owner review",
+            "Evidence tampering response checklist",
+            "Evidence tampering ticket review each morning",
+            "Security breach remediation plan",
+            "Recovery from evidence corruption",
+            "Confirm evidence is missing before owner review",
+            "Flag evidence is missing before owner review",
+            "Review evidence is missing before owner review",
+            "Document failure evidence for owner review",
+            "Review failure evidence locally",
+            "Record failure notes for owner",
+            "Prevention of evidence tampering through controls",
             "Local gap local gap local gap",
         ):
             with self.subTest(failure_mode=cosmetic_failure):
-                invalid_failure = json.loads(json.dumps(payload))
-                invalid_failure["failure_modes"] = [cosmetic_failure]
-                with self.assertRaisesRegex(ValueError, "failure condition"):
-                    render_structured_synthesis(
-                        invalid_failure, labels, 3, sources, "Use frozen evidence", 177,
-                    )
+                self.assertFalse(_failure_mode_is_substantive(cosmetic_failure))
+
+        for failure_text in (
+            "Evidence tampering detected during review phase",
+            "Security breaches appear during local review",
+            "Source discrepancies appear during local review",
+            "Evidence drifted during local capture",
+            "Evidence corruption detected during local review",
+            "Review fails when evidence is missing",
+            "Report is invalid when sources conflict",
+            "Record is missing from local evidence",
+            "Audit is blocked by stale inputs",
+            "Review process fails when evidence is missing",
+            "Audit pipeline is blocked by stale inputs",
+            "Review failed when evidence became unavailable",
+            "Report generation failure blocks local release",
+            "Security breach response is unavailable",
+            "The local model returned malformed output",
+            "Local model timed out during synthesis",
+            "Review failed due to missing evidence",
+            "Audit stopped due to stale inputs",
+            "Report generation failed unexpectedly",
+            "Monitoring failure during local review",
+            "Evidence monitoring failure during local review",
+            "Risk assessment failure during local review",
+            "Recovery failure during local operation",
+            "Control failure during local review",
+            "Documentation failure during local review",
+            "The local model returned an invalid response",
+            "Evidence was not found during review",
+            "Evidence could not be verified",
+            "The local model crashed during synthesis",
+            "The review fails when evidence is missing",
+        ):
+            with self.subTest(failure_text=failure_text):
+                self.assertTrue(_failure_mode_is_substantive(failure_text))
 
         duplicate = json.loads(json.dumps(payload))
         duplicate["task_templates"] = [payload["task_templates"][0]] * 3
@@ -3422,6 +3562,31 @@ class CompanyTests(unittest.TestCase):
             job_id, _ = company.run(objective, roles=["quality"])
             evaluation = company.evaluate_job(job_id)
             self.assertFalse(evaluation["checks"]["task_template_count_present"])
+            self.assertFalse(evaluation["checks"]["requested_concepts_present"])
+            self.assertFalse(evaluation["passed"])
+
+        class CosmeticFailureModel(MockModel):
+            def complete(self, system, prompt):
+                if "executive chair" in system or "report editor" in system:
+                    return (
+                        "Verified facts: local evidence remains limited and reviewable. "
+                        "Assumptions: operator adoption remains unknown pending owner review. "
+                        "Task templates: 1. Capture local inputs and owner constraints. "
+                        "2. Review frozen evidence and record limitations. "
+                        "3. Audit local findings before owner review. "
+                        "Daily review cadence: inspect local work once each day. "
+                        "Success checks: require grounded output and bounded scope. "
+                        "Failure modes: Document why evidence is missing for owner review. "
+                        "Owner gates: review every proposed external action. "
+                        "Owner review required."
+                    )
+                return "Keep work local reversible and subject to owner review."
+
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), CosmeticFailureModel())
+            job_id, _ = company.run(objective, roles=["quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["checks"]["task_template_count_present"])
             self.assertFalse(evaluation["checks"]["requested_concepts_present"])
             self.assertFalse(evaluation["passed"])
 

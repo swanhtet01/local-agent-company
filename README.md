@@ -117,8 +117,12 @@ The deterministic renderer also owns the success criterion, so model-generated p
 completion wording cannot define acceptance.
 Strict proposal fields reject serialized-object fragments and source/evidence metadata keys;
 malformed task text receives the same single local retry and then fails closed.
-Task templates must begin with an action verb, failure modes must state an explicit failure
-condition, and the evaluator reapplies both semantic checks to sealed reports.
+Task templates must begin with a listed action verb. In strict grounded runs, failure-mode prose is
+code-owned and deterministically rendered instead of accepted from the model. The evaluator keeps a
+conservative semantic check for legacy and non-structured reports.
+Retry and final-rejection audit events record only stable code-owned validation codes, never
+the rejected model payload. Persisted model metrics use a fixed key, type, range, and enum
+allowlist.
 
 ```powershell
 .\local-company.cmd quality JOB_ID
