@@ -266,6 +266,7 @@ def render_dashboard(
     company: Company, service_token: str | None = None, notice: str = "",
     worker: LocalQueueWorker | None = None,
     build_identity: dict[str, object] | None = None,
+    draft_fields: dict[str, str] | None = None,
 ) -> str:
     snapshot = dashboard_snapshot(company, worker)
     live_build = dict(
@@ -274,6 +275,27 @@ def render_dashboard(
 
     def cell(value: object) -> str:
         return html.escape(str(value))
+
+    draft = draft_fields if isinstance(draft_fields, dict) else {}
+    draft_objective = (
+        draft.get("objective", "")
+        if isinstance(draft.get("objective", ""), str) else ""
+    )[:4000]
+    draft_project = (
+        draft.get("project", "") if isinstance(draft.get("project", ""), str) else ""
+    )
+    draft_playbook = (
+        draft.get("playbook", "")
+        if isinstance(draft.get("playbook", ""), str) else ""
+    )
+    raw_priority = (
+        draft.get("priority", "50")
+        if isinstance(draft.get("priority", "50"), str) else "50"
+    )
+    draft_priority = (
+        raw_priority
+        if raw_priority.isdigit() and 0 <= int(raw_priority) <= 100 else "50"
+    )
 
     completion_items = snapshot["health"]["pending_completion"]
     completion_by_job = {item["job_id"]: item["state"] for item in completion_items}
@@ -381,10 +403,14 @@ def render_dashboard(
     ) or '<tr><td colspan="3" class="empty">No pending approvals</td></tr>'
 
     project_options = "".join(
-        f'<option value="{cell(row[0])}">{cell(row[1])}</option>' for row in snapshot["projects"]
+        f'<option value="{cell(row[0])}"'
+        f'{" selected" if str(row[0]) == draft_project else ""}>{cell(row[1])}</option>'
+        for row in snapshot["projects"]
     )
     playbook_options = "".join(
-        f'<option value="{cell(name)}">{cell(name)} - {cell(item["description"])}</option>'
+        f'<option value="{cell(name)}"'
+        f'{" selected" if name == draft_playbook else ""}>'
+        f'{cell(name)} - {cell(item["description"])}</option>'
         for name, item in PLAYBOOKS.items()
     )
     intake = ""
@@ -412,15 +438,16 @@ def render_dashboard(
         run_label = f"Run {reviewed_queue_id} locally" if next_due else "Run reviewed mission locally"
         intake = f"""
 <section class="intake"><h2>Queue a SuperMega task</h2>
-<p class="hint">This records work only. It does not run a model or perform an external action.</p>
+<p class="hint">Previewing is read-only and calls no model. Queuing records work only; neither action performs an external action.</p>
 <form method="post" action="/queue/enqueue">
 <input type="hidden" name="service_token" value="{cell(service_token)}">
-<label>Objective<textarea name="objective" maxlength="4000" required placeholder="Describe the result, evidence, constraints, and owner gates."></textarea></label>
+<label>Objective<textarea name="objective" maxlength="4000" required placeholder="Describe the result, evidence, constraints, and owner gates.">{cell(draft_objective)}</textarea></label>
 <div class="form-grid">
 <label>Project<select name="project"><option value="">Unscoped</option>{project_options}</select></label>
 <label>Playbook<select name="playbook"><option value="">Automatic routing</option>{playbook_options}</select></label>
-<label>Priority (0-100)<input name="priority" type="number" min="0" max="100" value="50" required></label>
-</div><button type="submit">Add to queue</button></form>
+<label>Priority (0-100)<input name="priority" type="number" min="0" max="100" value="{cell(draft_priority)}" required></label>
+</div><button type="submit" formaction="/queue/preview-team">Preview team (no model)</button>
+<button type="submit">Add to queue</button></form>
 <h3>Run one local mission</h3><p class="hint">{cell(run_hint)}</p>
 <form method="post" action="/queue/run-next">
 <input type="hidden" name="service_token" value="{cell(service_token)}">
@@ -1027,7 +1054,8 @@ def create_dashboard_server(
                     raise
                 return
             if self.path in {
-                "/queue/enqueue", "/queue/cancel", "/queue/reset", "/queue/run-next", "/jobs/quality"
+                "/queue/preview-team", "/queue/enqueue", "/queue/cancel",
+                "/queue/reset", "/queue/run-next", "/jobs/quality",
             } and service_token:
                 try:
                     fields = self._read_form()
@@ -1041,7 +1069,37 @@ def create_dashboard_server(
                     self.send_error(403, "Invalid local service token")
                     return
                 try:
-                    if self.path == "/queue/enqueue":
+                    if self.path == "/queue/preview-team":
+                        preview = company.routing_preview(
+                            fields.get("objective", ""),
+                            fields.get("playbook") or None,
+                        )
+                        roles = ", ".join(str(role) for role in preview["roles"])
+                        routing = str(preview["routing"]).replace("_", " ")
+                        gate = preview["owner_gate"]
+                        categories = gate["categories"] if isinstance(gate, dict) else []
+                        gate_notice = (
+                            " Owner gate required before execution: "
+                            + ", ".join(str(value).replace("_", " ") for value in categories)
+                            + "."
+                            if categories else
+                            " No sensitive-action category was detected by the wording screen."
+                        )
+                        notice = (
+                            f"Team preview only ({routing}): {roles}."
+                            f"{gate_notice} No model was called, no state changed, and no mission was queued."
+                        )
+                        body = render_dashboard(
+                            company, service_token, notice, worker, build_identity,
+                            draft_fields=fields,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self._send_security_headers()
+                        self.end_headers()
+                        self.wfile.write(body)
+                    elif self.path == "/queue/enqueue":
                         priority = int(fields.get("priority", "50"))
                         queue_id = company.enqueue(
                             fields.get("objective", ""),

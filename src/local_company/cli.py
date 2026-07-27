@@ -31,6 +31,11 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    route = sub.add_parser(
+        "route", help="Preview an automatic or playbook team without calling a model"
+    )
+    route.add_argument("objective")
+    route.add_argument("--playbook", choices=tuple(PLAYBOOKS))
 
     run = sub.add_parser("run", help="Route and run a team on one objective")
     run.add_argument("objective")
@@ -244,6 +249,8 @@ def main() -> int:
         elif args.command == "roles":
             for name, purpose in ROLES.items():
                 print(f"{name:16} {purpose}")
+        elif args.command == "route":
+            print(json.dumps(Company.routing_preview(args.objective, args.playbook), indent=2))
         elif args.command == "run":
             roles = [role.strip() for role in args.roles.split(",") if role.strip()] if args.roles else None
             job_id, output = company.run(args.objective, roles, project=args.project)

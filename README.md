@@ -90,6 +90,26 @@ Directory reads are non-recursive unless `--recursive` is explicitly supplied, c
 
 ## Run teams
 
+Preview the automatically selected team before spending any local inference
+time or creating company state:
+
+```powershell
+.\local-company.cmd route "Improve supplier controls, inventory flow, and customer retention metrics"
+.\local-company.cmd route "Compare supplier options" --playbook procurement-review
+```
+
+The versioned JSON preview shows the fixed chair and quality roles, at most four
+automatically selected specialists, each exact matched signal, any matched
+departments omitted by the automatic cap, and explicit `model_called`,
+`state_mutated`, and `work_started` false effects. A named playbook previews its
+exact fixed team instead of applying the automatic cap. The preview also reports
+sensitive-action categories that require an owner gate before execution.
+Matching uses normalized whole words and phrases, so text such as `approval`
+cannot accidentally match the engineering signal `app`. The preview does not
+call Ollama, initialize a store, queue work, approve a gate, or authorize an
+action. The private dashboard exposes the same **Preview team (no model)** step
+and keeps the draft objective, project, playbook, and priority ready for review.
+
 Automatic routing:
 
 ```powershell
@@ -106,7 +126,8 @@ Available functions:
 
 ```text
 chief-of-staff  research  operations  finance  marketing
-sales           product   engineering legal-risk quality
+sales           product   engineering legal-risk analytics
+customer-success people-ops procurement strategy quality
 ```
 
 ## Reusable playbooks and mission queue
@@ -128,7 +149,14 @@ Queue work without executing it, then manually run the highest-priority mission 
 
 Priorities range from 0 to 100. `--scheduled-at` accepts an ISO-8601 timestamp; values without a timezone are treated as UTC. There is no autonomous daemon: queue execution is an explicit local operator command. `--queue-id` is optional in the CLI for compatibility, but when supplied it fails without mutation unless that exact reviewed ID is still the canonical highest-priority due mission. The dashboard always supplies the displayed ID and claims it synchronously before acknowledging the POST. A changed queue order returns a conflict and runs nothing. Sensitive objectives become `needs_approval` and are not executed. When execution begins, the queue claim and job ID are linked in the same database transaction before the first model response and share a revocable execution lease, so interrupted work remains attributable and a superseded worker cannot persist a late result.
 
-Available playbooks are `business-launch`, `decision-brief`, `operations-improvement`, `product-build`, and `growth-plan`.
+Available playbooks are `business-launch`, `decision-brief`,
+`operations-improvement`, `product-build`, `growth-plan`,
+`customer-retention`, `people-operations`, `procurement-review`, and
+`metrics-review`, and `strategy-review`. The new departments remain planning and review functions:
+customer-success never contacts customers, people operations does not make
+employment decisions, procurement never places orders or commits spend, and
+analytics never invents missing data; strategy never presents forecasts or
+assumptions as facts.
 
 Before inference, every new mission freezes a versioned evidence manifest containing each retrieved source ID/path/hash, exact excerpt, character and line span, evidence ID, capture time, and a canonical manifest SHA-256. Prompts expose only those frozen `[EVIDENCE:id]` references. For objectives that request verified facts from imported evidence, a filename alone is insufficient: verification wording must carry a valid frozen evidence ID in the same sentence. A changed source, forged manifest, altered quote, invalid digest, or missing evidence citation fails closed. The dashboard shows the exact frozen excerpts for owner inspection.
 

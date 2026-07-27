@@ -38,18 +38,71 @@ ROLES = {
     "product": "Define user needs, requirements, prioritization, and acceptance criteria.",
     "engineering": "Design, implement, test, and review technical work inside an authorized scope.",
     "legal-risk": "Flag legal, privacy, security, and compliance questions; do not give final legal advice.",
+    "analytics": "Define metrics, assess data quality, and frame decision evidence. Never invent missing data.",
+    "customer-success": "Design onboarding, support, adoption, and retention workflows. Never contact customers.",
+    "people-ops": "Draft staffing, training, role, and team-practice options. Do not make employment decisions or contact workers.",
+    "procurement": "Compare sourcing, supplier, and purchasing options with controls. Never place orders or commit spend.",
+    "strategy": "Frame strategic options, scenarios, and portfolio tradeoffs. Never present forecasts or assumptions as facts.",
     "quality": "Challenge assumptions, verify outputs, and report gaps before work is accepted.",
 }
 
 ROLE_SIGNALS = {
-    "research": ("research", "investigate", "compare", "market", "evidence", "learn"),
-    "operations": ("operate", "process", "workflow", "inventory", "logistics", "schedule", "team"),
-    "finance": ("budget", "cost", "profit", "price", "finance", "revenue", "cash", "margin"),
-    "marketing": ("marketing", "brand", "campaign", "content", "audience", "launch"),
-    "sales": ("sales", "lead", "prospect", "customer", "offer", "pipeline"),
-    "product": ("product", "feature", "user", "roadmap", "requirement", "service"),
-    "engineering": ("code", "software", "app", "api", "database", "technical", "automate", "agent"),
-    "legal-risk": ("legal", "contract", "privacy", "security", "compliance", "license", "risk"),
+    "research": (
+        "research", "investigate", "investigation", "compare", "comparison",
+        "market research", "evidence", "learn", "discovery",
+    ),
+    "operations": (
+        "operations", "operational", "process", "workflow", "inventory",
+        "logistics", "schedule", "scheduling", "team",
+    ),
+    "finance": (
+        "budget", "budgeting", "cost", "costs", "profit", "profitable",
+        "profitability", "price", "pricing", "finance", "financial", "revenue",
+        "cash", "margin", "unit economics",
+    ),
+    "marketing": (
+        "marketing", "brand", "branding", "campaign", "content", "audience",
+        "launch", "positioning",
+    ),
+    "sales": (
+        "sales", "lead", "leads", "prospect", "prospects", "customer acquisition",
+        "offer", "pipeline", "qualification",
+    ),
+    "product": (
+        "product", "feature", "features", "user", "users", "roadmap",
+        "requirement", "requirements", "service design",
+    ),
+    "engineering": (
+        "code", "coding", "software", "app", "application", "api", "database",
+        "technical", "automate", "automation", "agent",
+    ),
+    "legal-risk": (
+        "legal", "contract", "contracts", "privacy", "security", "compliance",
+        "license", "licensing", "risk",
+    ),
+    "analytics": (
+        "analytics", "data", "metric", "metrics", "kpi", "kpis", "dashboard",
+        "forecast", "forecasting", "experiment", "cohort", "reporting",
+    ),
+    "customer-success": (
+        "customer success", "customer service", "support", "onboarding",
+        "retention", "churn", "complaint", "complaints", "service recovery",
+        "adoption",
+    ),
+    "people-ops": (
+        "people operations", "people ops", "human resources", "hr", "hiring",
+        "hire", "staffing", "staff", "employee", "employees", "training",
+        "performance review", "workforce", "shift planning",
+    ),
+    "procurement": (
+        "procurement", "procure", "purchasing", "supplier", "suppliers", "vendor",
+        "vendors", "sourcing", "quote", "quotes", "reorder",
+    ),
+    "strategy": (
+        "strategy", "strategic", "scenario", "scenarios", "portfolio",
+        "competitive advantage", "tradeoff", "tradeoffs", "annual plan",
+        "next quarter",
+    ),
 }
 
 PLAYBOOKS = {
@@ -72,6 +125,38 @@ PLAYBOOKS = {
     "growth-plan": {
         "description": "Build a coordinated marketing and sales plan grounded in customer evidence and economics.",
         "roles": ["chief-of-staff", "research", "finance", "marketing", "sales", "quality"],
+    },
+    "customer-retention": {
+        "description": "Improve onboarding, support, adoption, and retention using customer and product evidence.",
+        "roles": [
+            "chief-of-staff", "research", "analytics", "customer-success",
+            "marketing", "product", "quality",
+        ],
+    },
+    "people-operations": {
+        "description": "Design roles, staffing, training, team rhythms, costs, and employment-risk questions.",
+        "roles": [
+            "chief-of-staff", "people-ops", "operations", "finance",
+            "legal-risk", "quality",
+        ],
+    },
+    "procurement-review": {
+        "description": "Compare sourcing choices, supplier controls, operating fit, economics, and risks.",
+        "roles": [
+            "chief-of-staff", "research", "procurement", "operations", "finance",
+            "legal-risk", "quality",
+        ],
+    },
+    "metrics-review": {
+        "description": "Define a decision-ready scorecard with data-quality limits and operating actions.",
+        "roles": ["chief-of-staff", "analytics", "finance", "operations", "quality"],
+    },
+    "strategy-review": {
+        "description": "Compare strategic scenarios and portfolio tradeoffs against evidence, economics, and risk.",
+        "roles": [
+            "chief-of-staff", "research", "strategy", "analytics", "finance",
+            "legal-risk", "quality",
+        ],
     },
 }
 
@@ -124,6 +209,8 @@ DATASET_CONTRACT_TYPES = frozenset({
 })
 MAX_DATASET_CONTRACT_COLUMNS = 64
 MAX_DATASET_CONTRACT_DECLARATIONS = 256
+TEAM_ROUTE_SCHEMA = "local-company.team-route.v1"
+MAX_ROUTED_SPECIALISTS = 4
 
 
 def count_words(text: str) -> int:
@@ -1977,17 +2064,109 @@ class Company:
         return sorted(categories)
 
     @staticmethod
-    def select_roles(objective: str) -> list[str]:
-        lower = objective.lower()
-        scored = []
-        for role, signals in ROLE_SIGNALS.items():
-            score = sum(1 for signal in signals if signal in lower)
-            if score:
-                scored.append((score, role))
-        specialists = [role for _, role in sorted(scored, key=lambda item: (-item[0], item[1]))[:4]]
-        if not specialists:
-            specialists = ["research", "operations"]
-        return ["chief-of-staff", *specialists, "quality"]
+    def _routing_text(value: str) -> str:
+        return " ".join(re.sub(r"[\W_]+", " ", value.casefold()).split())
+
+    @classmethod
+    def routing_preview(
+        cls, objective: str, playbook: str | None = None,
+    ) -> dict[str, object]:
+        """Explain deterministic team selection without state or model work."""
+        if not isinstance(objective, str):
+            raise ValueError("Routing objective must be text")
+        normalized_objective = " ".join(objective.split())
+        if not normalized_objective:
+            raise ValueError("Routing objective cannot be empty")
+        if len(normalized_objective) > MAX_OBJECTIVE_CHARS:
+            raise ValueError(
+                f"Routing objective cannot exceed {MAX_OBJECTIVE_CHARS} characters"
+            )
+
+        if playbook is not None:
+            if not isinstance(playbook, str) or playbook not in PLAYBOOKS:
+                raise ValueError("Unknown playbook")
+            routing = "playbook"
+            routed_roles = list(PLAYBOOKS[playbook]["roles"])
+            selected = [
+                {
+                    "role": role,
+                    "score": 0,
+                    "matched_signals": [],
+                    "purpose": ROLES[role],
+                }
+                for role in routed_roles
+                if role not in {"chief-of-staff", "quality"}
+            ]
+            matched_candidate_count = 0
+            omitted: list[str] = []
+        else:
+            searchable = f" {cls._routing_text(normalized_objective)} "
+            candidates: list[dict[str, object]] = []
+            for role, signals in ROLE_SIGNALS.items():
+                matched = [
+                    signal
+                    for signal in signals
+                    if f" {cls._routing_text(signal)} " in searchable
+                ]
+                if matched:
+                    candidates.append({
+                        "role": role,
+                        "score": len(matched),
+                        "matched_signals": matched,
+                        "purpose": ROLES[role],
+                    })
+            candidates.sort(
+                key=lambda item: (-int(item["score"]), str(item["role"])),
+            )
+            routing = "signal_match"
+            if candidates:
+                selected = candidates[:MAX_ROUTED_SPECIALISTS]
+                omitted = [
+                    str(item["role"])
+                    for item in candidates[MAX_ROUTED_SPECIALISTS:]
+                ]
+            else:
+                routing = "default"
+                selected = [
+                    {
+                        "role": role,
+                        "score": 0,
+                        "matched_signals": [],
+                        "purpose": ROLES[role],
+                    }
+                    for role in ("research", "operations")
+                ]
+                omitted = []
+            matched_candidate_count = len(candidates)
+            specialist_roles = [str(item["role"]) for item in selected]
+            routed_roles = ["chief-of-staff", *specialist_roles, "quality"]
+        sensitive_categories = cls.sensitive_categories(normalized_objective)
+        return {
+            "schema": TEAM_ROUTE_SCHEMA,
+            "routing": routing,
+            "playbook": playbook,
+            "automatic_specialist_limit": MAX_ROUTED_SPECIALISTS,
+            "automatic_limit_applied": playbook is None,
+            "matched_candidate_count": matched_candidate_count,
+            "selected_specialist_count": len(selected),
+            "fixed_roles": ["chief-of-staff", "quality"],
+            "selected_specialists": selected,
+            "omitted_candidate_roles": omitted,
+            "roles": routed_roles,
+            "owner_gate": {
+                "required_before_execution": bool(sensitive_categories),
+                "categories": sensitive_categories,
+            },
+            "effects": {
+                "model_called": False,
+                "state_mutated": False,
+                "work_started": False,
+            },
+        }
+
+    @classmethod
+    def select_roles(cls, objective: str) -> list[str]:
+        return list(cls.routing_preview(objective)["roles"])
 
     @classmethod
     def plan(cls, objective: str, roles: list[str] | None = None) -> list[Assignment]:

@@ -31,7 +31,7 @@ from local_company.config import (
     valid_company_instance_id,
 )
 from local_company.core import (
-    Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
+    Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS, ROLES,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     bounded_context_blocks,
@@ -1500,6 +1500,178 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("finance", text)
             self.assertIn("marketing", text)
             self.assertEqual(company.jobs()[0][1], "complete")
+
+    def test_team_route_is_boundary_aware_bounded_and_explainable(self):
+        default = Company.routing_preview("Review the leadership approval policy")
+        self.assertEqual(default["schema"], "local-company.team-route.v1")
+        self.assertEqual(default["routing"], "default")
+        self.assertEqual(
+            default["roles"],
+            ["chief-of-staff", "research", "operations", "quality"],
+        )
+        self.assertNotIn("engineering", default["roles"])
+        self.assertNotIn("sales", default["roles"])
+        self.assertIsNone(default["playbook"])
+        self.assertEqual(default["matched_candidate_count"], 0)
+        self.assertEqual(default["selected_specialist_count"], 2)
+        self.assertEqual(
+            default["owner_gate"],
+            {"required_before_execution": False, "categories": []},
+        )
+
+        routed_objective = (
+            "Improve supplier purchasing cost controls, inventory workflow, "
+            "customer support retention, and cohort metrics dashboard data"
+        )
+        routed = Company.routing_preview(routed_objective)
+        self.assertEqual(
+            set(routed),
+            {
+                "schema", "routing", "playbook", "automatic_specialist_limit",
+                "automatic_limit_applied", "matched_candidate_count",
+                "selected_specialist_count", "fixed_roles", "selected_specialists",
+                "omitted_candidate_roles", "roles", "owner_gate", "effects",
+            },
+        )
+        self.assertEqual(routed["routing"], "signal_match")
+        self.assertEqual(routed["automatic_specialist_limit"], 4)
+        self.assertTrue(routed["automatic_limit_applied"])
+        self.assertEqual(routed["matched_candidate_count"], 5)
+        self.assertEqual(routed["selected_specialist_count"], 4)
+        self.assertEqual(
+            [item["role"] for item in routed["selected_specialists"]],
+            ["analytics", "customer-success", "operations", "procurement"],
+        )
+        self.assertTrue(all(
+            set(item) == {"role", "score", "matched_signals", "purpose"}
+            for item in routed["selected_specialists"]
+        ))
+        self.assertEqual(routed["omitted_candidate_roles"], ["finance"])
+        self.assertEqual(routed["selected_specialists"][0]["score"], 4)
+        self.assertEqual(
+            routed["selected_specialists"][0]["matched_signals"],
+            ["data", "metrics", "dashboard", "cohort"],
+        )
+        self.assertEqual(
+            routed["roles"],
+            [
+                "chief-of-staff", "analytics", "customer-success", "operations",
+                "procurement", "quality",
+            ],
+        )
+        self.assertEqual(
+            routed["effects"],
+            {"model_called": False, "state_mutated": False, "work_started": False},
+        )
+        serialized_route = json.dumps(routed)
+        self.assertNotIn(routed_objective, serialized_route)
+        self.assertLess(len(serialized_route.encode("utf-8")), 8_192)
+
+        gated = Company.routing_preview("Send email to every prospect")
+        self.assertEqual(
+            gated["owner_gate"],
+            {
+                "required_before_execution": True,
+                "categories": ["external_communication"],
+            },
+        )
+
+        fixed = Company.routing_preview(
+            "Review one supplier decision", "procurement-review",
+        )
+        self.assertEqual(fixed["routing"], "playbook")
+        self.assertEqual(fixed["playbook"], "procurement-review")
+        self.assertFalse(fixed["automatic_limit_applied"])
+        self.assertEqual(fixed["roles"], PLAYBOOKS["procurement-review"]["roles"])
+        self.assertEqual(len(fixed["selected_specialists"]), 5)
+        self.assertEqual(fixed["matched_candidate_count"], 0)
+        self.assertEqual(fixed["selected_specialist_count"], 5)
+        self.assertEqual(fixed["omitted_candidate_roles"], [])
+
+        strategic = Company.routing_preview(
+            "Compare strategic scenarios for next quarter",
+        )
+        self.assertEqual(strategic["selected_specialists"][0]["role"], "strategy")
+        self.assertEqual(
+            strategic["selected_specialists"][0]["matched_signals"],
+            ["strategic", "scenarios", "next quarter"],
+        )
+
+    def test_team_route_cli_is_zero_state_and_zero_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "unused-state"
+            output = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "local-company", "--home", str(state), "route",
+                    "Improve supplier controls and inventory workflow",
+                ],
+            ), patch("sys.stdout", output):
+                exit_code = cli_main()
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["schema"], "local-company.team-route.v1")
+            self.assertIn("procurement", payload["roles"])
+            self.assertIn("operations", payload["roles"])
+            self.assertEqual(payload["effects"]["model_called"], False)
+            self.assertEqual(payload["effects"]["state_mutated"], False)
+            self.assertFalse(state.exists())
+
+    def test_team_route_rejects_unbounded_or_invalid_objectives(self):
+        with self.assertRaisesRegex(ValueError, "must be text"):
+            Company.routing_preview(7)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            Company.routing_preview(" \n\t ")
+        with self.assertRaisesRegex(ValueError, "cannot exceed 4000"):
+            Company.routing_preview("x" * 4_001)
+        with self.assertRaisesRegex(ValueError, "Unknown playbook"):
+            Company.routing_preview("Review operations", "unknown")
+
+    def test_business_playbooks_cover_new_guarded_departments(self):
+        expected = {
+            "customer-retention": {"analytics", "customer-success", "product"},
+            "people-operations": {"people-ops", "operations", "legal-risk"},
+            "procurement-review": {"procurement", "finance", "legal-risk"},
+            "metrics-review": {"analytics", "finance", "operations"},
+            "strategy-review": {"strategy", "analytics", "legal-risk"},
+        }
+        for playbook, required_roles in expected.items():
+            with self.subTest(playbook=playbook):
+                roles = PLAYBOOKS[playbook]["roles"]
+                self.assertEqual(roles[0], "chief-of-staff")
+                self.assertEqual(roles[-1], "quality")
+                self.assertTrue(required_roles.issubset(roles))
+                self.assertTrue(set(roles).issubset(ROLES))
+        for role in (
+            "analytics", "customer-success", "people-ops", "procurement", "strategy",
+        ):
+            self.assertRegex(ROLES[role].lower(), r"never|do not")
+
+    def test_new_business_playbooks_run_complete_mock_teams(self):
+        objectives = {
+            "customer-retention": "Review the customer retention workflow",
+            "people-operations": "Review the staff training workflow",
+            "procurement-review": "Review supplier selection controls",
+            "metrics-review": "Review local operating metrics",
+            "strategy-review": "Compare strategic scenarios for next quarter",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            for playbook, objective in objectives.items():
+                with self.subTest(playbook=playbook):
+                    queue_id = company.enqueue(objective, playbook=playbook)
+                    claimed_id, job_id, report, passed = company.run_next_queue_item(
+                        queue_id,
+                    )
+                    self.assertEqual(claimed_id, queue_id)
+                    self.assertTrue(passed)
+                    self.assertTrue(report.exists())
+                    self.assertEqual(
+                        [row[1] for row in company.job_detail(job_id)["assignments"]],
+                        PLAYBOOKS[playbook]["roles"],
+                    )
 
     def test_recent_identical_direct_mission_reuses_output_without_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3554,6 +3726,76 @@ class CompanyTests(unittest.TestCase):
                     opener.open(too_large, timeout=3)
                 self.assertEqual(rejected.exception.code, 413)
                 rejected.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_dashboard_team_preview_preserves_draft_without_work_or_model_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            project_id = company.create_project("Preview Lab")
+            server = create_dashboard_server(company, 0, service_token="preview-secret")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def post(objective: str, *, token: str = "preview-secret"):
+                return urllib.request.Request(
+                    base + "/queue/preview-team",
+                    data=urllib.parse.urlencode({
+                        "service_token": token,
+                        "objective": objective,
+                        "project": project_id,
+                        "playbook": "procurement-review",
+                        "priority": "74",
+                    }).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+
+            try:
+                with opener.open(base + "/", timeout=3) as response:
+                    self.assertIn(b"Preview team (no model)", response.read())
+                before_digest = hashlib.sha256(company.db_path.read_bytes()).hexdigest()
+                objective = "Improve supplier <script> controls and inventory workflow"
+                with opener.open(post(objective), timeout=3) as response:
+                    page = response.read().decode("utf-8")
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+                self.assertIn("Team preview only (playbook)", page)
+                self.assertIn("procurement", page)
+                self.assertIn("legal-risk", page)
+                self.assertIn("No model was called", page)
+                self.assertIn("no mission was queued", page)
+                self.assertIn("&lt;script&gt;", page)
+                self.assertNotIn("<script>", page)
+                self.assertIn(f'value="{project_id}" selected', page)
+                self.assertIn('value="procurement-review" selected', page)
+                self.assertIn('value="74"', page)
+                self.assertEqual(model.calls, 0)
+                self.assertEqual(company.queue_items(), [])
+                self.assertEqual(company.jobs(), [])
+                self.assertEqual(company.action_requests(), [])
+                self.assertEqual(
+                    hashlib.sha256(company.db_path.read_bytes()).hexdigest(),
+                    before_digest,
+                )
+
+                with opener.open(post("Send email to every prospect"), timeout=3) as response:
+                    gated_page = response.read().decode("utf-8")
+                self.assertIn("Owner gate required before execution", gated_page)
+                self.assertIn("external communication", gated_page)
+                self.assertEqual(company.action_requests(), [])
+                self.assertEqual(model.calls, 0)
+
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    opener.open(post("Review inventory", token="wrong"), timeout=3)
+                self.assertEqual(rejected.exception.code, 403)
+                rejected.exception.close()
+                self.assertEqual(company.queue_items(), [])
             finally:
                 server.shutdown()
                 server.server_close()
