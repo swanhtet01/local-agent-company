@@ -32,7 +32,8 @@ from local_company.config import (
 )
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS, ROLES,
-    QUALITY_RECOVERY_SCHEMA, ReportFinalizationPending, SourceHit,
+    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA,
+    ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     bounded_context_blocks,
     compact_labeled_sections,
@@ -4856,6 +4857,123 @@ class CompanyTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(ValueError, "Stored quality checks are malformed"):
                 company.quality_recovery_summary(job_id)
+
+    def test_quality_failure_overview_is_ordered_aggregated_and_read_only(self):
+        objective = (
+            "Define three task templates, a daily review cadence, success checks, failure modes, "
+            "and owner gates. Separate verified facts from assumptions. Each specialist must use "
+            "at most 100 words. The executive synthesis must use at most 180 words and end with: "
+            "Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", ConstraintModel(False))
+            low_queue = company.enqueue(
+                "For the local alpha review, " + objective, playbook="operations-improvement",
+                priority=20,
+            )
+            high_queue = company.enqueue(
+                "For the local beta review, " + objective, playbook="operations-improvement",
+                priority=90,
+            )
+            observed_high, _, _, high_passed = company.run_next_queue_item()
+            observed_low, _, _, low_passed = company.run_next_queue_item()
+            self.assertEqual((observed_high, observed_low), (high_queue, low_queue))
+            self.assertFalse(high_passed)
+            self.assertFalse(low_passed)
+
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_before = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history"
+                ).fetchone()[0]
+            database_before = company.db_path.read_bytes()
+
+            overview = company.quality_failure_summaries()
+            self.assertEqual(overview["schema"], QUALITY_RECOVERY_LIST_SCHEMA)
+            self.assertEqual(overview["quality_failed_count"], 2)
+            self.assertEqual(
+                [item["queue_id"] for item in overview["items"]],
+                [high_queue, low_queue],
+            )
+            self.assertEqual([item["priority"] for item in overview["items"]], [90, 20])
+            failed_counts = {
+                item["check"]: item["count"] for item in overview["common_failed_checks"]
+            }
+            action_counts = {
+                item["action"]: item["count"]
+                for item in overview["common_repair_actions"]
+            }
+            self.assertEqual(failed_counts["facts_assumptions_separated"], 2)
+            self.assertEqual(
+                action_counts[
+                    "label_assumptions_and_remove_unperformed_or_placeholder_claims"
+                ],
+                2,
+            )
+            self.assertEqual(
+                overview["next_action"],
+                "review_highest_priority_then_queue_revised_mission",
+            )
+            self.assertTrue(all(value is False for value in overview["effects"].values()))
+
+            cli_model = CountingMockModel()
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "quality", "--failed",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            rendered = output.getvalue()
+            self.assertEqual(json.loads(rendered), overview)
+            self.assertEqual(cli_model.calls, 0)
+            self.assertNotIn(str(root), rendered)
+            self.assertNotIn("local alpha review", rendered)
+            self.assertNotIn("local beta review", rendered)
+            self.assertNotIn("objective", rendered)
+            self.assertNotIn("output_path", rendered)
+            self.assertLess(len(rendered.encode("utf-8")), 16_384)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_after = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history"
+                ).fetchone()[0]
+            self.assertEqual(history_after, history_before)
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+
+    def test_quality_failure_overview_is_empty_bounded_and_race_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            empty = company.quality_failure_summaries()
+            self.assertEqual(empty["quality_failed_count"], 0)
+            self.assertEqual(empty["items"], [])
+            self.assertEqual(empty["next_action"], "none")
+
+            changed = [("a" * 12, "b" * 12, 50, "2026-07-28T00:00:00+00:00")]
+            with patch.object(
+                company, "_quality_failed_queue_snapshot", side_effect=[[], changed],
+            ), self.assertRaisesRegex(RuntimeError, "changed during observation"):
+                company.quality_failure_summaries()
+
+            with patch.object(
+                company, "_quality_failed_queue_snapshot", return_value=changed * 101,
+            ), self.assertRaisesRegex(ValueError, "More than 100 quality failures"):
+                company.quality_failure_summaries()
+
+            cli_model = CountingMockModel()
+            error = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "quality", "--failed",
+                    "--summary",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stderr", error):
+                self.assertEqual(cli_main(), 2)
+            self.assertIn("--failed cannot be combined", error.getvalue())
+            self.assertEqual(cli_model.calls, 0)
 
     def test_bounded_editor_repairs_structure_and_audits_word_caps(self):
         objective = (

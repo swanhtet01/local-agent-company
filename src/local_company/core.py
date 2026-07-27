@@ -197,6 +197,8 @@ KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
+QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
+MAX_QUALITY_RECOVERY_ITEMS = 100
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
@@ -6499,6 +6501,139 @@ class Company:
             "queue_id": queue[0] if queue else None,
             "queue_status": queue[1] if queue else None,
             "effects": effects,
+        }
+
+    def _quality_failed_queue_snapshot(self) -> list[tuple[object, ...]]:
+        """Read a deterministic, bounded sentinel snapshot of failed queue links."""
+        with closing(self._connect()) as db:
+            return list(db.execute(
+                "SELECT q.id, q.job_id, q.priority, q.scheduled_at, "
+                "COALESCE((SELECT MAX(h.id) FROM evaluation_history h "
+                "WHERE h.job_id=q.job_id), 0) FROM mission_queue q "
+                "WHERE q.status='quality_failed' "
+                "ORDER BY q.priority DESC, q.scheduled_at, q.created_at, q.id "
+                "LIMIT ?",
+                (MAX_QUALITY_RECOVERY_ITEMS + 1,),
+            ))
+
+    def quality_failure_summaries(self) -> dict[str, object]:
+        """Return one stable, pathless recovery view for all failed queue missions."""
+        self.initialize()
+        before = self._quality_failed_queue_snapshot()
+        if len(before) > MAX_QUALITY_RECOVERY_ITEMS:
+            raise ValueError(
+                f"More than {MAX_QUALITY_RECOVERY_ITEMS} quality failures; narrow the queue first"
+            )
+
+        seen_jobs: set[str] = set()
+        items: list[dict[str, object]] = []
+        failed_check_counts: dict[str, int] = {}
+        repair_action_counts: dict[str, int] = {}
+        for queue_id, job_id, priority, scheduled_at, history_id in before:
+            if (
+                not isinstance(queue_id, str) or not re.fullmatch(r"[0-9a-f]{12}", queue_id)
+                or not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{12}", job_id)
+                or type(priority) is not int or not 0 <= priority <= 100
+                or not isinstance(scheduled_at, str) or not 1 <= len(scheduled_at) <= 64
+                or type(history_id) is not int or history_id <= 0
+            ):
+                raise ValueError("Stored quality-failure queue link is malformed")
+            try:
+                datetime.fromisoformat(scheduled_at)
+            except ValueError as exc:
+                raise ValueError("Stored quality-failure queue link is malformed") from exc
+            if job_id in seen_jobs:
+                raise ValueError("Stored quality-failure queue links are ambiguous")
+            seen_jobs.add(job_id)
+
+            summary = self.quality_recovery_summary(job_id)
+            if (
+                summary["quality_status"] != "failed"
+                or summary["queue_id"] != queue_id
+                or summary["queue_status"] != "quality_failed"
+            ):
+                raise RuntimeError("Quality-failure queue link changed during observation")
+            failed_checks = summary["failed_checks"]
+            repair_actions = summary["repair_actions"]
+            score = summary["score"]
+            evaluator_version = summary["evaluator_version"]
+            evaluated_at = summary["evaluated_at"]
+            conflict_count = summary["source_conflict_count"]
+            incomplete_roles = summary["incomplete_specialist_roles"]
+            if (
+                type(score) is not int or not 0 <= score <= 100
+                or not isinstance(evaluator_version, str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", evaluator_version)
+                or not isinstance(evaluated_at, str) or not 1 <= len(evaluated_at) <= 64
+                or type(conflict_count) is not int or not 0 <= conflict_count <= 1024
+                or not isinstance(incomplete_roles, list) or len(incomplete_roles) > len(ROLES)
+                or any(role not in ROLES for role in incomplete_roles)
+                or not isinstance(failed_checks, list) or len(failed_checks) > 64
+                or any(
+                    not isinstance(check, str)
+                    or not re.fullmatch(r"[a-z0-9_]{1,80}", check)
+                    for check in failed_checks
+                )
+                or not isinstance(repair_actions, list) or len(repair_actions) > 16
+                or any(
+                    not isinstance(action, str)
+                    or not re.fullmatch(r"[a-z0-9_]{1,120}", action)
+                    for action in repair_actions
+                )
+            ):
+                raise ValueError("Stored quality recovery summary is not bounded")
+            try:
+                datetime.fromisoformat(evaluated_at)
+            except ValueError as exc:
+                raise ValueError("Stored quality recovery summary is not bounded") from exc
+            for check in failed_checks:
+                failed_check_counts[check] = failed_check_counts.get(check, 0) + 1
+            for action in repair_actions:
+                repair_action_counts[action] = repair_action_counts.get(action, 0) + 1
+            items.append({
+                "queue_id": queue_id,
+                "job_id": job_id,
+                "queue_status": "quality_failed",
+                "priority": priority,
+                "score": score,
+                "evaluator_version": evaluator_version,
+                "evaluated_at": evaluated_at,
+                "failed_checks": failed_checks,
+                "source_conflict_count": conflict_count,
+                "incomplete_specialist_roles": incomplete_roles,
+                "repair_actions": repair_actions,
+                "next_action": summary["next_action"],
+            })
+
+        after = self._quality_failed_queue_snapshot()
+        if after != before:
+            raise RuntimeError("Quality-failure queue changed during observation; retry")
+
+        return {
+            "schema": QUALITY_RECOVERY_LIST_SCHEMA,
+            "quality_failed_count": len(items),
+            "items": items,
+            "common_failed_checks": [
+                {"check": check, "count": count}
+                for check, count in sorted(
+                    failed_check_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "common_repair_actions": [
+                {"action": action, "count": count}
+                for action, count in sorted(
+                    repair_action_counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ],
+            "next_action": (
+                "review_highest_priority_then_queue_revised_mission" if items else "none"
+            ),
+            "effects": {
+                "evaluation_appended": False,
+                "model_called": False,
+                "queue_changed": False,
+                "work_started": False,
+            },
         }
 
     def job_detail(self, job_id: str) -> dict[str, object]:

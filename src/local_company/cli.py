@@ -229,12 +229,16 @@ def parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--port", type=int, default=8765)
     add_runtime_args(dashboard)
     quality = sub.add_parser(
-        "quality", help="Evaluate a completed report or summarize its stored quality result"
+        "quality", help="Evaluate a report or inspect bounded stored quality failures"
     )
-    quality.add_argument("job_id")
+    quality.add_argument("job_id", nargs="?")
     quality.add_argument(
         "--summary", action="store_true",
         help="Show bounded stored failure gates and repair actions without re-evaluating",
+    )
+    quality.add_argument(
+        "--failed", action="store_true",
+        help="Show one pathless recovery overview for all quality-failed queue missions",
     )
     health = sub.add_parser("health", help="Show local storage, model, queue, and runtime health")
     add_runtime_args(health)
@@ -513,10 +517,17 @@ def main() -> int:
             from .dashboard import serve_dashboard
             serve_dashboard(company, args.port)
         elif args.command == "quality":
-            result = (
-                company.quality_recovery_summary(args.job_id)
-                if args.summary else company.evaluate_job(args.job_id)
-            )
+            if args.failed:
+                if args.job_id is not None or args.summary:
+                    raise ValueError("--failed cannot be combined with JOB_ID or --summary")
+                result = company.quality_failure_summaries()
+            else:
+                if args.job_id is None:
+                    raise ValueError("Provide JOB_ID or use --failed")
+                result = (
+                    company.quality_recovery_summary(args.job_id)
+                    if args.summary else company.evaluate_job(args.job_id)
+                )
             print(json.dumps(result, indent=2))
         elif args.command == "health":
             print(json.dumps(company.health_snapshot(), indent=2))
