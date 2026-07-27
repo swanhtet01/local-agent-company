@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -16,6 +17,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -45,7 +47,11 @@ from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, render_dashboard,
     render_mission_detail, runtime_build_identity, runtime_model_identity,
 )
-from local_company.service import _read_state, _startup_lock, _write_state
+from local_company.service import (
+    PROCESS_BIRTH_SCHEMA, SERVICE_STATE_SCHEMA, _ProcessObservation,
+    _observe_process, _probe, _read_state, _startup_lock, _write_state, service_status,
+    start_service, stop_service,
+)
 
 
 class RecordingModel:
@@ -369,10 +375,594 @@ class CompanyTests(unittest.TestCase):
 
             with _startup_lock(home):
                 self.assertTrue((home / "service.start.lock").is_file())
-                with self.assertRaisesRegex(RuntimeError, "startup is already in progress"):
+                with self.assertRaisesRegex(RuntimeError, "lifecycle change is already in progress"):
                     with _startup_lock(home):
                         pass
-            self.assertFalse((home / "service.start.lock").exists())
+            self.assertTrue((home / "service.start.lock").is_file())
+            with _startup_lock(home):
+                pass
+
+            linked_home = home / "linked"
+            linked_home.mkdir()
+            target = home / "shared-lock-target"
+            target.write_bytes(b"")
+            os.link(target, linked_home / "service.start.lock")
+            with self.assertRaisesRegex(RuntimeError, "private regular file"):
+                with _startup_lock(linked_home):
+                    pass
+
+    def test_process_birth_fingerprint_is_stable_for_current_process(self):
+        first = _observe_process(os.getpid())
+        second = _observe_process(os.getpid())
+        self.assertEqual(first.status, "present")
+        self.assertRegex(first.birth or "", r"\A[0-9a-f]{64}\Z")
+        self.assertEqual(second, first)
+
+    def test_service_state_validation_fails_closed_before_network_or_spawn(self):
+        valid = {
+            "state_schema": SERVICE_STATE_SCHEMA,
+            "status": "running",
+            "pid": 4242,
+            "port": 8765,
+            "token": "t" * 32,
+            "process_birth_schema": PROCESS_BIRTH_SCHEMA,
+            "process_birth": "a" * 64,
+            "service_instance_id": "b" * 32,
+        }
+        malformed_values = [
+            [],
+            {},
+            {**valid, "pid": True},
+            {**valid, "pid": "4242"},
+            {**valid, "port": True},
+            {**valid, "port": 70000},
+            {key: value for key, value in valid.items() if key != "port"},
+            {**valid, "status": "unknown"},
+            {**valid, "process_birth": "A" * 64},
+            {**valid, "service_instance_id": "short"},
+            {**valid, "token": ""},
+            {**valid, "token": "not ascii é token"},
+            {**valid, "token": "line\nbreak-token-value"},
+            {
+                "status": "running", "pid": 4242, "port": 8765,
+                "token": "t" * 32, "state_schema": None,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            state_path = home / "service.json"
+            probe = Mock()
+            spawn = Mock()
+            with patch("local_company.service._probe", probe), patch(
+                "local_company.service._port_in_use", return_value=False,
+            ), patch(
+                "local_company.service.subprocess.Popen", spawn,
+            ):
+                for malformed in malformed_values:
+                    with self.subTest(malformed=repr(malformed)[:80]):
+                        state_path.write_text(json.dumps(malformed), encoding="utf-8")
+                        with self.assertRaisesRegex(RuntimeError, "service state"):
+                            service_status(home)
+                        with self.assertRaisesRegex(RuntimeError, "service state"):
+                            start_service(home, provider="mock")
+                state_path.write_text(
+                    '{"status":"running","status":"stopped"}', encoding="utf-8",
+                )
+                with self.assertRaisesRegex(RuntimeError, "malformed"):
+                    service_status(home)
+                with self.assertRaisesRegex(RuntimeError, "malformed"):
+                    start_service(home, provider="mock")
+                state_path.write_text("[" * 30000 + "0" + "]" * 30000, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "malformed"):
+                    service_status(home)
+            probe.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_service_status_requires_process_birth_and_listener_identity(self):
+        state = {
+            "state_schema": SERVICE_STATE_SCHEMA,
+            "status": "running",
+            "pid": 4242,
+            "port": 8765,
+            "token": "top-secret-token-value",
+            "process_birth_schema": PROCESS_BIRTH_SCHEMA,
+            "process_birth": "a" * 64,
+            "service_instance_id": "b" * 32,
+        }
+        matching = _ProcessObservation("present", "a" * 64)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_state(home, state)
+            health = {"status": "ready", "pid": 4242, "service_instance_id": "b" * 32}
+            with patch("local_company.service._observe_process", side_effect=[matching, matching]), patch(
+                "local_company.service._probe", return_value=health,
+            ):
+                result = service_status(home)
+            self.assertTrue(result["live"])
+            self.assertEqual(result["status"], "running")
+            self.assertEqual(result["process_identity_status"], "match")
+            rendered = json.dumps(result)
+            self.assertNotIn("top-secret-token-value", rendered)
+            self.assertNotIn("a" * 64, rendered)
+
+            wrong_listener = {**health, "service_instance_id": "c" * 32}
+            with patch("local_company.service._observe_process", side_effect=[matching, matching]), patch(
+                "local_company.service._probe", return_value=wrong_listener,
+            ):
+                result = service_status(home)
+            self.assertFalse(result["live"])
+            self.assertEqual(result["status"], "endpoint_mismatch")
+            self.assertIsNone(result["health"])
+
+            changed_after_health = _ProcessObservation("present", "d" * 64)
+            with patch(
+                "local_company.service._observe_process",
+                side_effect=[matching, changed_after_health],
+            ), patch("local_company.service._probe", return_value=health):
+                result = service_status(home)
+            self.assertFalse(result["live"])
+            self.assertEqual(result["status"], "stale_pid_reused")
+            self.assertIsNone(result["health"])
+
+            for malformed_health in (
+                {"status": "failed", "pid": 4242, "service_instance_id": "b" * 32},
+                {"status": "ready", "pid": 4242, "service_instance_id": "é"},
+            ):
+                with self.subTest(health=malformed_health["status"]), patch(
+                    "local_company.service._observe_process", side_effect=[matching, matching],
+                ), patch("local_company.service._probe", return_value=malformed_health):
+                    result = service_status(home)
+                self.assertFalse(result["live"])
+                self.assertEqual(result["status"], "endpoint_mismatch")
+
+            probe = Mock()
+            with patch(
+                "local_company.service._observe_process",
+                return_value=_ProcessObservation("present", "d" * 64),
+            ), patch("local_company.service._probe", probe):
+                result = service_status(home)
+            self.assertFalse(result["live"])
+            self.assertEqual(result["status"], "stale_pid_reused")
+            probe.assert_not_called()
+
+            legacy = {
+                "status": "running", "pid": 4242, "port": 8765,
+                "token": "legacy-token-value",
+            }
+            _write_state(home, legacy)
+            with patch("local_company.service._observe_process") as observe, patch(
+                "local_company.service._probe",
+            ) as probe:
+                result = service_status(home)
+            self.assertFalse(result["live"])
+            self.assertEqual(result["status"], "legacy_unverified")
+            self.assertEqual(result["process_identity_status"], "legacy")
+            observe.assert_not_called()
+            probe.assert_not_called()
+
+    def test_start_service_ignores_reused_pid_but_blocks_matching_or_indeterminate_process(self):
+        prior = {
+            "state_schema": SERVICE_STATE_SCHEMA,
+            "status": "running",
+            "pid": 4242,
+            "port": 8765,
+            "token": "old-token-value-1234",
+            "process_birth_schema": PROCESS_BIRTH_SCHEMA,
+            "process_birth": "a" * 64,
+            "service_instance_id": "b" * 32,
+        }
+
+        class FakeProcess:
+            pid = 5000
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_state(home, prior)
+            child = FakeProcess()
+            observations = [
+                _ProcessObservation("present", "c" * 64),
+                _ProcessObservation("present", "d" * 64),
+                _ProcessObservation("present", "d" * 64),
+                _ProcessObservation("present", "d" * 64),
+            ]
+            health = {"status": "ready", "pid": 5000, "service_instance_id": "e" * 32}
+            with patch("local_company.service._observe_process", side_effect=observations), patch(
+                "local_company.service._port_in_use", return_value=False,
+            ), patch("local_company.service.subprocess.Popen", return_value=child), patch(
+                "local_company.service._probe", return_value=health,
+            ), patch("local_company.service.secrets.token_hex", side_effect=lambda n: "e" * (n * 2)), patch(
+                "local_company.service.secrets.token_urlsafe", return_value="new-token-value-1234567890",
+            ):
+                result = start_service(home, provider="mock")
+            self.assertTrue(result["live"])
+            saved = _read_state(home)
+            self.assertEqual(saved["pid"], 5000)
+            self.assertEqual(saved["process_birth"], "d" * 64)
+
+            _write_state(home, prior)
+            for observation in (
+                _ProcessObservation("present", "a" * 64),
+                _ProcessObservation("unavailable"),
+            ):
+                spawn = Mock()
+                with self.subTest(observation=observation.status), patch(
+                    "local_company.service._observe_process", return_value=observation,
+                ), patch("local_company.service.subprocess.Popen", spawn):
+                    with self.assertRaisesRegex(RuntimeError, "cannot start"):
+                        start_service(home, provider="mock")
+                spawn.assert_not_called()
+
+    def test_start_service_reaps_a_child_whose_identity_cannot_be_captured(self):
+        class FakeProcess:
+            pid = 5001
+
+            def __init__(self):
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = 1
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch(
+                "local_company.service._observe_process",
+                return_value=_ProcessObservation("unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not be captured"):
+                    start_service(home, provider="mock")
+            self.assertTrue(child.terminated)
+            self.assertFalse((home / "service.json").exists())
+
+    def test_start_service_rejects_identity_from_a_reused_child_pid(self):
+        class FakeProcess:
+            pid = 5004
+
+            def __init__(self):
+                self.polls = iter([None, 1, 1])
+
+            def poll(self):
+                return next(self.polls, 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch(
+                "local_company.service._observe_process",
+                return_value=_ProcessObservation("present", "f" * 64),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not be captured"):
+                    start_service(home, provider="mock")
+            self.assertFalse((home / "service.json").exists())
+
+    def test_start_service_timeout_reaps_child_and_records_failure(self):
+        class FakeProcess:
+            pid = 5002
+
+            def __init__(self):
+                self.returncode = None
+                self.terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = 1
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            birth = _ProcessObservation("present", "f" * 64)
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch("local_company.service._observe_process", return_value=birth), patch(
+                "local_company.service._probe", return_value=None,
+            ), patch("local_company.service.time.sleep"):
+                with self.assertRaisesRegex(RuntimeError, "failed to become ready"):
+                    start_service(home, provider="mock")
+            self.assertTrue(child.terminated)
+            self.assertEqual(_read_state(home)["status"], "failed")
+
+    def test_start_service_records_an_unreaped_detached_child(self):
+        class FakeProcess:
+            pid = 5003
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                raise OSError("simulated kill failure")
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("local-company", timeout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch(
+                "local_company.service._observe_process",
+                return_value=_ProcessObservation("unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not be reaped"):
+                    start_service(home, provider="mock")
+            saved = _read_state(home)
+            self.assertEqual(saved["status"], "cleanup_failed")
+            self.assertEqual(saved["pid"], 5003)
+            self.assertNotIn("process_birth", saved)
+
+    def test_stop_service_requires_exact_process_and_endpoint_and_waits_for_exit(self):
+        state = {
+            "state_schema": SERVICE_STATE_SCHEMA,
+            "status": "running",
+            "pid": 4242,
+            "port": 8765,
+            "token": "top-secret-token-value",
+            "process_birth_schema": PROCESS_BIRTH_SCHEMA,
+            "process_birth": "a" * 64,
+            "service_instance_id": "b" * 32,
+        }
+
+        class FakeGuard:
+            def __init__(self, observation, waits=()):
+                self.observation = observation
+                self.waits = iter(waits)
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.closed = True
+
+            def wait_for_exit(self, timeout):
+                return next(self.waits)
+
+        class Response:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        class Opener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, timeout):
+                self.requests.append(request)
+                return Response()
+
+        health = {"status": "ready", "pid": 4242, "service_instance_id": "b" * 32}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_state(home, state)
+            original = (home / "service.json").read_bytes()
+            mismatch = FakeGuard(_ProcessObservation("present", "c" * 64))
+            probe = Mock()
+            opener = Mock()
+            with patch("local_company.service._open_process_guard", return_value=mismatch), patch(
+                "local_company.service._probe", probe,
+            ), patch("local_company.service._loopback_opener", opener):
+                result = stop_service(home)
+            self.assertEqual(result["status"], "stale_pid_reused")
+            self.assertEqual((home / "service.json").read_bytes(), original)
+
+            probe.assert_not_called()
+            opener.assert_not_called()
+
+            indeterminate = FakeGuard(_ProcessObservation("unavailable"))
+            with patch(
+                "local_company.service._open_process_guard", return_value=indeterminate,
+            ), patch("local_company.service._probe", probe):
+                with self.assertRaisesRegex(RuntimeError, "identity is unavailable"):
+                    stop_service(home)
+            self.assertEqual((home / "service.json").read_bytes(), original)
+
+            wrong_endpoint = FakeGuard(_ProcessObservation("present", "a" * 64))
+            no_send = Mock()
+            with patch(
+                "local_company.service._open_process_guard", return_value=wrong_endpoint,
+            ), patch(
+                "local_company.service._probe",
+                return_value={
+                    "status": "ready", "pid": 4242,
+                    "service_instance_id": "c" * 32,
+                },
+            ), patch("local_company.service._loopback_opener", no_send):
+                with self.assertRaisesRegex(RuntimeError, "endpoint identity does not match"):
+                    stop_service(home)
+            no_send.assert_not_called()
+            self.assertEqual((home / "service.json").read_bytes(), original)
+
+            exact = FakeGuard(_ProcessObservation("present", "a" * 64), ["alive", "exited"])
+            http = Opener()
+            with patch("local_company.service._open_process_guard", return_value=exact), patch(
+                "local_company.service._probe", return_value=health,
+            ), patch("local_company.service._loopback_opener", return_value=http):
+                result = stop_service(home)
+            self.assertEqual(result["status"], "stopped")
+            self.assertFalse(result["live"])
+            self.assertTrue(exact.closed)
+            self.assertEqual(len(http.requests), 1)
+            request = http.requests[0]
+            self.assertEqual(request.full_url, "http://127.0.0.1:8765/__service/stop")
+            self.assertEqual(request.get_header("X-service-instance"), "b" * 32)
+            self.assertNotIn("top-secret-token-value", json.dumps(result))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _write_state(home, state)
+            original = (home / "service.json").read_bytes()
+            exact = FakeGuard(_ProcessObservation("present", "a" * 64), ["alive", "alive"])
+            with patch("local_company.service._open_process_guard", return_value=exact), patch(
+                "local_company.service._probe", return_value=health,
+            ), patch("local_company.service._loopback_opener", return_value=Opener()):
+                with self.assertRaisesRegex(RuntimeError, "did not stop"):
+                    stop_service(home)
+            self.assertEqual((home / "service.json").read_bytes(), original)
+
+    def test_service_shutdown_does_not_follow_a_token_bearing_redirect(self):
+        redirected_requests = []
+
+        class SinkHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                redirected_requests.append(dict(self.headers))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                return
+
+        sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+        sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+        sink_thread.start()
+
+        class SourceHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({
+                    "status": "ready", "pid": 4242,
+                    "service_instance_id": "b" * 32,
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{sink.server_address[1]}/capture",
+                )
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                return
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler)
+        source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+        source_thread.start()
+
+        class ExactGuard:
+            observation = _ProcessObservation("present", "a" * 64)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def wait_for_exit(self, timeout):
+                return "alive"
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                _write_state(home, {
+                    "state_schema": SERVICE_STATE_SCHEMA,
+                    "status": "running", "pid": 4242,
+                    "port": source.server_address[1],
+                    "token": "top-secret-token-value",
+                    "process_birth_schema": PROCESS_BIRTH_SCHEMA,
+                    "process_birth": "a" * 64,
+                    "service_instance_id": "b" * 32,
+                })
+                with patch(
+                    "local_company.service._open_process_guard", return_value=ExactGuard(),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Could not stop"):
+                        stop_service(home)
+            time.sleep(0.05)
+            self.assertEqual(redirected_requests, [])
+        finally:
+            source.shutdown()
+            source.server_close()
+            sink.shutdown()
+            sink.server_close()
+            source_thread.join(timeout=3)
+            sink_thread.join(timeout=3)
+
+    def test_dashboard_health_and_shutdown_bind_the_service_instance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            instance_id = "b" * 32
+            server = create_dashboard_server(
+                company, 0, service_token="service-secret", service_instance_id=instance_id,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                with opener.open(base + "/health.json", timeout=3) as response:
+                    health = json.load(response)
+                self.assertEqual(health["service_instance_id"], instance_id)
+                with opener.open(base + "/__service/health.json", timeout=3) as response:
+                    handshake = json.load(response)
+                self.assertEqual(
+                    handshake,
+                    {"status": "ready", "pid": os.getpid(), "service_instance_id": instance_id},
+                )
+                self.assertEqual(_probe(server.server_address[1]), handshake)
+
+                missing_instance = urllib.request.Request(
+                    base + "/__service/stop", data=b"", method="POST",
+                    headers={"X-Service-Token": "service-secret"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    opener.open(missing_instance, timeout=3)
+                self.assertEqual(rejected.exception.code, 405)
+                rejected.exception.close()
+
+                request = urllib.request.Request(
+                    base + "/__service/stop", data=b"", method="POST",
+                    headers={
+                        "X-Service-Token": "service-secret",
+                        "X-Service-Instance": instance_id,
+                    },
+                )
+                with opener.open(request, timeout=3) as response:
+                    self.assertEqual(response.status, 202)
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_worker_shutdown_reservation_prevents_a_new_mission_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = LocalQueueWorker(Company(Path(tmp), MockModel()))
+            self.assertTrue(worker.reserve_shutdown())
+            with self.assertRaisesRegex(RuntimeError, "already running"):
+                worker.start("0123456789ab")
+            worker.cancel_shutdown()
 
     def test_negative_evidence_claim_is_not_misclassified_as_completion(self):
         findings = source_limitation_conflicts(

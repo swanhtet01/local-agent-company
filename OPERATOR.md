@@ -37,7 +37,9 @@ Avoid vague instructions such as `run everything`. The coordinator can recruit s
 - Dashboard intake rejected: confirm `service status` is live. A direct `dashboard` process is intentionally read-only; authenticated intake is available only through `service start`.
 - Dashboard worker is already running: wait for its status to leave `running`. Duplicate launches and service shutdown fail closed while a mission is active.
 - Mission completion pending: inspect the dashboard banner or `health` metadata. `report_finalization_pending` means exact report bytes are still journaled; `evaluation_pending` means the report is sealed but its deterministic result is not committed. Wait if the worker is active. If the state remains after the heartbeat is genuinely stale, use `recover --stale-minutes 60`; recovery does not rerun the model.
-- Service startup already in progress: wait for the recorded PID. The exclusive local startup lock prevents a second launcher from replacing its PID/token state; a stale lock is removed only after its owner PID is gone.
+- Service lifecycle change already in progress: wait for the current start or stop command. The persistent OS-backed lock is released automatically when its owning command exits; its small lock file remains in place and is not evidence of a stuck command.
+- Service status is `legacy_unverified`: stop the still-running service with the prior build before switching source, then start it once with the current build. The current build will not attach a new identity to an arbitrary legacy PID.
+- Service identity is indeterminate or the endpoint mismatches: do not force shutdown through the recorded port. Inspect the recorded process locally, close the owning application if appropriate, and rerun `service status`; no shutdown secret is sent while identity is uncertain.
 - Dashboard page rejected with HTTP 421: use the exact local address printed by the service (`http://127.0.0.1:PORT` or `http://localhost:PORT`); arbitrary Host headers are refused.
 
 ## Safety invariant

@@ -98,6 +98,14 @@ class LocalQueueWorker:
                 self._run_lock.release()
             raise
 
+    def reserve_shutdown(self) -> bool:
+        """Atomically exclude mission startup while an accepted shutdown completes."""
+        return self._run_lock.acquire(blocking=False)
+
+    def cancel_shutdown(self) -> None:
+        """Release a shutdown reservation when the response could not be accepted."""
+        self._run_lock.release()
+
     def _run(self, claim: QueueClaim) -> None:
         try:
             queue_id, job_id, output, passed = self.company.execute_queue_claim(claim)
@@ -516,10 +524,15 @@ th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; ve
 
 
 def create_dashboard_server(
-    company: Company, port: int = 0, service_token: str | None = None
+    company: Company, port: int = 0, service_token: str | None = None,
+    service_instance_id: str | None = None,
 ) -> ThreadingHTTPServer:
     if port < 0 or port > 65535:
         raise ValueError("Dashboard port must be between 0 and 65535")
+    if service_instance_id is not None and re.fullmatch(
+        r"[0-9a-f]{32}", service_instance_id,
+    ) is None:
+        raise ValueError("Service instance ID must be 32 lowercase hexadecimal characters")
     worker = LocalQueueWorker(company) if service_token else None
     build_identity = runtime_build_identity()
     runtime_identity = runtime_model_identity(company)
@@ -599,6 +612,15 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif parsed.path == "/__service/health.json" and service_instance_id is not None:
+                body = json.dumps(
+                    {
+                        "status": "ready", "pid": os.getpid(),
+                        "service_instance_id": service_instance_id,
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
             elif parsed.path == "/build-status.json" or (
                 parsed.path == "/health.json" and parsed.query == "view=build-status"
             ):
@@ -610,9 +632,14 @@ def create_dashboard_server(
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/health.json":
+                service_identity = (
+                    {"service_instance_id": service_instance_id}
+                    if service_instance_id is not None else {}
+                )
                 body = json.dumps(
                     {
                         "status": "ready", "pid": os.getpid(),
+                        **service_identity,
                         "build": dict(build_identity),
                         "company": dict(company_identity),
                         **dashboard_snapshot(company, worker),
@@ -648,17 +675,29 @@ def create_dashboard_server(
             if (
                 self.path == "/__service/stop" and service_token
                 and hmac.compare_digest(self.headers.get("X-Service-Token", ""), service_token)
+                and (
+                    service_instance_id is None
+                    or hmac.compare_digest(
+                        self.headers.get("X-Service-Instance", ""), service_instance_id,
+                    )
+                )
             ):
-                if worker and worker.snapshot().get("status") == "running":
+                shutdown_reserved = bool(worker and worker.reserve_shutdown())
+                if worker and not shutdown_reserved:
                     self.send_error(409, "A local mission is running; shutdown refused")
                     return
-                body = b"Stopping"
-                self.send_response(202)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                try:
+                    body = b"Stopping"
+                    self.send_response(202)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                except BaseException:
+                    if worker and shutdown_reserved:
+                        worker.cancel_shutdown()
+                    raise
                 return
             if self.path in {
                 "/queue/enqueue", "/queue/cancel", "/queue/reset", "/queue/run-next", "/jobs/quality"
@@ -722,7 +761,10 @@ def create_dashboard_server(
 def serve_dashboard(company: Company, port: int = 8765) -> None:
     if port < 1 or port > 65535:
         raise ValueError("Dashboard port must be between 1 and 65535")
-    server = create_dashboard_server(company, port, os.getenv("LOCAL_COMPANY_SERVICE_TOKEN"))
+    server = create_dashboard_server(
+        company, port, os.getenv("LOCAL_COMPANY_SERVICE_TOKEN"),
+        os.getenv("LOCAL_COMPANY_SERVICE_INSTANCE_ID"),
+    )
     print(f"Local dashboard: http://127.0.0.1:{port}")
     print("Press Ctrl+C to stop.")
     try:
