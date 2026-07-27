@@ -14,8 +14,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
-    Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS, QueueClaim,
-    ReportFinalizationPending,
+    Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
+    QUALITY_RECHECK_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending,
 )
 
 
@@ -626,7 +626,8 @@ def render_quality_failure_overview(company: Company) -> str:
         "<tr>"
         f"<td>{cell(item['priority'])}</td>"
         f"<td><code>{cell(item['queue_id'])}</code></td>"
-        f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a></td>'
+        f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a>'
+        f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview</a></td>'
         f"<td>{cell(item['score'])}/100<br><span class=\"meta\"><code>{cell(item['evaluator_version'])}</code><br>{cell(item['evaluated_at'])}</span></td>"
         f"<td>{token_list(item['failed_checks'])}</td>"
         f"<td>{cell(item['source_conflict_count'])}</td>"
@@ -666,6 +667,135 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 <div class="grid"><section><h2>Common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{common_check_rows}</tbody></table></section>
 <section><h2>Common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{common_action_rows}</tbody></table></section></div>
 <p class="meta">Next action: <code>{cell(overview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(overview.get('schema', 'unknown'))}</code></p>
+</body></html>"""
+
+
+def render_quality_recheck_preview(company: Company, job_id: str) -> str:
+    """Render a pathless comparison between stored and current evaluator results."""
+    preview = company.quality_recheck_preview(job_id)
+    stored = preview.get("stored")
+    current = preview.get("current_preview")
+    comparison = preview.get("comparison")
+    effects = preview.get("effects")
+    if (
+        preview.get("schema") != QUALITY_RECHECK_PREVIEW_SCHEMA
+        or preview.get("job_id") != job_id
+        or preview.get("observed_state_stable") is not True
+        or not isinstance(stored, dict)
+        or not isinstance(current, dict)
+        or not isinstance(comparison, dict)
+        or not isinstance(effects, dict)
+        or set(effects) != {
+            "evaluation_appended", "model_called", "queue_changed", "work_started",
+        }
+        or any(value is not False for value in effects.values())
+    ):
+        raise ValueError("Quality recheck preview is malformed")
+
+    list_fields = (
+        stored.get("failed_checks"), current.get("failed_checks"),
+        current.get("incomplete_specialist_roles"),
+        comparison.get("resolved_failed_checks"), comparison.get("new_failed_checks"),
+        comparison.get("remaining_failed_checks"),
+    )
+    if any(
+        not isinstance(values, list)
+        or any(not isinstance(value, str) for value in values)
+        for values in list_fields
+    ):
+        raise ValueError("Quality recheck preview is malformed")
+    if (
+        stored.get("quality_status") not in {"passed", "failed", "not_evaluated"}
+        or current.get("quality_status") not in {"passed", "failed"}
+        or type(current.get("score")) is not int
+        or not 0 <= current["score"] <= 100
+        or (
+            stored.get("score") is not None
+            and (type(stored.get("score")) is not int or not 0 <= stored["score"] <= 100)
+        )
+        or any(
+            type(comparison.get(key)) is not bool
+            for key in ("evaluator_changed", "outcome_changed", "result_changed")
+        )
+        or (
+            comparison.get("score_delta") is not None
+            and type(comparison.get("score_delta")) is not int
+        )
+        or type(current.get("source_conflict_count")) is not int
+        or current["source_conflict_count"] < 0
+        or any(
+            type(current.get(key)) is not bool
+            for key in (
+                "report_integrity_valid", "evidence_manifest_valid",
+                "evidence_manifest_bound_to_report",
+            )
+        )
+    ):
+        raise ValueError("Quality recheck preview is malformed")
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    def token_list(values: object, empty: str = "none") -> str:
+        if not isinstance(values, list) or not values:
+            return f'<span class="muted">{cell(empty)}</span>'
+        return "<ul>" + "".join(
+            f"<li><code>{cell(value)}</code></li>" for value in values
+        ) + "</ul>"
+
+    stored_score = stored.get("score")
+    current_score = current.get("score")
+    score_delta = comparison.get("score_delta")
+    stored_score_text = "not evaluated" if stored_score is None else f"{stored_score}/100"
+    score_delta_text = "not available" if score_delta is None else f"{score_delta:+d}"
+    integrity_rows = "".join(
+        f"<tr><td><code>{cell(label)}</code></td>"
+        f"<td>{'valid' if current.get(key) is True else 'invalid'}</td></tr>"
+        for label, key in (
+            ("sealed_report", "report_integrity_valid"),
+            ("evidence_manifest", "evidence_manifest_valid"),
+            ("manifest_report_binding", "evidence_manifest_bound_to_report"),
+        )
+    )
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Current quality preview</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:1050px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
+.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
+@media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
+</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a> &middot; <a href="/missions/{cell(job_id)}">Mission</a></p>
+<h1>Current quality preview</h1>
+<p class="metric">{cell(current.get('quality_status', 'unavailable'))} &middot; {cell(current_score)}/100</p>
+<p class="boundary">The stored report inputs were checked with the current deterministic evaluator inside a disposable local clone. No evaluation was appended, no model was called, no queue item changed, and no work started. Objectives, reports, paths, source text, and claim text are withheld.</p>
+<div class="grid"><section><h2>Stored result</h2><table><tbody>
+<tr><th>Status</th><td>{cell(stored.get('quality_status', 'unavailable'))}</td></tr>
+<tr><th>Score</th><td>{cell(stored_score_text)}</td></tr>
+<tr><th>Evaluator</th><td><code>{cell(stored.get('evaluator_version') or 'none')}</code></td></tr>
+<tr><th>Failed gates</th><td>{token_list(stored.get('failed_checks'))}</td></tr>
+</tbody></table></section><section><h2>Current preview</h2><table><tbody>
+<tr><th>Status</th><td>{cell(current.get('quality_status', 'unavailable'))}</td></tr>
+<tr><th>Score</th><td>{cell(current_score)}/100</td></tr>
+<tr><th>Evaluator</th><td><code>{cell(current.get('evaluator_version', 'unavailable'))}</code></td></tr>
+<tr><th>Failed gates</th><td>{token_list(current.get('failed_checks'))}</td></tr>
+</tbody></table></section></div>
+<section><h2>Comparison</h2><table><tbody>
+<tr><th>Evaluator changed</th><td>{cell(comparison.get('evaluator_changed'))}</td></tr>
+<tr><th>Outcome changed</th><td>{cell(comparison.get('outcome_changed'))}</td></tr>
+<tr><th>Result changed</th><td>{cell(comparison.get('result_changed'))}</td></tr>
+<tr><th>Score delta</th><td>{cell(score_delta_text)}</td></tr>
+<tr><th>Resolved failures</th><td>{token_list(comparison.get('resolved_failed_checks'))}</td></tr>
+<tr><th>New failures</th><td>{token_list(comparison.get('new_failed_checks'))}</td></tr>
+<tr><th>Remaining failures</th><td>{token_list(comparison.get('remaining_failed_checks'))}</td></tr>
+</tbody></table></section>
+<section><h2>Current integrity gates</h2><table><tbody>{integrity_rows}</tbody></table></section>
+<p class="meta">Source conflicts: {cell(current.get('source_conflict_count', 0))} &middot; Next action: <code>{cell(preview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(preview.get('schema'))}</code></p>
 </body></html>"""
 
 
@@ -1118,7 +1248,7 @@ th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; ve
 <h1>Mission <code>{cell(job[0])}</code></h1>
 <p class="meta">Report state: {cell(job[2])} · Project: {cell(job[6] or 'unscoped')} · Created UTC: {cell(job[3])}</p>
 <p>{cell(job[1])}</p>
-<section><h2>Automated acceptance</h2>{quality_html}</section>
+    <section><h2>Automated acceptance</h2>{quality_html}<p><a href="/quality-preview/{cell(job[0])}">Preview this sealed report with the current evaluator</a></p></section>
 <section><h2>Report</h2><p class="meta">Local output: <code>{cell(job[4] or '-')}</code><br>Sealed SHA-256: <code>{cell(job[8] or 'legacy-unsealed')}</code></p>{report_html}</section>
 <section><h2>Frozen evidence</h2><p class="meta">Manifest SHA-256: <code>{cell(job[9] or 'legacy-unmanifested')}</code></p><table><thead><tr><th>Evidence ID</th><th>Source</th><th>Lines</th><th>Exact captured excerpt</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
 <section><h2>Evaluation history</h2><table><thead><tr><th>UTC</th><th>Outcome</th><th>Score</th><th>Evaluator</th><th>Report SHA-256</th><th>Manifest SHA-256</th></tr></thead><tbody>{history_rows}</tbody></table></section>
@@ -1289,6 +1419,24 @@ def create_dashboard_server(
                     body = b"Quality failure recovery unavailable; retry after local state is stable."
                     self.send_response(409)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
+            elif not parsed.query and (
+                match := re.fullmatch(r"/quality-preview/([0-9a-f]{12})", parsed.path)
+            ):
+                job_id = match.group(1)
+                known = any(str(row[0]) == job_id for row in company.jobs())
+                if not known:
+                    body = b"Quality preview not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                else:
+                    try:
+                        body = render_quality_recheck_preview(company, job_id).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                    except (KeyError, RuntimeError, TypeError, ValueError):
+                        body = b"Quality preview unavailable; retry after local state is stable."
+                        self.send_response(409)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif match := re.fullmatch(r"/datasets/([0-9a-f]{12})", parsed.path):
                 try:
                     body = render_dataset_quality_detail(

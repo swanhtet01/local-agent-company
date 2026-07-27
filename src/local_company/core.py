@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -198,6 +199,7 @@ MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
+QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
 MAX_OPERATOR_BRIEF_DATASETS = 1_000
@@ -5534,6 +5536,225 @@ class Company:
             return list(db.execute(
                 "SELECT job_id, passed, score, evaluated_at FROM evaluations ORDER BY evaluated_at DESC LIMIT 30"
             ))
+
+    def _quality_recheck_source_fingerprint(self, job_id: str) -> str:
+        """Fingerprint the store, sealed report, and manifest source files for a preview."""
+        with closing(self._connect()) as db:
+            job = db.execute(
+                "SELECT output_path FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise ValueError(f"Unknown job: {job_id}")
+            manifest_row = db.execute(
+                "SELECT manifest_json FROM evidence_manifests WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            database_sha256 = hashlib.sha256(db.serialize()).hexdigest()
+
+        try:
+            report_bytes = self._read_local_report_bytes(job[0])
+            report_state: object = {
+                "available": True,
+                "byte_count": len(report_bytes),
+                "sha256": hashlib.sha256(report_bytes).hexdigest(),
+            }
+        except (OSError, ValueError) as exc:
+            report_state = {
+                "available": False,
+                "reason": type(exc).__name__,
+            }
+
+        source_states: list[dict[str, object]] = []
+        manifest: object = None
+        if manifest_row:
+            try:
+                manifest = json.loads(manifest_row[0])
+            except (json.JSONDecodeError, TypeError):
+                manifest = None
+        sources = manifest.get("sources", []) if isinstance(manifest, dict) else []
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    source_states.append({"available": False, "reason": "invalid_source"})
+                    continue
+                source_id = source.get("source_id")
+                source_path = source.get("path")
+                state: dict[str, object] = {
+                    "source_id": source_id if isinstance(source_id, str) else None,
+                }
+                if not isinstance(source_path, str):
+                    state.update({"available": False, "reason": "invalid_path"})
+                else:
+                    try:
+                        snapshot = self._read_knowledge_snapshot(
+                            Path(source_path), retain_content=False,
+                        )
+                        state.update({
+                            "available": True,
+                            "path": snapshot.path,
+                            "byte_count": snapshot.byte_count,
+                            "sha256": snapshot.sha256,
+                        })
+                    except (FileNotFoundError, OSError, ValueError) as exc:
+                        state.update({
+                            "available": False,
+                            "path": source_path,
+                            "reason": type(exc).__name__,
+                        })
+                source_states.append(state)
+
+        payload = {
+            "database_sha256": database_sha256,
+            "report": report_state,
+            "sources": source_states,
+        }
+        return hashlib.sha256(self._canonical_json(payload).encode("utf-8")).hexdigest()
+
+    def _copy_quality_preview_store(self, job_id: str, preview_home: Path) -> None:
+        """Create an isolated SQLite/report copy used only by the current-evaluator preview."""
+        preview_home.mkdir(parents=True, exist_ok=False)
+        preview_db = preview_home / "company.db"
+        with closing(self._connect()) as source, closing(sqlite3.connect(preview_db)) as target:
+            source.backup(target)
+        with closing(sqlite3.connect(preview_db)) as db:
+            job = db.execute(
+                "SELECT output_path FROM jobs WHERE id=?", (job_id,),
+            ).fetchone()
+        if not job:
+            raise ValueError(f"Unknown job: {job_id}")
+
+        try:
+            report_bytes = self._read_local_report_bytes(job[0])
+        except (OSError, ValueError):
+            return
+        preview_output = preview_home / "outputs" / f"{job_id}.md"
+        preview_output.parent.mkdir(parents=True, exist_ok=True)
+        preview_output.write_bytes(report_bytes)
+        with closing(sqlite3.connect(preview_db)) as db, db:
+            db.execute(
+                "UPDATE jobs SET output_path=? WHERE id=?",
+                (str(preview_output), job_id),
+            )
+
+    def quality_recheck_preview(self, job_id: str) -> dict[str, object]:
+        """Run the current evaluator on a disposable clone and return a bounded comparison."""
+        if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+            raise ValueError("Invalid job ID")
+        self.initialize()
+        before = self._quality_recheck_source_fingerprint(job_id)
+
+        class PreviewOnlyModel:
+            def complete(self, system: str, prompt: str) -> str:
+                raise RuntimeError("Current-evaluator preview cannot call a model")
+
+        with tempfile.TemporaryDirectory(prefix="local-company-quality-preview-") as tmp:
+            preview_home = Path(tmp) / "state"
+            self._copy_quality_preview_store(job_id, preview_home)
+            preview_company = Company(preview_home, PreviewOnlyModel())
+            preview_company.initialize()
+            stored = preview_company.quality_recovery_summary(job_id)
+            current = preview_company.evaluate_job(job_id)
+
+        after = self._quality_recheck_source_fingerprint(job_id)
+        if before != after:
+            raise RuntimeError(
+                "Quality preview inputs changed during observation; retry after local state is stable"
+            )
+
+        checks = current.get("checks")
+        if (
+            not isinstance(checks, dict) or not checks
+            or any(not isinstance(key, str) or type(value) is not bool for key, value in checks.items())
+        ):
+            raise RuntimeError("Current evaluator returned malformed checks")
+        current_failed = sorted(key for key, value in checks.items() if not value)
+        stored_failed_value = stored.get("failed_checks")
+        if (
+            not isinstance(stored_failed_value, list)
+            or any(not isinstance(item, str) for item in stored_failed_value)
+        ):
+            raise RuntimeError("Stored evaluator comparison is malformed")
+        stored_failed = sorted(set(stored_failed_value))
+        current_failed_set = set(current_failed)
+        stored_failed_set = set(stored_failed)
+        if type(current.get("passed")) is not bool:
+            raise RuntimeError("Current evaluator returned a malformed outcome")
+        current_status = "passed" if current["passed"] else "failed"
+        stored_status = stored.get("quality_status")
+        if stored_status not in {"passed", "failed", "not_evaluated"}:
+            raise RuntimeError("Stored evaluator comparison is malformed")
+        stored_score = stored.get("score")
+        current_score = current.get("score")
+        if type(current_score) is not int or not 0 <= current_score <= 100:
+            raise RuntimeError("Current evaluator returned a malformed score")
+        if stored_score is not None and type(stored_score) is not int:
+            raise RuntimeError("Stored evaluator comparison is malformed")
+        stored_evaluator = stored.get("evaluator_version")
+        evaluator_changed = stored_evaluator != EVALUATOR_VERSION
+        result_changed = bool(
+            stored_status != current_status
+            or stored_score != current_score
+            or stored_failed != current_failed
+        )
+        source_conflicts = current.get("source_conflicts", [])
+        incomplete_roles = current.get("incomplete_specialist_roles", [])
+        if not isinstance(source_conflicts, list) or not isinstance(incomplete_roles, list):
+            raise RuntimeError("Current evaluator returned malformed findings")
+
+        if current_status == "failed":
+            next_action = "repair_current_failed_checks_before_retry"
+        elif evaluator_changed or result_changed or stored_status == "not_evaluated":
+            next_action = "review_then_run_quality_evaluation"
+        else:
+            next_action = "none"
+
+        return {
+            "schema": QUALITY_RECHECK_PREVIEW_SCHEMA,
+            "job_id": job_id,
+            "stored": {
+                "quality_status": stored_status,
+                "score": stored_score,
+                "evaluator_version": stored_evaluator,
+                "failed_checks": stored_failed,
+                "queue_id": stored.get("queue_id"),
+                "queue_status": stored.get("queue_status"),
+            },
+            "current_preview": {
+                "quality_status": current_status,
+                "score": current_score,
+                "evaluator_version": EVALUATOR_VERSION,
+                "failed_checks": current_failed,
+                "source_conflict_count": len(source_conflicts),
+                "incomplete_specialist_roles": sorted({
+                    role for role in incomplete_roles if isinstance(role, str) and role in ROLES
+                }),
+                "report_integrity_valid": checks.get("report_integrity_valid") is True,
+                "evidence_manifest_valid": checks.get("evidence_manifest_valid") is True,
+                "evidence_manifest_bound_to_report": (
+                    checks.get("evidence_manifest_bound_to_report") is True
+                ),
+            },
+            "comparison": {
+                "evaluator_changed": evaluator_changed,
+                "result_changed": result_changed,
+                "outcome_changed": stored_status != current_status,
+                "score_delta": (
+                    current_score - stored_score if type(stored_score) is int else None
+                ),
+                "resolved_failed_checks": sorted(stored_failed_set - current_failed_set),
+                "new_failed_checks": sorted(current_failed_set - stored_failed_set),
+                "remaining_failed_checks": sorted(stored_failed_set & current_failed_set),
+            },
+            "observed_state_stable": True,
+            "next_action": next_action,
+            "effects": {
+                "evaluation_appended": False,
+                "model_called": False,
+                "queue_changed": False,
+                "work_started": False,
+            },
+        }
 
     def run(
         self, objective: str, roles: list[str] | None = None,

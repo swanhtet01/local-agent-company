@@ -237,6 +237,10 @@ def parser() -> argparse.ArgumentParser:
         help="Show bounded stored failure gates and repair actions without re-evaluating",
     )
     quality.add_argument(
+        "--preview", action="store_true",
+        help="Preview the current evaluator on an isolated clone without changing local state",
+    )
+    quality.add_argument(
         "--failed", action="store_true",
         help="Show one pathless recovery overview for all quality-failed queue missions",
     )
@@ -522,16 +526,22 @@ def main() -> int:
             serve_dashboard(company, args.port)
         elif args.command == "quality":
             if args.failed:
-                if args.job_id is not None or args.summary:
-                    raise ValueError("--failed cannot be combined with JOB_ID or --summary")
+                if args.job_id is not None or args.summary or args.preview:
+                    raise ValueError(
+                        "--failed cannot be combined with JOB_ID, --summary, or --preview"
+                    )
                 result = company.quality_failure_summaries()
             else:
                 if args.job_id is None:
                     raise ValueError("Provide JOB_ID or use --failed")
-                result = (
-                    company.quality_recovery_summary(args.job_id)
-                    if args.summary else company.evaluate_job(args.job_id)
-                )
+                if args.summary and args.preview:
+                    raise ValueError("--summary cannot be combined with --preview")
+                if args.preview:
+                    result = company.quality_recheck_preview(args.job_id)
+                elif args.summary:
+                    result = company.quality_recovery_summary(args.job_id)
+                else:
+                    result = company.evaluate_job(args.job_id)
             print(json.dumps(result, indent=2))
         elif args.command == "brief":
             print(json.dumps(company.operator_brief(args.project), indent=2))
