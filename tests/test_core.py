@@ -36,6 +36,7 @@ from local_company.core import (
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
+    _requires_strict_grounded_synthesis,
     bounded_context_blocks,
     compact_labeled_sections,
     evidence_filename_pairs_valid,
@@ -5351,6 +5352,17 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("synthesis_revision_started", event_kinds)
             self.assertIn("objective_constraint_applied", event_kinds)
             self.assertEqual(company.queue_items("complete")[0][0], queue_id)
+
+    def test_bounded_imported_plan_semantics_require_strict_grounding(self):
+        for period in ("a 7-day plan", "a plan for the next 7 days"):
+            with self.subTest(period=period):
+                self.assertTrue(_requires_strict_grounded_synthesis(
+                    f"Using imported evidence, prepare {period} and separate verified facts "
+                    "from assumptions."
+                ))
+        self.assertFalse(_requires_strict_grounded_synthesis(
+            "Using imported evidence, separate verified facts from assumptions."
+        ))
 
     def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
         objective = (

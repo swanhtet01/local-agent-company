@@ -214,8 +214,8 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.15"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.14"
+EVALUATOR_VERSION = "local-quality-2026-07-27.16"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.15"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
@@ -953,7 +953,10 @@ def _requires_strict_grounded_synthesis(objective: str) -> bool:
             "facts from assumptions" in objective_lower
             and "using" in objective_lower
             and "imported" in objective_lower
-            and "7-day" in objective_lower
+            and (
+                "7-day" in objective_lower
+                or "next 7 days" in objective_lower
+            )
         )
     )
 
