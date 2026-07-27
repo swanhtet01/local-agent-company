@@ -44,8 +44,9 @@ from local_company.core import (
     truncate_words,
 )
 from local_company.dashboard import (
-    LocalQueueWorker, build_status_snapshot, create_dashboard_server, render_dashboard,
-    render_mission_detail, runtime_build_identity, runtime_model_identity,
+    LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
+    render_dashboard, render_dataset_quality_detail, render_mission_detail,
+    runtime_build_identity, runtime_model_identity,
 )
 from local_company.service import (
     PROCESS_BIRTH_SCHEMA, SERVICE_STATE_SCHEMA, _ProcessObservation,
@@ -2906,6 +2907,161 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("&lt;script&gt;build&lt;/script&gt;", page)
             self.assertNotIn("<script>build</script>", page)
 
+    def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "private-records.csv"
+            source.write_text(
+                "<script>column</script>,id,amount\n"
+                "never-render-row-alpha,7,10\n"
+                "never-render-row-beta,7,100\n",
+                encoding="utf-8",
+            )
+            original = source.read_bytes()
+            company = Company(root / "state", MockModel())
+            company.create_project("Data <Lab>")
+            dataset_id, brief_path, profile = company.profile_dataset(
+                source, "Data <Lab>", key_columns=["id"],
+            )
+
+            summary = company.dataset_quality_items()[0]
+            self.assertEqual(summary["id"], dataset_id)
+            self.assertEqual(summary["profile_status"], "ready")
+            self.assertEqual(summary["quality_status"], "review")
+            self.assertEqual(summary["key_status"], "review")
+            self.assertEqual(summary["quality_signal_count"], 1)
+            serialized_summary = json.dumps(summary)
+            self.assertNotIn(str(source), serialized_summary)
+            self.assertNotIn(str(brief_path), serialized_summary)
+            self.assertNotIn("never-render-row", serialized_summary)
+
+            snapshot = dashboard_snapshot(company)
+            snapshot_text = json.dumps(snapshot)
+            self.assertNotIn(str(source), snapshot_text)
+            self.assertNotIn(str(brief_path), snapshot_text)
+            self.assertNotIn("never-render-row", snapshot_text)
+            page = render_dashboard(company)
+            self.assertIn(f'/datasets/{dataset_id}', page)
+            self.assertIn("Data &lt;Lab&gt;", page)
+            self.assertNotIn(str(source), page)
+            self.assertNotIn(str(brief_path), page)
+            self.assertNotIn("never-render-row", page)
+
+            detail_payload = company.dataset_quality_detail(dataset_id)
+            serialized_detail = json.dumps(detail_payload)
+            self.assertNotIn(str(source), serialized_detail)
+            self.assertNotIn(str(brief_path), serialized_detail)
+            self.assertNotIn("never-render-row", serialized_detail)
+            detail_page = render_dataset_quality_detail(company, dataset_id)
+            self.assertIn("stored aggregate statistics only", detail_page)
+            self.assertIn("Declared key check", detail_page)
+            self.assertIn("Rows affected", detail_page)
+            self.assertIn("&lt;script&gt;column&lt;/script&gt;", detail_page)
+            self.assertNotIn("<script>column</script>", detail_page)
+            self.assertNotIn(str(source), detail_page)
+            self.assertNotIn(str(brief_path), detail_page)
+            self.assertNotIn("never-render-row", detail_page)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(profile["key_check"]["duplicate_rows"], 2)
+
+            bounded_profile = dict(profile)
+            bounded_profile["columns"] = {
+                f"bounded-column-{index:03}": {
+                    "missing": 0,
+                    "missing_rate": 0.0,
+                    "unique_non_missing": 1,
+                    "unique_rate": 1.0,
+                    "types": {"string": 1},
+                    "mixed_types": False,
+                    "non_finite_numeric": 0,
+                    "numeric_values_excluded": 0,
+                }
+                for index in range(205)
+            }
+            bounded_profile["column_count"] = 205
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE datasets SET profile_json=?, column_count=? WHERE id=?",
+                    (json.dumps(bounded_profile), 205, dataset_id),
+                )
+            bounded_page = render_dataset_quality_detail(company, dataset_id)
+            self.assertIn("5 additional columns are omitted", bounded_page)
+            self.assertIn("bounded-column-199", bounded_page)
+            self.assertNotIn("bounded-column-200", bounded_page)
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE datasets SET profile_json=? WHERE id=?",
+                    (json.dumps({
+                        "schema": "local-company.dataset-profile.v2",
+                        "columns": {}, "quality_flags": {}, "key_check": {},
+                    }), dataset_id),
+                )
+            structurally_invalid = company.dataset_quality_items()[0]
+            self.assertEqual(structurally_invalid["profile_status"], "unavailable")
+            self.assertIn(
+                "Aggregate profile unavailable",
+                render_dataset_quality_detail(company, dataset_id),
+            )
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE datasets SET profile_json=? WHERE id=?",
+                    ('{"schema":', dataset_id),
+                )
+            unavailable = company.dataset_quality_items()[0]
+            self.assertEqual(unavailable["profile_status"], "unavailable")
+            corrupted_page = render_dataset_quality_detail(company, dataset_id)
+            self.assertIn("Aggregate profile unavailable", corrupted_page)
+            self.assertNotIn(str(source), corrupted_page)
+
+    def test_dataset_quality_http_route_is_local_read_only_and_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "records.json"
+            source.write_text(
+                '[{"id": 1, "label": "row-secret"}, {"id": 2, "label": "other-secret"}]',
+                encoding="utf-8",
+            )
+            company = Company(root / "state", MockModel())
+            company.create_project("Quality Lab")
+            dataset_id, brief_path, _ = company.profile_dataset(
+                source, "Quality Lab", key_columns=["id"],
+            )
+            server = create_dashboard_server(company, 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(base + f"/datasets/{dataset_id}", timeout=3) as response:
+                    detail = response.read().decode("utf-8")
+                self.assertIn("complete and unique", detail)
+                self.assertNotIn("row-secret", detail)
+                self.assertNotIn("other-secret", detail)
+                self.assertNotIn(str(source), detail)
+                self.assertNotIn(str(brief_path), detail)
+
+                with opener.open(base + "/health.json", timeout=3) as response:
+                    health_text = response.read().decode("utf-8")
+                self.assertNotIn("row-secret", health_text)
+                self.assertNotIn(str(source), health_text)
+                self.assertNotIn(str(brief_path), health_text)
+
+                for missing_path in (
+                    "/datasets/deadbeef0000",
+                    f"/datasets/{dataset_id}/extra",
+                    "/datasets/../../private-records.csv",
+                ):
+                    with self.assertRaises(urllib.error.HTTPError) as missing:
+                        opener.open(base + missing_path, timeout=3)
+                    self.assertEqual(missing.exception.code, 404)
+                    missing.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_build_status_snapshot_is_bounded_and_covers_worker_transition(self):
         class Worker:
             status = "idle"
@@ -3669,7 +3825,7 @@ class CompanyTests(unittest.TestCase):
             )
             company = Company(root / "state", MockModel())
             company.create_project("Measure Lab")
-            _, brief, profile = company.profile_dataset(
+            dataset_id, brief, profile = company.profile_dataset(
                 source,
                 "Measure Lab",
                 allowed_root=root,
@@ -3686,6 +3842,10 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(profile["key_check"]["missing_rows"], 1)
             self.assertEqual(profile["key_check"]["completeness_rate"], 0.8)
             self.assertEqual(profile["key_check"]["uniqueness_rate"], 1.0)
+            overview = company.dataset_quality_items()[0]
+            self.assertEqual(overview["id"], dataset_id)
+            self.assertEqual(overview["outlier_columns"], 1)
+            self.assertEqual(overview["quality_status"], "review")
             brief_text = brief.read_text(encoding="utf-8")
             self.assertIn("Declared key: region, id", brief_text)
             self.assertIn("Complete key rows: 4 (80.00%)", brief_text)

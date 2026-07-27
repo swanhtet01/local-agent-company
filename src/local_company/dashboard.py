@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import hmac
 import json
+import math
 import os
 import re
 import threading
@@ -156,7 +157,7 @@ def dashboard_snapshot(
         "jobs": company.jobs(),
         "queue": company.queue_items(),
         "schedules": company.schedules(),
-        "datasets": company.dataset_items(),
+        "datasets": company.dataset_quality_items(),
         "evaluations": company.recent_evaluations(),
         "pending_approvals": company.action_requests("pending"),
         "due_queue_item": bool(next_due),
@@ -280,11 +281,22 @@ def render_dashboard(
         f"<td>{'enabled' if row[2] else 'disabled'}</td><td>{cell(row[3])}d</td><td>{cell(row[4])}</td></tr>"
         for row in snapshot["schedules"]
     ) or '<tr><td colspan="5" class="empty">No schedules</td></tr>'
+    def dataset_quality_label(item: dict[str, object]) -> str:
+        if item.get("profile_status") != "ready":
+            return '<span class="unavailable">profile unavailable</span>'
+        signal_count = item.get("quality_signal_count")
+        if type(signal_count) is int and signal_count > 0:
+            return f'<span class="review">review ({cell(signal_count)} signal categories)</span>'
+        return '<span class="clear">no deterministic flags</span>'
+
     dataset_rows = "".join(
-        f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td><td>{cell(row[2])}</td>"
-        f"<td>{cell(row[3])}</td><td>{cell(row[4])}</td><td>{cell(row[5])}</td></tr>"
-        for row in snapshot["datasets"][:30]
-    ) or '<tr><td colspan="6" class="empty">No datasets</td></tr>'
+        f'<tr><td><a href="/datasets/{cell(item["id"])}"><code>{cell(item["id"])}</code></a></td>'
+        f'<td>{cell(item["project"])}</td><td>{cell(item["format"])}</td>'
+        f'<td>{cell(item["row_count"])}</td><td>{cell(item["column_count"])}</td>'
+        f'<td>{dataset_quality_label(item)}</td><td>{cell(item["key_status"])}</td>'
+        f'<td>{cell(item["added_at"])}</td></tr>'
+        for item in snapshot["datasets"][:30]
+    ) or '<tr><td colspan="8" class="empty">No datasets</td></tr>'
     approval_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[2])}</td><td>{cell(row[4])}</td></tr>"
         for row in snapshot["pending_approvals"]
@@ -384,7 +396,7 @@ th,td {{ padding:11px 13px; border-bottom:1px solid #26324a; text-align:left; ve
 th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ font-size:14px; }}
 code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }}
 .status {{ padding:3px 8px; border-radius:999px; background:#26324a; }}
-.complete {{ color:#87e6a8; }} .failed,.interrupted {{ color:#ff9b9b; }} .running {{ color:#ffd479; }}
+    .complete,.clear {{ color:#87e6a8; }} .failed,.interrupted,.unavailable {{ color:#ff9b9b; }} .running,.review {{ color:#ffd479; }}
 .empty {{ color:#6f7d95; text-align:center; }} .gate,.completion-pending {{ color:#ffd479; }}
 .notice {{ padding:12px 14px; background:#143520; border:1px solid #27693d; border-radius:9px; color:#a7f3bd; }}
 .completion-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
@@ -413,11 +425,170 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 </div>
 <section><h2>Mission queue</h2><table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
-<section><h2>Project datasets</h2><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Source</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
+<section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Flags are deterministic screening signals, not business-validity claims.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>
 <section><h2>Projects</h2><table><thead><tr><th>ID</th><th>Name</th><th>Missions</th></tr></thead><tbody>{project_rows}</tbody></table></section>
 <section><h2>Approval inbox</h2><table><thead><tr><th>ID</th><th>Category</th><th>Proposed action</th></tr></thead><tbody>{approval_rows}</tbody></table></section>
 </body></html>"""
+
+
+def render_dataset_quality_detail(company: Company, dataset_id: str) -> str:
+    detail = company.dataset_quality_detail(dataset_id)
+    profile = detail["profile"] if isinstance(detail.get("profile"), dict) else {}
+
+    def cell(value: object, limit: int = 180) -> str:
+        rendered = str(value)
+        if len(rendered) > limit:
+            rendered = rendered[: max(0, limit - 3)] + "..."
+        return html.escape(rendered)
+
+    def count(value: object) -> str:
+        return str(value) if type(value) is int and value >= 0 else "-"
+
+    def number(value: object) -> str:
+        if type(value) not in {int, float}:
+            return "-"
+        numeric = float(value)
+        return f"{numeric:.6g}" if math.isfinite(numeric) else "-"
+
+    def rate(value: object) -> str:
+        if type(value) not in {int, float}:
+            return "-"
+        numeric = float(value)
+        return f"{numeric:.2%}" if math.isfinite(numeric) and 0 <= numeric <= 1 else "-"
+
+    def names(value: object, limit: int = 20) -> str:
+        if not isinstance(value, list):
+            return "none"
+        safe_names = [item for item in value if isinstance(item, str)]
+        rendered = ", ".join(cell(item) for item in safe_names[:limit])
+        if len(safe_names) > limit:
+            rendered += f" (+{len(safe_names) - limit} more)"
+        return rendered or "none"
+
+    ready = detail.get("profile_status") == "ready"
+    if not ready:
+        profile_html = (
+            '<section class="warning"><h2>Aggregate profile unavailable</h2>'
+            '<p>The stored profile is malformed or uses an unsupported schema. '
+            'No source content was opened and no values are displayed.</p></section>'
+        )
+    else:
+        columns = profile.get("columns") if isinstance(profile.get("columns"), dict) else {}
+        visible_columns = list(columns.items())[:200]
+        omitted_columns = max(0, len(columns) - len(visible_columns))
+
+        def column_row(name: object, item: object) -> str:
+            column = item if isinstance(item, dict) else {}
+            type_counts = column.get("types") if isinstance(column.get("types"), dict) else {}
+            type_parts = [
+                f"{cell(type_name, 60)}={count(type_count)}"
+                for type_name, type_count in list(type_counts.items())[:8]
+            ]
+            if len(type_counts) > 8:
+                type_parts.append(f"+{len(type_counts) - 8} more")
+            numeric = column.get("numeric") if isinstance(column.get("numeric"), dict) else None
+            numeric_html = "-"
+            if numeric is not None:
+                numeric_html = (
+                    f"n={count(numeric.get('count'))}; min={number(numeric.get('minimum'))}; "
+                    f"p25={number(numeric.get('p25'))}; median={number(numeric.get('median'))}; "
+                    f"p75={number(numeric.get('p75'))}; max={number(numeric.get('maximum'))}; "
+                    f"mean={number(numeric.get('mean'))}; IQR outliers="
+                    f"{count(numeric.get('iqr_outlier_count'))} "
+                    f"({rate(numeric.get('iqr_outlier_rate'))})"
+                )
+            return (
+                f"<tr><td><code>{cell(name)}</code></td>"
+                f"<td>{', '.join(type_parts) or '-'}</td>"
+                f"<td>{count(column.get('missing'))} ({rate(column.get('missing_rate'))})</td>"
+                f"<td>{count(column.get('unique_non_missing'))} "
+                f"({rate(column.get('unique_rate'))})</td>"
+                f"<td>{'yes' if column.get('mixed_types') is True else 'no'}</td>"
+                f"<td>{count(column.get('non_finite_numeric'))} / "
+                f"{count(column.get('numeric_values_excluded'))}</td>"
+                f"<td>{numeric_html}</td></tr>"
+            )
+
+        column_rows = "".join(column_row(name, item) for name, item in visible_columns)
+        if not column_rows:
+            column_rows = '<tr><td colspan="7" class="muted">No column aggregates stored.</td></tr>'
+        omitted_html = (
+            f'<p class="warning">{omitted_columns} additional columns are omitted from this bounded view.</p>'
+            if omitted_columns else ""
+        )
+        flags = profile.get("quality_flags") if isinstance(profile.get("quality_flags"), dict) else {}
+        quality_rows = "".join((
+            f"<tr><td>Columns with missing values</td><td>{count(detail.get('missing_columns'))}</td></tr>",
+            f"<tr><td>Columns with 1.5-IQR outliers</td><td>{count(detail.get('outlier_columns'))}</td></tr>",
+            f"<tr><td>All-missing columns</td><td>{names(flags.get('all_missing_columns'))}</td></tr>",
+            f"<tr><td>Mixed-type columns</td><td>{names(flags.get('mixed_type_columns'))}</td></tr>",
+            f"<tr><td>Non-finite numeric columns</td><td>{names(flags.get('non_finite_numeric_columns'))}</td></tr>",
+            f"<tr><td>Numeric-summary exclusion columns</td><td>{names(flags.get('numeric_values_excluded_columns'))}</td></tr>",
+            f"<tr><td>Exact duplicate groups</td><td>{count(flags.get('duplicate_row_groups'))}</td></tr>",
+            f"<tr><td>Excess exact duplicate rows</td><td>{count(flags.get('duplicate_rows'))}</td></tr>",
+            f"<tr><td>Rows affected by exact duplicates</td><td>{count(flags.get('duplicate_rows_affected'))} "
+            f"({rate(flags.get('duplicate_row_rate'))})</td></tr>",
+            f"<tr><td>Profile truncated</td><td>{'yes' if flags.get('truncated') is True else 'no'}</td></tr>",
+            f"<tr><td>Formula cells ignored</td><td>{count(flags.get('formula_cells_ignored'))}</td></tr>",
+            f"<tr><td>Error cells ignored</td><td>{count(flags.get('error_cells_ignored'))}</td></tr>",
+        ))
+        key_check = profile.get("key_check") if isinstance(profile.get("key_check"), dict) else {}
+        if key_check.get("configured") is True:
+            key_html = (
+                f'<p>Declared columns: <code>{names(key_check.get("columns"), 8)}</code></p>'
+                '<table><thead><tr><th>Complete rows</th><th>Completeness</th>'
+                '<th>Distinct complete values</th><th>Uniqueness</th><th>Missing rows</th>'
+                '<th>Duplicate values</th><th>Rows affected</th></tr></thead><tbody><tr>'
+                f'<td>{count(key_check.get("complete_rows"))}</td>'
+                f'<td>{rate(key_check.get("completeness_rate"))}</td>'
+                f'<td>{count(key_check.get("distinct_complete_values"))}</td>'
+                f'<td>{rate(key_check.get("uniqueness_rate"))}</td>'
+                f'<td>{count(key_check.get("missing_rows"))}</td>'
+                f'<td>{count(key_check.get("duplicate_values"))}</td>'
+                f'<td>{count(key_check.get("duplicate_rows"))}</td></tr></tbody></table>'
+            )
+        else:
+            key_html = (
+                '<p class="warning">No key was declared, so this profile makes no primary-key '
+                'completeness or uniqueness claim.</p>'
+            )
+        sheet_html = (
+            f' &middot; Sheet: <code>{cell(profile["sheet"])}</code>'
+            if isinstance(profile.get("sheet"), str) else ""
+        )
+        profile_html = f"""
+<section><h2>Profile scope</h2>
+<p class="meta">Schema: <code>{cell(detail.get('profile_schema') or 'unavailable')}</code>{sheet_html}<br>
+Grain assumption: {cell(profile.get('grain_assumption', 'not recorded'))}</p></section>
+<section><h2>Deterministic quality flags</h2>
+<table><thead><tr><th>Signal</th><th>Aggregate result</th></tr></thead><tbody>{quality_rows}</tbody></table></section>
+<section><h2>Declared key check</h2>{key_html}</section>
+<section><h2>Column aggregates</h2>{omitted_html}
+<table><thead><tr><th>Column</th><th>Types</th><th>Missing</th><th>Distinct non-missing</th>
+<th>Mixed</th><th>Non-finite / excluded</th><th>Finite numeric summary</th></tr></thead>
+<tbody>{column_rows}</tbody></table></section>"""
+
+    quality_status = str(detail.get("quality_status", "unavailable"))
+    quality_class = "review" if quality_status == "review" else "clear" if ready else "fail"
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dataset {cell(detail['id'])}</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:1200px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.meta,.muted {{ color:#9aa7bd; }} .review,.warning {{ color:#ffd479; }} .clear {{ color:#87e6a8; }} .fail {{ color:#ff9b9b; }}
+.warning {{ padding:12px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
+section {{ margin-top:26px; }} table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ overflow-wrap:anywhere; }}
+</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<h1>Dataset <code>{cell(detail['id'])}</code></h1>
+<p class="meta">Project: {cell(detail['project'])} &middot; Format: {cell(detail['format'])} &middot;
+Rows: {count(detail['row_count'])} &middot; Columns: {count(detail['column_count'])} &middot;
+Profiled UTC: {cell(detail['added_at'])}<br>Source SHA-256: <code>{cell(detail['sha256'], 80)}</code></p>
+<p class="{quality_class}"><strong>Screening status:</strong> {cell(quality_status)}; declared key: {cell(detail.get('key_status', 'unavailable'))}.</p>
+<p class="warning">This localhost page displays stored aggregate statistics only. It withholds source and brief paths and never displays source row values. Business rules, required fields, dates, units, freshness, and fitness for use still require an owner-defined review.</p>
+{profile_html}</body></html>"""
 
 
 def render_mission_detail(company: Company, job_id: str) -> str:
@@ -647,6 +818,17 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+            elif match := re.fullmatch(r"/datasets/([0-9a-f]{12})", parsed.path):
+                try:
+                    body = render_dataset_quality_detail(
+                        company, match.group(1),
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                except ValueError:
+                    body = b"Dataset not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif match := re.fullmatch(r"/missions/([0-9a-f]{12})", parsed.path):
                 try:
                     body = render_mission_detail(company, match.group(1)).encode("utf-8")

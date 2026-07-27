@@ -2761,6 +2761,270 @@ class Company:
         with closing(self._connect()) as db:
             return list(db.execute(sql + " ORDER BY d.added_at DESC", params))
 
+    @classmethod
+    def _dataset_quality_overview(
+        cls,
+        profile_json: object,
+        *,
+        expected_rows: object | None = None,
+        expected_columns: object | None = None,
+    ) -> dict[str, object]:
+        """Reduce a stored profile to bounded, non-source dashboard signals."""
+        unavailable = {
+            "profile_status": "unavailable",
+            "profile_schema": None,
+            "quality_status": "unavailable",
+            "quality_signal_count": None,
+            "missing_columns": None,
+            "outlier_columns": None,
+            "key_status": "unavailable",
+        }
+        try:
+            profile = json.loads(
+                str(profile_json), parse_constant=cls._reject_non_finite_json_number,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            profile = None
+        schema = profile.get("schema") if isinstance(profile, dict) else None
+        columns = profile.get("columns") if isinstance(profile, dict) else None
+        flags = profile.get("quality_flags") if isinstance(profile, dict) else None
+        key_check = profile.get("key_check") if isinstance(profile, dict) else None
+        if (
+            schema != DATASET_PROFILE_SCHEMA
+            or not isinstance(columns, dict)
+            or not isinstance(flags, dict)
+            or not isinstance(key_check, dict)
+        ):
+            return unavailable
+
+        def valid_count(value: object) -> bool:
+            return type(value) is int and value >= 0
+
+        def valid_rate(value: object) -> bool:
+            if type(value) not in {int, float}:
+                return False
+            try:
+                numeric = float(value)
+            except (OverflowError, TypeError, ValueError):
+                return False
+            return math.isfinite(numeric) and 0 <= numeric <= 1
+
+        def valid_number(value: object) -> bool:
+            if type(value) not in {int, float}:
+                return False
+            try:
+                return math.isfinite(float(value))
+            except (OverflowError, TypeError, ValueError):
+                return False
+
+        if (
+            not valid_count(profile.get("profiled_rows"))
+            or not valid_count(profile.get("column_count"))
+            or profile.get("column_count") != len(columns)
+            or (expected_rows is not None and profile.get("profiled_rows") != expected_rows)
+            or (expected_columns is not None and profile.get("column_count") != expected_columns)
+            or profile.get("grain_assumption") != "one parsed source record per profiled row"
+            or (
+                "sheet" in profile
+                and (not isinstance(profile["sheet"], str) or len(profile["sheet"]) > 200)
+            )
+            or type(key_check.get("configured")) is not bool
+            or not isinstance(key_check.get("columns"), list)
+            or len(key_check["columns"]) > 8
+            or not all(isinstance(name, str) and name for name in key_check["columns"])
+            or (not key_check["configured"] and bool(key_check["columns"]))
+        ):
+            return unavailable
+        required_flag_counts = (
+            "duplicate_rows", "duplicate_row_groups", "duplicate_rows_affected",
+        )
+        required_flag_lists = (
+            "all_missing_columns", "mixed_type_columns", "non_finite_numeric_columns",
+            "numeric_values_excluded_columns",
+        )
+        if (
+            not all(valid_count(flags.get(name)) for name in required_flag_counts)
+            or not valid_rate(flags.get("duplicate_row_rate"))
+            or type(flags.get("truncated")) is not bool
+            or not all(
+                isinstance(flags.get(name), list)
+                and all(isinstance(item, str) for item in flags[name])
+                for name in required_flag_lists
+            )
+            or any(
+                name in flags and not valid_count(flags[name])
+                for name in ("formula_cells_ignored", "error_cells_ignored")
+            )
+        ):
+            return unavailable
+        numeric_count_names = (
+            "count", "zero_count", "negative_count", "iqr_outlier_count",
+        )
+        numeric_rate_names = (
+            "rate_of_non_missing", "zero_rate", "negative_rate", "iqr_outlier_rate",
+        )
+        numeric_number_names = (
+            "minimum", "p25", "median", "p75", "maximum", "mean",
+        )
+        for name, item in columns.items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(item, dict)
+                or not valid_count(item.get("missing"))
+                or not valid_rate(item.get("missing_rate"))
+                or not valid_count(item.get("unique_non_missing"))
+                or not valid_rate(item.get("unique_rate"))
+                or type(item.get("mixed_types")) is not bool
+                or not valid_count(item.get("non_finite_numeric"))
+                or not valid_count(item.get("numeric_values_excluded"))
+                or not isinstance(item.get("types"), dict)
+                or not all(
+                    isinstance(type_name, str) and valid_count(type_count)
+                    for type_name, type_count in item["types"].items()
+                )
+            ):
+                return unavailable
+            numeric = item.get("numeric")
+            if numeric is not None and (
+                not isinstance(numeric, dict)
+                or not all(valid_count(numeric.get(key)) for key in numeric_count_names)
+                or not all(valid_rate(numeric.get(key)) for key in numeric_rate_names)
+                or not all(valid_number(numeric.get(key)) for key in numeric_number_names)
+            ):
+                return unavailable
+        if key_check["configured"] and (
+            not all(
+                valid_count(key_check.get(name))
+                for name in (
+                    "complete_rows", "missing_rows", "distinct_complete_values",
+                    "duplicate_values", "duplicate_rows",
+                )
+            )
+            or not valid_rate(key_check.get("completeness_rate"))
+            or not valid_rate(key_check.get("uniqueness_rate"))
+        ):
+            return unavailable
+
+        def positive_count(value: object) -> bool:
+            return type(value) is int and value > 0
+
+        missing_columns = sum(
+            1
+            for item in columns.values()
+            if isinstance(item, dict) and positive_count(item.get("missing"))
+        )
+        outlier_columns = sum(
+            1
+            for item in columns.values()
+            if isinstance(item, dict)
+            and isinstance(item.get("numeric"), dict)
+            and positive_count(item["numeric"].get("iqr_outlier_count"))
+        )
+        signals = int(missing_columns > 0)
+        signals += int(outlier_columns > 0)
+        for name in (
+            "all_missing_columns",
+            "mixed_type_columns",
+            "non_finite_numeric_columns",
+            "numeric_values_excluded_columns",
+        ):
+            signals += int(bool(flags.get(name)) if isinstance(flags.get(name), list) else False)
+        signals += int(positive_count(flags.get("duplicate_rows_affected")))
+        signals += int(flags.get("truncated") is True)
+        signals += int(positive_count(flags.get("formula_cells_ignored")))
+        signals += int(positive_count(flags.get("error_cells_ignored")))
+
+        configured = key_check.get("configured") is True
+        if configured:
+            key_has_signals = (
+                positive_count(key_check.get("missing_rows"))
+                or positive_count(key_check.get("duplicate_rows"))
+            )
+            signals += int(key_has_signals)
+            key_status = "review" if key_has_signals else "complete and unique"
+        else:
+            key_status = "not configured"
+        return {
+            "profile_status": "ready",
+            "profile_schema": DATASET_PROFILE_SCHEMA,
+            "quality_status": "review" if signals else "no deterministic flags",
+            "quality_signal_count": signals,
+            "missing_columns": missing_columns,
+            "outlier_columns": outlier_columns,
+            "key_status": key_status,
+        }
+
+    def dataset_quality_items(self) -> list[dict[str, object]]:
+        """Return aggregate dashboard summaries without source or brief paths."""
+        self.initialize()
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT d.id, p.name, d.format, d.row_count, d.column_count, "
+                "d.profile_json, d.added_at "
+                "FROM datasets d JOIN projects p ON p.id=d.project_id "
+                "ORDER BY d.added_at DESC"
+            ).fetchall()
+        items: list[dict[str, object]] = []
+        for row in rows:
+            items.append({
+                "id": row[0],
+                "project": row[1],
+                "format": row[2],
+                "row_count": row[3],
+                "column_count": row[4],
+                **self._dataset_quality_overview(
+                    row[5], expected_rows=row[3], expected_columns=row[4],
+                ),
+                "added_at": row[6],
+            })
+        return items
+
+    def dataset_quality_detail(self, dataset_id: str) -> dict[str, object]:
+        """Return one stored aggregate profile while withholding local paths."""
+        if not re.fullmatch(r"[0-9a-f]{12}", dataset_id):
+            raise ValueError("Invalid dataset ID")
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT d.id, p.name, d.format, d.sha256, d.row_count, d.column_count, "
+                "d.profile_json, d.added_at "
+                "FROM datasets d JOIN projects p ON p.id=d.project_id WHERE d.id=?",
+                (dataset_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError(f"Unknown dataset: {dataset_id}")
+        overview = self._dataset_quality_overview(
+            row[6], expected_rows=row[4], expected_columns=row[5],
+        )
+        profile: dict[str, object] = {}
+        if overview["profile_status"] == "ready":
+            parsed = json.loads(
+                str(row[6]), parse_constant=self._reject_non_finite_json_number,
+            )
+            if isinstance(parsed, dict):
+                profile = {
+                    "schema": parsed["schema"],
+                    "profiled_rows": parsed["profiled_rows"],
+                    "column_count": parsed["column_count"],
+                    "columns": parsed["columns"],
+                    "grain_assumption": parsed["grain_assumption"],
+                    "key_check": parsed["key_check"],
+                    "quality_flags": parsed["quality_flags"],
+                }
+                if isinstance(parsed.get("sheet"), str):
+                    profile["sheet"] = parsed["sheet"]
+        return {
+            "id": row[0],
+            "project": row[1],
+            "format": row[2],
+            "sha256": row[3],
+            "row_count": row[4],
+            "column_count": row[5],
+            **overview,
+            "profile": profile,
+            "added_at": row[7],
+        }
+
     def dataset_detail(self, dataset_id: str) -> dict[str, object]:
         self.initialize()
         with closing(self._connect()) as db:
