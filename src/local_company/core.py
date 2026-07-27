@@ -196,6 +196,7 @@ KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
+QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
@@ -6339,6 +6340,166 @@ class Company:
         self.initialize()
         with closing(self._connect()) as db:
             return list(db.execute("SELECT id, status, created_at, objective FROM jobs ORDER BY created_at DESC"))
+
+    def quality_recovery_summary(self, job_id: str) -> dict[str, object]:
+        """Return bounded stored quality findings without evaluating or exposing report data."""
+        if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+            raise ValueError("Invalid job ID")
+        self.initialize()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT j.status, e.passed, e.score, e.checks_json, e.evaluated_at "
+                "FROM jobs j LEFT JOIN evaluations e ON e.job_id=j.id WHERE j.id=?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Unknown job: {job_id}")
+            history = db.execute(
+                "SELECT evaluator_version, findings_json FROM evaluation_history "
+                "WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            queue = db.execute(
+                "SELECT id, status FROM mission_queue WHERE job_id=? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+
+        effects = {
+            "evaluation_appended": False,
+            "model_called": False,
+            "queue_changed": False,
+            "work_started": False,
+        }
+        if row[1] is None:
+            return {
+                "schema": QUALITY_RECOVERY_SCHEMA,
+                "job_id": job_id,
+                "job_status": row[0],
+                "quality_status": "not_evaluated",
+                "score": None,
+                "evaluator_version": None,
+                "failed_checks": [],
+                "source_conflict_count": 0,
+                "incomplete_specialist_roles": [],
+                "repair_actions": [],
+                "next_action": (
+                    "run_quality_evaluation" if row[0] == "complete"
+                    else "finish_or_recover_job_before_quality"
+                ),
+                "queue_id": queue[0] if queue else None,
+                "queue_status": queue[1] if queue else None,
+                "effects": effects,
+            }
+
+        if row[1] not in (0, 1) or type(row[2]) is not int or not 0 <= row[2] <= 100:
+            raise ValueError("Stored quality evaluation is malformed")
+        try:
+            checks = json.loads(row[3])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("Stored quality checks are malformed") from exc
+        if (
+            not isinstance(checks, dict) or not checks
+            or any(not isinstance(key, str) or type(value) is not bool for key, value in checks.items())
+        ):
+            raise ValueError("Stored quality checks are malformed")
+        failed_checks = sorted(key for key, value in checks.items() if not value)
+        if bool(row[1]) == bool(failed_checks):
+            raise ValueError("Stored quality result contradicts its checks")
+
+        evaluator_version = None
+        source_conflict_count = 0
+        incomplete_roles: list[str] = []
+        if history:
+            if not isinstance(history[0], str) or not history[0]:
+                raise ValueError("Stored quality history is malformed")
+            evaluator_version = history[0]
+            try:
+                findings = json.loads(history[1])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("Stored quality findings are malformed") from exc
+            if not isinstance(findings, dict):
+                raise ValueError("Stored quality findings are malformed")
+            conflicts = findings.get("source_conflicts", [])
+            roles = findings.get("incomplete_specialist_roles", [])
+            if (
+                not isinstance(conflicts, list) or any(not isinstance(item, dict) for item in conflicts)
+                or not isinstance(roles, list) or any(not isinstance(role, str) for role in roles)
+            ):
+                raise ValueError("Stored quality findings are malformed")
+            source_conflict_count = len(conflicts)
+            incomplete_roles = sorted({role for role in roles if role in ROLES})
+
+        repair_groups = (
+            (
+                {
+                    "evidence_filename_pairs_valid", "evidence_ids_valid",
+                    "verified_facts_cited", "verified_facts_evidence_cited",
+                    "verification_claims_evidence_bound",
+                },
+                "pair_verified_claims_with_exact_filenames_and_evidence_ids",
+            ),
+            (
+                {"source_limitations_respected"},
+                "remove_or_rewrite_claims_that_conflict_with_frozen_source_limitations",
+            ),
+            (
+                {
+                    "executive_synthesis_present", "facts_assumptions_separated",
+                    "owner_gate_present", "requested_concepts_present",
+                    "required_ending_present", "synthesis_present",
+                    "task_template_count_present", "team_plan_present",
+                },
+                "make_requested_sections_counts_labels_and_ending_explicit",
+            ),
+            (
+                {"specialists_within_word_limit", "synthesis_within_word_limit"},
+                "shorten_sections_to_requested_word_limits",
+            ),
+            (
+                {
+                    "evidence_manifest_bound_to_report", "evidence_manifest_valid",
+                    "report_integrity_valid", "report_path_local", "report_present",
+                },
+                "repair_sealed_report_or_evidence_integrity_before_retry",
+            ),
+            (
+                {"assignments_complete", "job_complete", "model_stopped_cleanly"},
+                "recover_incomplete_or_interrupted_work_before_retry",
+            ),
+            (
+                {
+                    "numeric_claims_labeled", "placeholder_artifacts_absent",
+                    "unperformed_action_claims_absent",
+                },
+                "label_assumptions_and_remove_unperformed_or_placeholder_claims",
+            ),
+        )
+        failed_set = set(failed_checks)
+        repair_actions = [
+            action for group, action in repair_groups if failed_set.intersection(group)
+        ]
+        covered = set().union(*(group for group, _ in repair_groups))
+        if failed_set - covered:
+            repair_actions.append("review_remaining_failed_checks_before_retry")
+
+        return {
+            "schema": QUALITY_RECOVERY_SCHEMA,
+            "job_id": job_id,
+            "job_status": row[0],
+            "quality_status": "passed" if row[1] else "failed",
+            "score": row[2],
+            "evaluator_version": evaluator_version,
+            "evaluated_at": row[4],
+            "failed_checks": failed_checks,
+            "source_conflict_count": source_conflict_count,
+            "incomplete_specialist_roles": incomplete_roles,
+            "repair_actions": repair_actions,
+            "next_action": "none" if row[1] else "review_then_queue_revised_mission",
+            "queue_id": queue[0] if queue else None,
+            "queue_status": queue[1] if queue else None,
+            "effects": effects,
+        }
 
     def job_detail(self, job_id: str) -> dict[str, object]:
         self.initialize()

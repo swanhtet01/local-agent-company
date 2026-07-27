@@ -197,9 +197,10 @@ allowlist.
 
 ```powershell
 .\local-company.cmd quality JOB_ID
+.\local-company.cmd quality JOB_ID --summary
 ```
 
-A report is written through a same-directory atomic replacement and sealed with SHA-256 before evaluation. Every recheck appends a versioned evaluation-history record; the latest result remains the dashboard projection. The evaluator reads and scans the exact sealed report bytes, so edits, moved paths, symlinks, and appended action claims fail closed. A queue item becomes `quality_failed` instead of `complete` when these gates fail. Use the dashboard **Recheck** control or `quality JOB_ID` after evaluator improvements. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`; queued items can be stopped with `queue cancel QUEUE_ID`.
+A report is written through a same-directory atomic replacement and sealed with SHA-256 before evaluation. Every recheck appends a versioned evaluation-history record; the latest result remains the dashboard projection. The evaluator reads and scans the exact sealed report bytes, so edits, moved paths, symlinks, and appended action claims fail closed. A queue item becomes `quality_failed` instead of `complete` when these gates fail. `quality JOB_ID --summary` is a bounded, pathless read of the latest stored result: it lists exact failed-check tokens, grouped repair actions, source-conflict count, queue linkage, and explicit zero-effect flags without appending an evaluation, calling a model, or changing queue state. Use the dashboard **Recheck** control or `quality JOB_ID` after evaluator improvements. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`; queued items can be stopped with `queue cancel QUEUE_ID`.
 
 ## Recurring local schedules
 

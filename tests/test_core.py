@@ -32,7 +32,7 @@ from local_company.config import (
 )
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS, ROLES,
-    ReportFinalizationPending, SourceHit,
+    QUALITY_RECOVERY_SCHEMA, ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     bounded_context_blocks,
     compact_labeled_sections,
@@ -4772,6 +4772,90 @@ class CompanyTests(unittest.TestCase):
             evaluation = company.recent_evaluations()[0]
             self.assertEqual(evaluation[0], company.queue_items("complete")[0][7])
             self.assertEqual(evaluation[1:3], (1, 100))
+
+    def test_quality_summary_is_bounded_pathless_and_read_only(self):
+        objective = (
+            "Define three task templates, a daily review cadence, success checks, failure modes, "
+            "and owner gates. Separate verified facts from assumptions. Each specialist must use "
+            "at most 100 words. The executive synthesis must use at most 180 words and end with: "
+            "Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", ConstraintModel(False))
+            queue_id = company.enqueue(objective, playbook="operations-improvement")
+            _, job_id, _, passed = company.run_next_queue_item()
+            self.assertFalse(passed)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_before = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+            database_before = company.db_path.read_bytes()
+
+            summary = company.quality_recovery_summary(job_id)
+            self.assertEqual(summary["schema"], QUALITY_RECOVERY_SCHEMA)
+            self.assertEqual(summary["quality_status"], "failed")
+            self.assertEqual(summary["queue_id"], queue_id)
+            self.assertEqual(summary["queue_status"], "quality_failed")
+            self.assertEqual(summary["failed_checks"], sorted(summary["failed_checks"]))
+            self.assertIn("facts_assumptions_separated", summary["failed_checks"])
+            self.assertIn(
+                "make_requested_sections_counts_labels_and_ending_explicit",
+                summary["repair_actions"],
+            )
+            self.assertIn(
+                "label_assumptions_and_remove_unperformed_or_placeholder_claims",
+                summary["repair_actions"],
+            )
+            self.assertEqual(summary["next_action"], "review_then_queue_revised_mission")
+            self.assertTrue(all(value is False for value in summary["effects"].values()))
+
+            cli_model = CountingMockModel()
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "quality", job_id,
+                    "--summary",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            rendered = output.getvalue()
+            cli_summary = json.loads(rendered)
+            self.assertEqual(cli_summary, summary)
+            self.assertEqual(cli_model.calls, 0)
+            self.assertNotIn(str(root), rendered)
+            self.assertNotIn(objective, rendered)
+            self.assertLess(len(rendered.encode("utf-8")), 4096)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_after = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(history_after, history_before)
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+
+    def test_quality_summary_handles_unevaluated_and_malformed_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, _ = company.run("Review local inventory", roles=["quality"])
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute("DELETE FROM evaluations WHERE job_id=?", (job_id,))
+                db.execute("DELETE FROM evaluation_history WHERE job_id=?", (job_id,))
+            summary = company.quality_recovery_summary(job_id)
+            self.assertEqual(summary["quality_status"], "not_evaluated")
+            self.assertEqual(summary["next_action"], "run_quality_evaluation")
+            self.assertEqual(summary["failed_checks"], [])
+            with self.assertRaisesRegex(ValueError, "Invalid job ID"):
+                company.quality_recovery_summary("../unsafe")
+
+            company.evaluate_job(job_id)
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE evaluations SET checks_json='[]' WHERE job_id=?", (job_id,),
+                )
+            with self.assertRaisesRegex(ValueError, "Stored quality checks are malformed"):
+                company.quality_recovery_summary(job_id)
 
     def test_bounded_editor_repairs_structure_and_audits_word_caps(self):
         objective = (
