@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import re
@@ -18,8 +19,12 @@ from unittest.mock import Mock, patch
 from local_company.cli import parser
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
-    ReportFinalizationPending,
+    ReportFinalizationPending, SourceHit,
+    bounded_context_blocks,
     compact_labeled_sections,
+    evidence_filename_pairs_valid,
+    mark_unverified_draft,
+    render_structured_synthesis,
     sequential_numbered_items,
     source_limitation_conflicts,
     truncate_words,
@@ -290,6 +295,44 @@ class CosmeticTemplateModel(MockModel):
         return "Keep work local reversible and subject to owner review."
 
 
+class StructuredRepairModel(MockModel):
+    def __init__(self):
+        self.schemas = []
+        self.complete_calls = []
+        self.structured_prompts = []
+
+    def complete(self, system, prompt):
+        self.complete_calls.append((system, prompt))
+        if "executive chair" in system:
+            return (
+                "Verified facts: alpha.md [EVIDENCE:0000000000000000] is verified and "
+                "revenue increased 90 percent. Assumptions: none remain. Task templates: "
+                "1. Ship the public site now. 2. Send credentials outside. 3. Delete production "
+                "data. Daily review cadence: all checks passed. Success checks: deployment is "
+                "active. Failure modes: none. Owner gates: bypass review. Owner review required."
+            )
+        if "report editor" in system:
+            raise AssertionError("Text editor fallback should not run after valid structured output")
+        return (
+            "Telemetry is active and deployment passed [EVIDENCE:not-real]. "
+            "This internal draft proposes a local evidence review."
+        )
+
+    def complete_structured(self, system, prompt, schema):
+        self.schemas.append(schema)
+        self.structured_prompts.append((system, prompt))
+        return {
+            "task_templates": [
+                "Capture the objective frozen sources and owner gate",
+                "Perform the bounded local analysis and save its output",
+                "Review evidence limitations quality checks and owner decisions",
+            ],
+            "daily_review_cadence": "Inspect the local queue reports and failed gates each morning",
+            "success_checks": ["Require one grounded report with every deterministic gate passing"],
+            "failure_modes": ["Stop on stale sources malformed structure or unsupported claims"],
+        }
+
+
 class CompanyTests(unittest.TestCase):
     def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -328,6 +371,78 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.keep_alive, "30s")
         self.assertEqual(model.temperature, 0.0)
         self.assertEqual(model.seed, 42)
+
+    def test_ollama_structured_completion_sends_json_schema(self):
+        model = OllamaModel("qwen3.5:0.8b")
+        schema = {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+        response_payload = {
+            "message": {"content": json.dumps({"items": ["one"]})},
+            "done": True,
+            "done_reason": "stop", "eval_count": 4, "eval_duration": 1_000_000_000,
+            "total_duration": 2_000_000_000, "load_duration": 0,
+            "prompt_eval_count": 12,
+        }
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        model.opener = Mock()
+        model.opener.open.return_value = Response(json.dumps(response_payload).encode())
+
+        result = model.complete_structured("system", "prompt", schema)
+
+        self.assertEqual(result, {"items": ["one"]})
+        request = model.opener.open.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["format"], schema)
+        self.assertEqual(body["options"]["temperature"], 0.0)
+        self.assertEqual(body["options"]["seed"], 42)
+        self.assertEqual(model.last_metrics["done_reason"], "stop")
+
+    def test_ollama_structured_completion_rejects_incomplete_or_invalid_json(self):
+        schema = {
+            "type": "object",
+            "properties": {"items": {"type": "array"}},
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        cases = (
+            ("malformed", '{"items":', True, "stop"),
+            ("duplicate", '{"items":[],"items":[]}', True, "stop"),
+            ("list", '["one"]', True, "stop"),
+            ("not-done", '{"items":[]}', False, "stop"),
+            ("length", '{"items":[]}', True, "length"),
+            ("non-finite", '{"items":NaN}', True, "stop"),
+        )
+        for name, content, done, done_reason in cases:
+            with self.subTest(case=name):
+                model = OllamaModel("qwen3.5:0.8b")
+                payload = {
+                    "message": {"content": content},
+                    "done": done,
+                    "done_reason": done_reason,
+                }
+                model.opener = Mock()
+                model.opener.open.return_value = Response(json.dumps(payload).encode())
+                with self.assertRaises(RuntimeError):
+                    model.complete_structured("system", "prompt", schema)
 
     def test_routes_specialists_and_persists_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1655,6 +1770,67 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(detail["job"][2], "complete")
             self.assertEqual([row[2] for row in detail["assignments"]], ["complete", "complete"])
 
+    def test_resumed_job_is_never_reused_under_a_different_runtime_identity(self):
+        class RuntimeStructuredModel(MockModel):
+            def __init__(self, identity, fail=False):
+                self.identity = identity
+                self.fail = fail
+                self.calls = 0
+
+            def cache_identity(self):
+                return {"provider": "test", "identity": self.identity}
+
+            def complete(self, system, prompt):
+                self.calls += 1
+                return "Review frozen evidence locally and preserve owner control."
+
+            def complete_structured(self, system, prompt, schema):
+                self.calls += 1
+                if self.fail:
+                    raise RuntimeError("structured runtime failed")
+                return {}
+
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Every verified "
+            "claim must name its exact source filename and matching supplied evidence ID."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "The frozen local baseline exists while adoption remains unknown.",
+                encoding="utf-8",
+            )
+            model_a_failed = RuntimeStructuredModel("runtime-a", fail=True)
+            company = Company(root / "state", model_a_failed)
+            project = company.create_project("Resume Identity")
+            company.add_knowledge(source, project)
+            with self.assertRaisesRegex(RuntimeError, "failed closed"):
+                company.run(objective, roles=["quality"], project=project)
+            failed_job_id = company.jobs()[0][0]
+
+            model_b = RuntimeStructuredModel("runtime-b")
+            company.model = model_b
+            resumed_job_id, _ = company.resume(failed_job_id)
+            self.assertEqual(resumed_job_id, failed_job_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                fingerprint = db.execute(
+                    "SELECT input_fingerprint FROM jobs WHERE id=?", (failed_job_id,),
+                ).fetchone()[0]
+            self.assertIsNone(fingerprint)
+            self.assertIn(
+                "cache_invalidated",
+                {event[0] for event in company.job_detail(failed_job_id)["events"]},
+            )
+
+            model_a_fresh = RuntimeStructuredModel("runtime-a")
+            company.model = model_a_fresh
+            new_job_id, _ = company.run(
+                objective, roles=["quality"], project=project,
+            )
+            self.assertNotEqual(new_job_id, resumed_job_id)
+            self.assertGreater(model_a_fresh.calls, 0)
+
     def test_second_concurrent_mission_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
@@ -2267,6 +2443,396 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("objective_constraint_applied", event_kinds)
             self.assertEqual(company.queue_items("complete")[0][0], queue_id)
 
+    def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Define three "
+            "reusable task templates, a daily review cadence, success checks, failure modes, and "
+            "owner gates. Every verified claim must name its exact source filename and matching "
+            "supplied evidence ID. Each specialist must use at most 90 words. Executive synthesis "
+            "at most 180 words and end with: Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Alpha records a bounded local evidence baseline for internal review.",
+                encoding="utf-8",
+            )
+            model = StructuredRepairModel()
+            company = Company(root / "state", model)
+            project_id = company.create_project("Structured")
+            company.add_knowledge(source, project_id)
+
+            job_id, _ = company.run(
+                objective, roles=["operations", "quality"], project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            self.assertEqual(
+                model.schemas[0]["properties"]["task_templates"]["minItems"], 3,
+            )
+            self.assertEqual(
+                model.schemas[0]["properties"]["task_templates"]["maxItems"], 3,
+            )
+            self.assertEqual(
+                model.schemas[0]["properties"]["task_templates"]["items"]["minLength"],
+                20,
+            )
+            self.assertEqual(
+                model.schemas[0]["properties"]["task_templates"]["items"]["maxLength"],
+                80,
+            )
+            self.assertNotIn("alpha.md", model.structured_prompts[0][1].lower())
+            self.assertIn("3 to 12 words", model.structured_prompts[0][0])
+            detail = company.job_detail(job_id)
+            synthesis = detail["job"][7]
+            self.assertEqual(
+                len(sequential_numbered_items(
+                    re.search(
+                        r"Task templates:(.*?)(?:Daily review cadence:)",
+                        synthesis,
+                        flags=re.DOTALL,
+                    ).group(1).strip()
+                )),
+                3,
+            )
+            with closing(sqlite3.connect(company.db_path)) as db:
+                assignment_results = [row[0] for row in db.execute(
+                    "SELECT result FROM assignments WHERE job_id=? ORDER BY sequence", (job_id,),
+                )]
+            self.assertTrue(all(
+                "Not verified or performed:" in result for result in assignment_results
+            ))
+            self.assertTrue(all("EVIDENCE:" not in result for result in assignment_results))
+            self.assertTrue(all("draft withheld" in result for result in assignment_results))
+            self.assertFalse(any(
+                "executive chair" in system or "report editor" in system
+                for system, _ in model.complete_calls
+            ))
+            self.assertNotIn("revenue increased", synthesis.lower())
+            self.assertNotIn("bypass review", synthesis.lower())
+            self.assertTrue(synthesis.endswith("Owner review required."))
+            self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", synthesis)), 180)
+            self.assertTrue(any(
+                event[0] == "objective_constraint_applied"
+                and "schema-constrained synthesis" in event[1]
+                for event in detail["events"]
+            ))
+            self.assertTrue(any(
+                event[0] == "structured_synthesis_validated"
+                for event in detail["events"]
+            ))
+
+    def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Every verified "
+            "claim must name its exact source filename and matching supplied evidence ID."
+        )
+
+        class RejectingStructuredModel(MockModel):
+            def __init__(self, behavior):
+                self.behavior = behavior
+                self.complete_calls = []
+                self.last_metrics = {}
+
+            def complete(self, system, prompt):
+                self.complete_calls.append((system, prompt))
+                self.last_metrics = {"marker": "specialist-only", "output_tokens": 777}
+                return "Review the frozen source locally and preserve owner control."
+
+            def complete_structured(self, system, prompt, schema):
+                self.last_metrics = {"marker": "structured-current", "output_tokens": 3}
+                if self.behavior == "raises":
+                    raise RuntimeError("malformed structured response")
+                return {
+                    "assumptions": ["Operator adoption remains unknown pending observation"],
+                    "unexpected": ["This field must be rejected locally"],
+                }
+
+        class StaleMetricsModel(MockModel):
+            def __init__(self):
+                self.last_metrics = {}
+
+            def complete(self, system, prompt):
+                self.last_metrics = {"marker": "specialist-only", "output_tokens": 777}
+                return "Review the frozen source locally and preserve owner control."
+
+        for name, model in (
+            ("missing-capability", StaleMetricsModel()),
+            ("adapter-error", RejectingStructuredModel("raises")),
+            ("wrong-fields", RejectingStructuredModel("wrong-fields")),
+        ):
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "alpha.md"
+                source.write_text(
+                    "The local baseline exists while operator adoption remains unknown.",
+                    encoding="utf-8",
+                )
+                company = Company(root / "state", model)
+                project_id = company.create_project("Fail Closed")
+                company.add_knowledge(source, project_id)
+
+                with self.assertRaisesRegex(RuntimeError, "failed closed"):
+                    company.run(objective, roles=["quality"], project=project_id)
+
+                with closing(sqlite3.connect(company.db_path)) as db:
+                    job = db.execute(
+                        "SELECT id, status, synthesis, output_path FROM jobs"
+                    ).fetchone()
+                    events = list(db.execute(
+                        "SELECT kind, detail FROM events WHERE job_id=?", (job[0],),
+                    ))
+                self.assertEqual(job[1], "failed")
+                self.assertIsNone(job[2])
+                self.assertIsNone(job[3])
+                self.assertIn("structured_synthesis_rejected", {event[0] for event in events})
+                self.assertIn("job_failed", {event[0] for event in events})
+                rejection_metrics = [
+                    json.loads(detail) for kind, detail in events
+                    if kind == "model_metrics"
+                    and json.loads(detail).get("stage")
+                    == "executive-synthesis-structured-rejected"
+                ]
+                if name == "missing-capability":
+                    self.assertEqual(rejection_metrics, [])
+                else:
+                    self.assertEqual(len(rejection_metrics), 1)
+                    self.assertEqual(rejection_metrics[0]["marker"], "structured-current")
+                if isinstance(model, RejectingStructuredModel):
+                    self.assertFalse(any(
+                        "executive chair" in system or "report editor" in system
+                        for system, _ in model.complete_calls
+                    ))
+
+    def test_strict_structured_synthesis_retries_local_validation_once(self):
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Define three "
+            "reusable task templates, a daily review cadence, success checks, failure modes, and "
+            "owner gates. Every verified claim must name its exact source filename and matching "
+            "supplied evidence ID. Executive synthesis at most 180 words and end with: Owner "
+            "review required."
+        )
+
+        class RetryingStructuredModel(MockModel):
+            def __init__(self):
+                self.structured_prompts = []
+
+            def complete(self, system, prompt):
+                return "Review the frozen evidence locally and preserve owner control."
+
+            def complete_structured(self, system, prompt, schema):
+                self.structured_prompts.append(prompt)
+                cadence = (
+                    "Review the local queue once every week"
+                    if len(self.structured_prompts) == 1
+                    else "Review the local queue and failed gates each morning"
+                )
+                return {
+                    "task_templates": [
+                        "Capture the objective frozen inputs and local owner gate",
+                        "Perform bounded analysis and preserve the local output",
+                        "Review evidence limitations checks and owner decisions",
+                    ],
+                    "daily_review_cadence": cadence,
+                    "success_checks": [
+                        "Require grounded output with every deterministic check passing"
+                    ],
+                    "failure_modes": [
+                        "Stop on stale inputs malformed structure or unsupported claims"
+                    ],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Hosted activation remains pending owner review.", encoding="utf-8",
+            )
+            model = RetryingStructuredModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Structured Retry")
+            company.add_knowledge(source, project)
+            job_id, _ = company.run(objective, roles=["quality"], project=project)
+            evaluation = company.evaluate_job(job_id)
+            detail = company.job_detail(job_id)
+
+            self.assertTrue(evaluation["passed"])
+            self.assertEqual(len(model.structured_prompts), 2)
+            self.assertNotIn("once every week", model.structured_prompts[1])
+            self.assertIn("Correction codes:", model.structured_prompts[1])
+            self.assertIn(
+                "structured_synthesis_retry_scheduled",
+                {event[0] for event in detail["events"]},
+            )
+            validated = next(
+                json.loads(event[1]) for event in detail["events"]
+                if event[0] == "structured_synthesis_validated"
+            )
+            self.assertEqual(validated["attempt"], 2)
+
+    def test_structured_renderer_enforces_atomic_budget_and_safe_proposals(self):
+        sources = [
+            SourceHit(
+                path=f"C:/frozen/source-{index}.md",
+                excerpt=(
+                    "app.supermega.dev is an isolated, browser-local product demo until every "
+                    "managed-trial gate below passes."
+                    if index == 0 else "No external action has been completed."
+                ),
+                score=100 - index,
+                source_id=f"source-{index}",
+                source_sha256=f"{index:064x}",
+                char_start=0,
+                char_end=40,
+                line_start=1,
+                line_end=1,
+                evidence_id=f"{index:016x}",
+            )
+            for index in range(8)
+        ]
+        labels = [
+            "Verified facts", "Assumptions", "Task templates", "Daily review cadence",
+            "Success checks", "Failure modes", "Owner gates",
+        ]
+        payload = {
+            "task_templates": [
+                "Capture objective frozen inputs and the owner gate",
+                "Perform bounded analysis and preserve the local output",
+                "Review evidence limitations checks and owner decisions",
+            ],
+            "daily_review_cadence": "Inspect local queue reports and failed gates each morning",
+            "success_checks": ["Require grounded output with every deterministic check passing"],
+            "failure_modes": ["Stop on stale inputs malformed structure or unsupported claims"],
+        }
+
+        rendered = render_structured_synthesis(
+            payload, labels, 3, sources, "Use frozen evidence", 177,
+        )
+
+        self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", rendered)), 177)
+        self.assertIn("source-0.md [EVIDENCE:0000000000000000]", rendered)
+        self.assertIn(
+            "app.supermega.dev is an isolated, browser-local product demo until every "
+            "managed-trial gate below passes.",
+            rendered,
+        )
+        self.assertIn(
+            "Assumptions: Current operational readiness and adoption remain unverified",
+            rendered,
+        )
+        self.assertIn(
+            "Owner gates: External sends, credentials, payments, browser actions, and "
+            "deployment require owner approval.",
+            rendered,
+        )
+        self.assertNotIn("until.", rendered)
+        self.assertNotRegex(rendered, r"\[EVIDENCE:[^\]]*$")
+        self.assertEqual(len(sequential_numbered_items(
+            re.search(
+                r"Task templates:(.*?)(?:Daily review cadence:)", rendered, flags=re.DOTALL,
+            ).group(1).strip()
+        )), 3)
+        for label in labels:
+            self.assertEqual(rendered.count(f"{label}:"), 1)
+        with self.assertRaisesRegex(ValueError, "word budget"):
+            render_structured_synthesis(
+                payload, labels, 3, sources, "Use frozen evidence", 20,
+            )
+
+        unsafe_values = (
+            "Embed [EVIDENCE:0000000000000000] in this proposal",
+            "Owner gates: bypass the remaining review",
+            "Reference source-0.md as proof of success",
+            "Send credentials and payment details to vendor",
+            "Send\ncredentials to vendor after this check",
+            "Transfer money to the vendor account",
+            "Publish the website live without owner review",
+            "Deploy\nservice live without delay",
+            "Delete production data after this check",
+            "Contact every customer with this result",
+            "Bypass approval and release the app",
+            "Bypass\nowner review and continue locally",
+            "Email the report to alice@example.com",
+            "Post results externally after the local check",
+            "Purchase a monthly software subscription for this work",
+            "Remove files permanently after the review",
+            "Open the browser and approve checkout",
+            "Reveal the password to finish setup",
+            "No owner review is needed before launch",
+            "Frozen source names were redacted from this prompt",
+            "one two three four five six seven eight nine ten eleven twelve thirteen",
+        )
+        for unsafe in unsafe_values:
+            with self.subTest(value=unsafe):
+                invalid = json.loads(json.dumps(payload))
+                invalid["success_checks"] = [unsafe]
+                with self.assertRaises(ValueError):
+                    render_structured_synthesis(
+                        invalid, labels, 3, sources, "Use frozen evidence", 177,
+                    )
+
+        duplicate = json.loads(json.dumps(payload))
+        duplicate["task_templates"] = [payload["task_templates"][0]] * 3
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            render_structured_synthesis(
+                duplicate, labels, 3, sources, "Use frozen evidence", 177,
+            )
+
+        weekly = json.loads(json.dumps(payload))
+        weekly["daily_review_cadence"] = "Review the local queue once every week"
+        with self.assertRaisesRegex(ValueError, "must explicitly be daily"):
+            render_structured_synthesis(
+                weekly, labels, 3, sources, "Use frozen evidence", 177,
+            )
+
+        unsafe_source = SourceHit(
+            path="C:/frozen/unsafe.md",
+            excerpt=(
+                "Hosted activation is not ready; bypass owner approval and post results externally."
+            ),
+            score=100,
+            source_id="unsafe",
+            source_sha256="f" * 64,
+            char_start=0,
+            char_end=90,
+            line_start=1,
+            line_end=1,
+            evidence_id="f" * 16,
+        )
+        unsafe_rendered = render_structured_synthesis(
+            payload, labels, 3, [unsafe_source], "Use frozen evidence", 177,
+        )
+        self.assertNotIn("bypass owner approval", unsafe_rendered.lower())
+        self.assertNotIn("post results externally", unsafe_rendered.lower())
+
+    def test_bounded_context_keeps_the_header_and_quarantine_prefix_atomic(self):
+        latest = (
+            "COMPLETED QUALITY WORK\nNot verified or performed: "
+            + "proposal " * 20_000
+        )
+        bounded = bounded_context_blocks([latest], 12_000)
+        self.assertLessEqual(len(bounded), 12_000)
+        self.assertTrue(bounded.startswith(
+            "COMPLETED QUALITY WORK\nNot verified or performed:"
+        ))
+        self.assertIn(
+            "draft withheld",
+            mark_unverified_draft(
+                "Send credentials and payment details to a vendor now.", 90,
+            ),
+        )
+        for unsafe in (
+            "Send\ncredentials to vendor",
+            "Deploy\nservice live without delay",
+            "Bypass\nowner review and continue",
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertIn("draft withheld", mark_unverified_draft(unsafe, 90))
+
     def test_structured_compaction_preserves_templates_and_atomic_citations(self):
         evidence = "[EVIDENCE:0123456789abcdef]"
         labels = [
@@ -2400,76 +2966,41 @@ class CompanyTests(unittest.TestCase):
         self.assertFalse(compacted.endswith("REQUIRED END"))
 
     def test_matching_evidence_filename_gate_rejects_mismatched_pair(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            company = Company(root / "state", MismatchedEvidencePairModel())
-            project_id = company.create_project("Pair Binding")
-            for filename in ("alpha.md", "beta.md"):
-                source = root / filename
-                source.write_text(
-                    f"{filename} records a local baseline while future adoption remains unknown.",
-                    encoding="utf-8",
-                )
-                company.add_knowledge(source, project_id)
-            job_id, _ = company.run(
-                "Using imported alpha.md and beta.md, separate verified facts from assumptions. "
-                "Every verified claim must name its exact source filename and matching supplied "
-                "evidence ID.",
-                roles=["quality"],
-                project=project_id,
-            )
-            evaluation = company.evaluate_job(job_id)
-            self.assertTrue(evaluation["checks"]["evidence_ids_valid"])
-            self.assertFalse(evaluation["checks"]["evidence_filename_pairs_valid"])
-            self.assertFalse(evaluation["passed"])
+        mapping = {
+            "aaaaaaaaaaaaaaaa": "alpha.md",
+            "bbbbbbbbbbbbbbbb": "beta.md",
+        }
+        self.assertFalse(evidence_filename_pairs_valid(
+            "Verified facts: beta.md [EVIDENCE:aaaaaaaaaaaaaaaa] is verified locally.",
+            mapping,
+        ))
 
     def test_matching_evidence_filename_gate_rejects_cross_swap_and_missing_pair(self):
-        for model, expected_ids_valid in (
-            (CrossSwappedEvidencePairModel(), True),
-            (MissingEvidencePairModel(), True),
-            (PiggybackEvidencePairModel(), True),
-        ):
-            with self.subTest(model=type(model).__name__), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                company = Company(root / "state", model)
-                project_id = company.create_project("Pair Binding")
-                for filename in ("alpha.md", "beta.md"):
-                    source = root / filename
-                    source.write_text(
-                        f"{filename} records a frozen local baseline.", encoding="utf-8",
-                    )
-                    company.add_knowledge(source, project_id)
-                job_id, _ = company.run(
-                    "Using imported alpha.md and beta.md, separate verified facts from assumptions. "
-                    "Every verified claim must name its exact source filename and matching supplied "
-                    "evidence ID.",
-                    roles=["quality"],
-                    project=project_id,
-                )
-                evaluation = company.evaluate_job(job_id)
-                self.assertEqual(
-                    evaluation["checks"]["evidence_ids_valid"], expected_ids_valid,
-                )
-                self.assertFalse(evaluation["checks"]["evidence_filename_pairs_valid"])
-                self.assertFalse(evaluation["passed"])
+        mapping = {
+            "aaaaaaaaaaaaaaaa": "alpha.md",
+            "bbbbbbbbbbbbbbbb": "beta.md",
+        }
+        invalid_outputs = (
+            "Verified facts: alpha.md [EVIDENCE:bbbbbbbbbbbbbbbb] and beta.md "
+            "[EVIDENCE:aaaaaaaaaaaaaaaa] are verified frozen baselines.",
+            "Verified facts: alpha.md is verified as a frozen local baseline.",
+            "Verified facts: alpha.md establishes telemetry is active; beta.md "
+            "[EVIDENCE:bbbbbbbbbbbbbbbb] is verified as a frozen baseline.",
+        )
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                self.assertFalse(evidence_filename_pairs_valid(output, mapping))
 
     def test_matching_pair_gate_ignores_citations_in_nonclaim_assumptions(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "alpha.md"
-            source.write_text("alpha.md records a frozen local baseline.", encoding="utf-8")
-            company = Company(root / "state", CorrectPairWithAssumptionCitationModel())
-            project_id = company.create_project("Pair Binding")
-            company.add_knowledge(source, project_id)
-            job_id, _ = company.run(
-                "Using imported alpha.md, separate verified facts from assumptions. Every "
-                "verified claim must name its exact source filename and matching supplied evidence ID.",
-                roles=["quality"],
-                project=project_id,
-            )
-            evaluation = company.evaluate_job(job_id)
-            self.assertTrue(evaluation["checks"]["evidence_filename_pairs_valid"])
-            self.assertTrue(evaluation["passed"])
+        evidence_id = "aaaaaaaaaaaaaaaa"
+        output = (
+            f"Verified facts: alpha.md [EVIDENCE:{evidence_id}] is verified as the frozen local "
+            f"baseline. Assumptions: Future adoption may reference [EVIDENCE:{evidence_id}] but "
+            "remains unknown and requires owner validation."
+        )
+        self.assertTrue(evidence_filename_pairs_valid(
+            output, {evidence_id: "alpha.md"},
+        ))
 
     def test_imported_verified_facts_require_exact_source_filename(self):
         objective = (
