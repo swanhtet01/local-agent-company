@@ -2004,7 +2004,11 @@ class CompanyTests(unittest.TestCase):
         source_root = Path(__file__).parents[1] / "src" / "local_company"
         source_files = sorted(
             path for path in source_root.rglob("*.py")
-            if path.name != "build_info.py"
+            if path.relative_to(source_root).as_posix() != "build_info.py"
+        )
+        self.assertEqual(
+            {path.relative_to(source_root).as_posix() for path in source_files},
+            {"__init__.py", "cli.py", "core.py", "dashboard.py", "service.py"},
         )
         expected = hashlib.sha256()
         for path in source_files:

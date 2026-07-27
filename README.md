@@ -151,6 +151,16 @@ Each due schedule produces at most one occurrence per tick and advances beyond t
 
 Health reports local disk, database, reports, Ollama model storage, active work, queue depth, approvals, and metadata-only pending-completion phases. The dashboard's `/health.json` also carries one startup-cached `build` identity from an embedded release manifest: package version, build ID, and the release-validated SHA-256 of all operational package Python files. The manifest file itself is excluded from that digest to avoid self-reference. Runtime health performs no filesystem, environment, or Git reads, never launches another process, and exposes no repository paths. Unavailable `git_commit` and `source_dirty` values deliberately remain `null` instead of being guessed. `pending_report_finalizations`, `pending_evaluations`, and `pending_completion` identify durable work that is between report preparation, sealing, evaluation, and queue reconciliation without exposing lease tokens, paths, or report bytes. Export writes a version-3 timestamped JSON audit plus a `.sha256` manifest, including report seals, evidence-manifest indexes, and append-only evaluation history. It includes source paths and content hashes but deliberately excludes imported source bodies and frozen source quotes.
 
+Verify the embedded manifest before tests or release. After changing any operational package Python file, refresh it with a new, explicit, monotonic build ID and check it again. These commands touch no company state or service process:
+
+```powershell
+python .\scripts\stamp_build_manifest.py --check
+python .\scripts\stamp_build_manifest.py --write --build-id local-build-YYYYMMDD.N
+python .\scripts\stamp_build_manifest.py --check
+```
+
+Run stamping only while local source edits are paused; its double scan detects ordinary concurrent changes but is not a lock against a malicious filesystem writer. A write failure with `replacement_committed: true` means the atomic replacement reached disk before a later check failed: run `--check`, inspect the result, and do not restart the service until it passes. The live dashboard caches its embedded identity at process startup, so a validated and committed build becomes live only after a separate deliberate service restart.
+
 ## Inspect and recover work
 
 ```powershell
