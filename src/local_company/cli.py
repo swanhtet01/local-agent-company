@@ -91,6 +91,12 @@ def parser() -> argparse.ArgumentParser:
     add_runtime_args(queue_run)
     queue_reset = queue_sub.add_parser("reset", help="Return an incomplete queue item to queued")
     queue_reset.add_argument("queue_id")
+    queue_supersede = queue_sub.add_parser(
+        "supersede",
+        help="Retire an obsolete quality failure while preserving its audit evidence",
+    )
+    queue_supersede.add_argument("queue_id")
+    queue_supersede.add_argument("--reason", required=True)
     queue_cancel = queue_sub.add_parser("cancel", help="Cancel an item that has not started")
     queue_cancel.add_argument("queue_id")
 
@@ -345,6 +351,11 @@ def main() -> int:
             elif args.queue_command == "reset":
                 company.reset_queue_item(args.queue_id)
                 print(f"Queue item {args.queue_id} reset; nothing was executed.")
+            elif args.queue_command == "supersede":
+                print(json.dumps(
+                    company.supersede_quality_failure(args.queue_id, args.reason),
+                    indent=2,
+                ))
             elif args.queue_command == "cancel":
                 company.cancel_queue_item(args.queue_id)
                 print(f"Queue item {args.queue_id} cancelled.")

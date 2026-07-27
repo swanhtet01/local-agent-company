@@ -361,6 +361,10 @@ def render_dashboard(
             f'<button type="submit" class="{css}">{label}</button></form>'
         )
 
+    active_queue = [
+        row for row in snapshot["queue"]
+        if row[1] not in {"complete", "cancelled", "superseded"}
+    ]
     queue_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}"
         + (
@@ -370,10 +374,21 @@ def render_dashboard(
         + f"</td><td>{cell(row[2])}</td>"
         f"<td>{cell(row[3])}</td><td>{cell(row[4] or '-')}</td><td>{cell(row[6])}</td>"
         f"<td>{mission_link(row[7])}</td><td>{cell(row[8] or '-')}</td><td>{queue_action(row)}</td></tr>"
-        for row in snapshot["queue"][:30]
-    ) or '<tr><td colspan="9" class="empty">Queue is empty</td></tr>'
+        for row in active_queue[:30]
+    ) or '<tr><td colspan="9" class="empty">No active queue items</td></tr>'
     quality_failed_count = sum(
         1 for row in snapshot["queue"] if row[1] == "quality_failed"
+    )
+    quality_recovery_card = (
+        '<div class="card"><div class="metric gate">'
+        f'{quality_failed_count}</div><div class="label">'
+        '<a href="/quality-failures">Failed mission recovery</a></div></div>'
+        if quality_failed_count else ""
+    )
+    quality_recovery_hint = (
+        '<p class="hint"><a href="/quality-failures">Review bounded recovery guidance '
+        'for all quality-failed missions</a>.</p>'
+        if quality_failed_count else ""
     )
     schedule_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td>"
@@ -576,10 +591,10 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{snapshot['health']['disk_free_bytes'] / (1024 ** 3):.1f}</div><div class="label">Free disk GiB</div></div>
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
-<div class="card"><div class="metric gate">{quality_failed_count}</div><div class="label"><a href="/quality-failures">Failed mission recovery</a></div></div>
+{quality_recovery_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>
 </div>
-<section><h2>Mission queue</h2><p class="hint"><a href="/quality-failures">Review bounded recovery guidance for all quality-failed missions</a>.</p><table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
+<section><h2>Mission queue</h2>{quality_recovery_hint}<table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
 <section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Only explicitly declared contract rules are treated as business checks.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Contract</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>

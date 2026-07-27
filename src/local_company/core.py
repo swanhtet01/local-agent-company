@@ -197,6 +197,7 @@ KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
+QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
@@ -4479,8 +4480,10 @@ class Company:
             row = db.execute("SELECT status FROM mission_queue WHERE id=?", (queue_id,)).fetchone()
             if not row:
                 raise ValueError(f"Unknown queue item: {queue_id}")
-            if row[0] not in {"failed", "quality_failed"}:
-                raise ValueError("Only failed or quality-failed queue items can be reset")
+            if row[0] not in {"failed", "quality_failed", "superseded"}:
+                raise ValueError(
+                    "Only failed, quality-failed, or superseded queue items can be reset"
+                )
             db.execute(
                 "UPDATE mission_queue SET status='queued', started_at=NULL, completed_at=NULL, "
                 "job_id=NULL, error=NULL, run_token=NULL "
@@ -4490,6 +4493,101 @@ class Company:
                 db, None, "queue_reset",
                 json.dumps({"queue_id": queue_id, "previous_status": row[0], "source": source}, sort_keys=True),
             )
+
+    def supersede_quality_failure(
+        self, queue_id: str, reason: str, source: str = "cli",
+    ) -> dict[str, object]:
+        """Retire an obsolete quality failure without deleting its audit evidence."""
+        self.initialize()
+        if (
+            not isinstance(queue_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", queue_id) is None
+        ):
+            raise ValueError(
+                "Queue item ID must be 12 lowercase hexadecimal characters"
+            )
+        if not isinstance(reason, str):
+            raise ValueError("Supersede reason must be text")
+        if any(ord(character) < 32 and character not in "\t\r\n" for character in reason):
+            raise ValueError("Supersede reason contains control characters")
+        normalized_reason = " ".join(reason.split())
+        if not 20 <= len(normalized_reason) <= 240:
+            raise ValueError("Supersede reason must contain 20 to 240 characters")
+        source = " ".join(source.split())
+        if not source or len(source) > 40:
+            raise ValueError("Queue source must contain 1 to 40 characters")
+
+        with closing(self._connect(immediate=True)) as db, db:
+            row = db.execute(
+                "SELECT status, job_id, project_id, run_token FROM mission_queue "
+                "WHERE id=?", (queue_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Unknown queue item: {queue_id}")
+            previous_status, job_id, project_id, run_token = row
+            if previous_status != "quality_failed":
+                raise ValueError("Only a quality-failed queue item can be superseded")
+            if (
+                not isinstance(job_id, str)
+                or re.fullmatch(r"[0-9a-f]{12}", job_id) is None
+                or db.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone()
+                is None
+                or (
+                    project_id is not None
+                    and (
+                        not isinstance(project_id, str)
+                        or re.fullmatch(r"[0-9a-f]{12}", project_id) is None
+                        or db.execute(
+                            "SELECT 1 FROM projects WHERE id=?", (project_id,),
+                        ).fetchone() is None
+                    )
+                )
+            ):
+                raise ValueError("Stored quality-failed queue link is malformed")
+            if run_token is not None:
+                raise RuntimeError(
+                    "Quality-failed queue item still has an execution lease"
+                )
+            changed = db.execute(
+                "UPDATE mission_queue SET status='superseded', "
+                "completed_at=COALESCE(completed_at, ?) "
+                "WHERE id=? AND status='quality_failed' AND run_token IS NULL",
+                (utc_now(), queue_id),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("Quality-failed queue item changed during supersede")
+            self._event(
+                db, job_id, "queue_quality_failure_superseded",
+                json.dumps(
+                    {
+                        "job_id": job_id,
+                        "previous_status": previous_status,
+                        "project_id": project_id,
+                        "queue_id": queue_id,
+                        "reason": normalized_reason,
+                        "source": source,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        return {
+            "schema": QUEUE_SUPERSEDE_SCHEMA,
+            "queue_id": queue_id,
+            "job_id": job_id,
+            "project_id": project_id,
+            "previous_status": previous_status,
+            "status": "superseded",
+            "reason": normalized_reason,
+            "effects": {
+                "database_mutated": True,
+                "queue_changed": True,
+                "model_called": False,
+                "work_started": False,
+                "report_deleted": False,
+                "evaluation_deleted": False,
+                "queue_history_deleted": False,
+            },
+        }
 
     def cancel_queue_item(self, queue_id: str, source: str = "cli") -> None:
         self.initialize()

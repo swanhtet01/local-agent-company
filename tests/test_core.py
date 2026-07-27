@@ -32,7 +32,7 @@ from local_company.config import (
 )
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS, ROLES,
-    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA,
+    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     bounded_context_blocks,
@@ -5063,6 +5063,121 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(history_after, history_before)
             self.assertEqual(company.db_path.read_bytes(), database_before)
             self.assertEqual(no_model.calls, 0)
+
+    def test_obsolete_quality_failure_can_be_superseded_without_losing_evidence(self):
+        objective = (
+            "Define three task templates, a daily review cadence, success checks, failure modes, "
+            "and owner gates. Separate verified facts from assumptions. Each specialist must use "
+            "at most 100 words. The executive synthesis must use at most 180 words and end with: "
+            "Owner review required."
+        )
+        reason = (
+            "Obsolete after current SuperMega evidence refresh; preserve the historical "
+            "evaluation for audit."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", ConstraintModel(False))
+            project_id = company.create_project("SuperMega")
+            queue_id = company.enqueue(
+                objective, project=project_id,
+                playbook="operations-improvement", priority=90,
+            )
+            _, job_id, report, passed = company.run_next_queue_item()
+            self.assertFalse(passed)
+            report_before = report.read_bytes()
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_before = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+
+            no_model = CountingMockModel()
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "queue",
+                    "supersede", queue_id, "--reason", reason,
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=no_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["schema"], QUEUE_SUPERSEDE_SCHEMA)
+            self.assertEqual(result["queue_id"], queue_id)
+            self.assertEqual(result["job_id"], job_id)
+            self.assertEqual(result["project_id"], project_id)
+            self.assertEqual(result["previous_status"], "quality_failed")
+            self.assertEqual(result["status"], "superseded")
+            self.assertEqual(result["reason"], reason)
+            self.assertTrue(result["effects"]["database_mutated"])
+            self.assertTrue(result["effects"]["queue_changed"])
+            self.assertTrue(all(
+                result["effects"][key] is False for key in (
+                    "model_called", "work_started", "report_deleted",
+                    "evaluation_deleted", "queue_history_deleted",
+                )
+            ))
+            self.assertEqual(no_model.calls, 0)
+            superseded = company.queue_items("superseded")[0]
+            self.assertEqual(superseded[0], queue_id)
+            self.assertEqual(superseded[7], job_id)
+            self.assertEqual(report.read_bytes(), report_before)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_after = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+                event = db.execute(
+                    "SELECT detail FROM events WHERE job_id=? "
+                    "AND kind='queue_quality_failure_superseded'", (job_id,),
+                ).fetchone()
+            self.assertEqual(history_after, history_before)
+            self.assertIsNotNone(event)
+            self.assertEqual(json.loads(event[0])["reason"], reason)
+            self.assertEqual(company.quality_failure_summaries()["quality_failed_count"], 0)
+            brief = company.operator_brief(project_id)
+            self.assertEqual(brief["counts"]["quality_failed_missions"], 0)
+            self.assertNotIn("quality_failed_missions", {
+                item["code"] for item in brief["attention"]
+            })
+            dashboard = render_dashboard(company)
+            self.assertIn("No active queue items", dashboard)
+            self.assertNotIn(queue_id, dashboard)
+            self.assertNotIn('href="/quality-failures"', dashboard)
+
+            company.reset_queue_item(queue_id)
+            reset = company.queue_items("queued")[0]
+            self.assertEqual(reset[0], queue_id)
+            self.assertEqual(reset[7], "")
+            self.assertEqual(report.read_bytes(), report_before)
+
+    def test_quality_failure_supersede_validation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), CountingMockModel())
+            queue_id = company.enqueue("Review a bounded local operating change")
+            database_before = company.db_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "quality-failed"):
+                company.supersede_quality_failure(
+                    queue_id,
+                    "This queued mission is not eligible for superseding.",
+                )
+            with self.assertRaisesRegex(ValueError, "12 lowercase hexadecimal"):
+                company.supersede_quality_failure(
+                    "../unsafe",
+                    "This malformed identifier must not change queue state.",
+                )
+            with self.assertRaisesRegex(ValueError, "20 to 240"):
+                company.supersede_quality_failure(queue_id, "too short")
+            with self.assertRaisesRegex(ValueError, "control characters"):
+                company.supersede_quality_failure(
+                    queue_id,
+                    "This reason contains a forbidden null character.\x00",
+                )
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.queue_items("queued")[0][0], queue_id)
+            self.assertEqual(company.model.calls, 0)
 
     def test_bounded_editor_repairs_structure_and_audits_word_caps(self):
         objective = (
