@@ -199,12 +199,14 @@ MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v1"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
+QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v1"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
 MAX_QUALITY_SUPERSESSION_CANDIDATES = 20
+MAX_QUALITY_SUPERSESSION_ITEMS = 20
 MAX_OPERATOR_BRIEF_DATASETS = 1_000
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
@@ -6181,6 +6183,159 @@ class Company:
                 else "review_superseded_failure" if already_superseded
                 else "supersede_with_successor_proof" if eligible
                 else "keep_failure_active"
+            ),
+            "effects": {
+                "database_mutated": False,
+                "evaluation_appended": False,
+                "model_called": False,
+                "queue_changed": False,
+                "work_started": False,
+            },
+        }
+
+    def _quality_supersession_index_snapshot(self) -> dict[str, object]:
+        """Read the bounded superseded queue index plus the full store digest."""
+        with closing(self._connect()) as db:
+            queue_ids = tuple(row[0] for row in db.execute(
+                "SELECT id FROM mission_queue WHERE status='superseded' "
+                "ORDER BY completed_at DESC, created_at DESC, id DESC LIMIT ?",
+                (MAX_QUALITY_SUPERSESSION_ITEMS + 1,),
+            ))
+            database_sha256 = hashlib.sha256(db.serialize()).hexdigest()
+        return {
+            "database_sha256": database_sha256,
+            "queue_ids": queue_ids,
+        }
+
+    def quality_supersession_summaries(self) -> dict[str, object]:
+        """Return a stable pathless proof review for every bounded retired failure."""
+        self.initialize()
+        index_before = self._quality_supersession_index_snapshot()
+        queue_ids = index_before.get("queue_ids")
+        if (
+            not isinstance(queue_ids, tuple)
+            or any(
+                not isinstance(queue_id, str)
+                or re.fullmatch(r"[0-9a-f]{12}", queue_id) is None
+                for queue_id in queue_ids
+            )
+        ):
+            raise ValueError("Stored superseded queue index is malformed")
+        if len(queue_ids) > MAX_QUALITY_SUPERSESSION_ITEMS:
+            raise ValueError(
+                "Too many superseded quality failures to review safely"
+            )
+
+        first_pass = tuple(
+            self.quality_supersession_preview(queue_id) for queue_id in queue_ids
+        )
+        index_middle = self._quality_supersession_index_snapshot()
+        second_pass = tuple(
+            self.quality_supersession_preview(queue_id) for queue_id in queue_ids
+        )
+        index_after = self._quality_supersession_index_snapshot()
+        if (
+            index_before != index_middle
+            or index_before != index_after
+            or first_pass != second_pass
+        ):
+            raise RuntimeError(
+                "Quality supersession review changed during observation; "
+                "retry after local state is stable"
+            )
+
+        items: list[dict[str, object]] = []
+        for queue_id, preview in zip(queue_ids, second_pass, strict=True):
+            successor = preview.get("successor")
+            blockers = preview.get("blockers")
+            effects = preview.get("effects")
+            eligibility = preview.get("eligibility")
+            if (
+                preview.get("schema") != QUALITY_SUPERSESSION_PREVIEW_SCHEMA
+                or preview.get("queue_id") != queue_id
+                or preview.get("queue_status") != "superseded"
+                or eligibility not in {"already_superseded", "ineligible"}
+                or not isinstance(preview.get("failed_job_id"), str)
+                or re.fullmatch(r"[0-9a-f]{12}", preview["failed_job_id"])
+                is None
+                or type(preview.get("candidate_count")) is not int
+                or preview["candidate_count"] < 0
+                or type(preview.get("checked_candidate_count")) is not int
+                or not 0 <= preview["checked_candidate_count"] <= preview["candidate_count"]
+                or not isinstance(blockers, list)
+                or any(
+                    not isinstance(blocker, str)
+                    or re.fullmatch(r"[a-z0-9_]+", blocker) is None
+                    for blocker in blockers
+                )
+                or not isinstance(effects, dict)
+                or set(effects) != {
+                    "database_mutated", "evaluation_appended", "model_called",
+                    "queue_changed", "work_started",
+                }
+                or any(value is not False for value in effects.values())
+            ):
+                raise ValueError("Quality supersession preview is malformed")
+            if eligibility == "already_superseded":
+                if (
+                    not isinstance(successor, dict)
+                    or not isinstance(successor.get("job_id"), str)
+                    or re.fullmatch(r"[0-9a-f]{12}", successor["job_id"])
+                    is None
+                    or type(successor.get("score")) is not int
+                    or not 0 <= successor["score"] <= 100
+                    or not isinstance(successor.get("evaluator_version"), str)
+                    or not isinstance(preview.get("proof_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preview["proof_sha256"])
+                    is None
+                    or blockers
+                    or preview.get("next_action") != "none"
+                ):
+                    raise ValueError("Quality supersession preview is malformed")
+                successor_job_id = successor["job_id"]
+                successor_score = successor["score"]
+                evaluator_version = successor["evaluator_version"]
+            else:
+                if (
+                    successor is not None
+                    or preview.get("proof_sha256") is not None
+                    or not blockers
+                    or preview.get("next_action") != "review_superseded_failure"
+                ):
+                    raise ValueError("Quality supersession preview is malformed")
+                successor_job_id = None
+                successor_score = None
+                evaluator_version = None
+            items.append({
+                "queue_id": queue_id,
+                "failed_job_id": preview["failed_job_id"],
+                "proof_status": (
+                    "verified" if eligibility == "already_superseded"
+                    else "review_required"
+                ),
+                "candidate_count": preview["candidate_count"],
+                "checked_candidate_count": preview["checked_candidate_count"],
+                "successor_job_id": successor_job_id,
+                "successor_score": successor_score,
+                "evaluator_version": evaluator_version,
+                "proof_sha256": preview.get("proof_sha256"),
+                "blockers": list(blockers),
+                "next_action": preview["next_action"],
+            })
+
+        review_required_count = sum(
+            item["proof_status"] == "review_required" for item in items
+        )
+        return {
+            "schema": QUALITY_SUPERSESSION_LIST_SCHEMA,
+            "superseded_count": len(items),
+            "verified_count": len(items) - review_required_count,
+            "review_required_count": review_required_count,
+            "items": items,
+            "observed_state_stable": True,
+            "next_action": (
+                "review_superseded_failures"
+                if review_required_count else "none"
             ),
             "effects": {
                 "database_mutated": False,

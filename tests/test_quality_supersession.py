@@ -12,12 +12,12 @@ from unittest.mock import patch
 
 from local_company.cli import main as cli_main
 from local_company.core import (
-    Company, EVALUATOR_VERSION, MockModel, QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
-    QUEUE_SUPERSEDE_SCHEMA,
+    Company, EVALUATOR_VERSION, MockModel, QUALITY_SUPERSESSION_LIST_SCHEMA,
+    QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
 )
 from local_company.dashboard import (
-    create_dashboard_server, render_quality_failure_overview,
-    render_quality_supersession_preview,
+    create_dashboard_server, render_dashboard, render_quality_failure_overview,
+    render_quality_supersession_overview, render_quality_supersession_preview,
 )
 
 
@@ -328,6 +328,180 @@ class QualitySupersessionTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.model.calls, 0)
+
+    def test_retired_review_list_is_stable_pathless_and_available_from_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (
+                company, queue_id, job_id, successor_job_id, objective,
+                failed_report, successor_report,
+            ) = self._seed_eligible_failure(root)
+            company.supersede_quality_failure(
+                queue_id,
+                "The exact current retry replaces this result while audit history remains.",
+                successor_job_id,
+            )
+            database_before = company.db_path.read_bytes()
+            failed_report_before = failed_report.read_bytes()
+            successor_report_before = successor_report.read_bytes()
+
+            overview = company.quality_supersession_summaries()
+
+            self.assertEqual(overview["schema"], QUALITY_SUPERSESSION_LIST_SCHEMA)
+            self.assertEqual(overview["superseded_count"], 1)
+            self.assertEqual(overview["verified_count"], 1)
+            self.assertEqual(overview["review_required_count"], 0)
+            self.assertEqual(overview["next_action"], "none")
+            item = overview["items"][0]
+            self.assertEqual(item["queue_id"], queue_id)
+            self.assertEqual(item["failed_job_id"], job_id)
+            self.assertEqual(item["proof_status"], "verified")
+            self.assertEqual(item["successor_job_id"], successor_job_id)
+            self.assertEqual(item["successor_score"], 100)
+            self.assertEqual(item["evaluator_version"], EVALUATOR_VERSION)
+            self.assertRegex(item["proof_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(item["blockers"], [])
+            self.assertTrue(all(value is False for value in overview["effects"].values()))
+            rendered = json.dumps(overview, sort_keys=True)
+            self.assertNotIn(objective, rendered)
+            self.assertNotIn(str(root), rendered)
+            self.assertNotIn("output_path", rendered)
+
+            output = io.StringIO()
+            cli_model = CountingMockModel()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "queue",
+                    "supersession-list",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            cli_overview = json.loads(output.getvalue())
+            self.assertEqual(cli_overview, overview)
+            self.assertEqual(cli_model.calls, 0)
+            self.assertEqual(company.model.calls, 0)
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(failed_report.read_bytes(), failed_report_before)
+            self.assertEqual(successor_report.read_bytes(), successor_report_before)
+
+    def test_retired_review_surfaces_stale_proof_in_dashboard_and_http(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (
+                company, queue_id, _, successor_job_id, objective, _, _,
+            ) = self._seed_eligible_failure(root)
+            company.supersede_quality_failure(
+                queue_id,
+                "The exact current retry replaces this result while audit history remains.",
+                successor_job_id,
+            )
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE evaluations SET passed=0 WHERE job_id=?",
+                    (successor_job_id,),
+                )
+                db.execute(
+                    "UPDATE evaluation_history SET passed=0 WHERE id=("
+                    "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
+                    (successor_job_id,),
+                )
+            database_before = company.db_path.read_bytes()
+
+            overview = company.quality_supersession_summaries()
+            self.assertEqual(overview["verified_count"], 0)
+            self.assertEqual(overview["review_required_count"], 1)
+            self.assertEqual(overview["next_action"], "review_superseded_failures")
+            item = overview["items"][0]
+            self.assertEqual(item["proof_status"], "review_required")
+            self.assertIsNone(item["successor_job_id"])
+            self.assertIsNone(item["proof_sha256"])
+            self.assertEqual(
+                item["blockers"], ["no_current_passing_exact_retry_descendant"],
+            )
+
+            page = render_quality_supersession_overview(company)
+            self.assertIn("Retired failure proof review", page)
+            self.assertIn(QUALITY_SUPERSESSION_LIST_SCHEMA, page)
+            self.assertIn(queue_id, page)
+            self.assertIn("review_required", page)
+            self.assertIn("no_current_passing_exact_retry_descendant", page)
+            self.assertIn("A current warning does not rewrite", page)
+            self.assertNotIn(objective, page)
+            self.assertNotIn(str(root), page)
+            self.assertLess(len(page.encode("utf-8")), 32_768)
+            self.assertIn('/quality-supersessions', render_dashboard(company))
+            self.assertIn(
+                'href="/quality-supersessions"',
+                render_quality_failure_overview(company),
+            )
+
+            server = create_dashboard_server(company, 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(base + "/quality-supersessions", timeout=3) as response:
+                    http_page = response.read().decode("utf-8")
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(
+                        response.headers["Content-Type"], "text/html; charset=utf-8",
+                    )
+                self.assertEqual(http_page, page)
+
+                with self.assertRaises(urllib.error.HTTPError) as unexpected_query:
+                    opener.open(base + "/quality-supersessions?extra=1", timeout=3)
+                self.assertEqual(unexpected_query.exception.code, 404)
+                unexpected_query.exception.close()
+
+                with patch.object(
+                    company, "quality_supersession_summaries",
+                    side_effect=RuntimeError("private-review-race"),
+                ), self.assertRaises(urllib.error.HTTPError) as unstable:
+                    opener.open(base + "/quality-supersessions", timeout=3)
+                self.assertEqual(unstable.exception.code, 409)
+                unstable_body = unstable.exception.read().decode("utf-8")
+                unstable.exception.close()
+                self.assertIn("retry after local state is stable", unstable_body)
+                self.assertNotIn("private-review-race", unstable_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.model.calls, 0)
+
+    def test_retired_review_refuses_crossing_state_and_malformed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            company, queue_id, _, successor_job_id, _, _, _ = (
+                self._seed_eligible_failure(Path(tmp))
+            )
+            company.supersede_quality_failure(
+                queue_id,
+                "The exact current retry replaces this result while audit history remains.",
+                successor_job_id,
+            )
+            database_before = company.db_path.read_bytes()
+            snapshot = company._quality_supersession_index_snapshot()
+            changed = dict(snapshot)
+            changed["database_sha256"] = "0" * 64
+            with patch.object(
+                company, "_quality_supersession_index_snapshot",
+                side_effect=[snapshot, changed, snapshot],
+            ), self.assertRaisesRegex(RuntimeError, "changed during observation"):
+                company.quality_supersession_summaries()
+
+            malformed = company.quality_supersession_summaries()
+            malformed["effects"] = {"model_called": True}
+            with patch.object(
+                company, "quality_supersession_summaries", return_value=malformed,
+            ), self.assertRaisesRegex(ValueError, "overview is malformed"):
+                render_quality_supersession_overview(company)
             self.assertEqual(company.db_path.read_bytes(), database_before)
             self.assertEqual(company.model.calls, 0)
 

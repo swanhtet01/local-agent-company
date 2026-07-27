@@ -103,6 +103,10 @@ def parser() -> argparse.ArgumentParser:
         help="Prove whether an exact current-passing retry can retire one failure",
     )
     queue_supersession_preview.add_argument("queue_id")
+    queue_sub.add_parser(
+        "supersession-list",
+        help="Review current proof integrity for every bounded retired failure",
+    )
     queue_cancel = queue_sub.add_parser("cancel", help="Cancel an item that has not started")
     queue_cancel.add_argument("queue_id")
 
@@ -367,6 +371,10 @@ def main() -> int:
             elif args.queue_command == "supersession-preview":
                 print(json.dumps(
                     company.quality_supersession_preview(args.queue_id), indent=2,
+                ))
+            elif args.queue_command == "supersession-list":
+                print(json.dumps(
+                    company.quality_supersession_summaries(), indent=2,
                 ))
             elif args.queue_command == "cancel":
                 company.cancel_queue_item(args.queue_id)

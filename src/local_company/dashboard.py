@@ -15,8 +15,8 @@ from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
     Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
-    QUALITY_RECHECK_PREVIEW_SCHEMA, QUALITY_SUPERSESSION_PREVIEW_SCHEMA,
-    QueueClaim, ReportFinalizationPending,
+    QUALITY_RECHECK_PREVIEW_SCHEMA, QUALITY_SUPERSESSION_LIST_SCHEMA,
+    QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending,
 )
 
 
@@ -391,6 +391,20 @@ def render_dashboard(
         'for all quality-failed missions</a>.</p>'
         if quality_failed_count else ""
     )
+    superseded_count = sum(
+        1 for row in snapshot["queue"] if row[1] == "superseded"
+    )
+    supersession_review_card = (
+        '<div class="card"><div class="metric gate">'
+        f'{superseded_count}</div><div class="label">'
+        '<a href="/quality-supersessions">Retired failure proofs</a></div></div>'
+        if superseded_count else ""
+    )
+    supersession_review_hint = (
+        '<p class="hint"><a href="/quality-supersessions">Review current proof '
+        'integrity for retired quality failures</a>.</p>'
+        if superseded_count else ""
+    )
     schedule_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td>"
         f"<td>{'enabled' if row[2] else 'disabled'}</td><td>{cell(row[3])}d</td><td>{cell(row[4])}</td></tr>"
@@ -593,9 +607,10 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
 {quality_recovery_card}
+{supersession_review_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>
 </div>
-<section><h2>Mission queue</h2>{quality_recovery_hint}<table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
+<section><h2>Mission queue</h2>{quality_recovery_hint}{supersession_review_hint}<table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
 <section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Only explicitly declared contract rules are treated as business checks.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Contract</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>
@@ -678,6 +693,7 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 @media(max-width:800px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
 </style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Quality failure recovery</h1>
+<p><a href="/quality-supersessions">Review retired failure proofs</a></p>
 <p class="metric">{count}</p><p class="meta">quality-failed missions, ordered by queue priority</p>
 <p class="boundary">Stored deterministic findings only. Objectives, projects, reports, source paths, evidence text, claims, and model output are withheld. This view appends no evaluation, calls no model, changes no queue item, and starts no work.</p>
 <section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Score / evaluation</th><th>Failed gates</th><th>Conflicts</th><th>Incomplete roles</th><th>Repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
@@ -954,6 +970,136 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} code {{ overfl
 <section><h2>Blockers</h2><ul>{blocker_rows}</ul></section>
 <section><h2>Proof binding</h2><p><code>{cell(proof_text)}</code></p></section>
 <p class="meta">Next action: <code>{cell(next_action)}</code> &middot; schema <code>{cell(preview['schema'])}</code></p>
+</body></html>"""
+
+
+def render_quality_supersession_overview(company: Company) -> str:
+    """Render a bounded pathless review of every retired quality failure."""
+    overview = company.quality_supersession_summaries()
+    items = overview.get("items")
+    effects = overview.get("effects")
+    count = overview.get("superseded_count")
+    verified_count = overview.get("verified_count")
+    review_count = overview.get("review_required_count")
+    if (
+        overview.get("schema") != QUALITY_SUPERSESSION_LIST_SCHEMA
+        or type(count) is not int or count < 0
+        or type(verified_count) is not int or verified_count < 0
+        or type(review_count) is not int or review_count < 0
+        or verified_count + review_count != count
+        or not isinstance(items, list) or len(items) != count
+        or overview.get("observed_state_stable") is not True
+        or overview.get("next_action") not in {
+            "none", "review_superseded_failures",
+        }
+        or (
+            (review_count > 0)
+            != (overview.get("next_action") == "review_superseded_failures")
+        )
+        or not isinstance(effects, dict)
+        or set(effects) != {
+            "database_mutated", "evaluation_appended", "model_called",
+            "queue_changed", "work_started",
+        }
+        or any(value is not False for value in effects.values())
+    ):
+        raise ValueError("Quality supersession overview is malformed")
+
+    expected_keys = {
+        "queue_id", "failed_job_id", "proof_status", "candidate_count",
+        "checked_candidate_count", "successor_job_id", "successor_score",
+        "evaluator_version", "proof_sha256", "blockers", "next_action",
+    }
+    for item in items:
+        if (
+            not isinstance(item, dict) or set(item) != expected_keys
+            or not isinstance(item.get("queue_id"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", item["queue_id"]) is None
+            or not isinstance(item.get("failed_job_id"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", item["failed_job_id"]) is None
+            or item.get("proof_status") not in {"verified", "review_required"}
+            or type(item.get("candidate_count")) is not int
+            or item["candidate_count"] < 0
+            or type(item.get("checked_candidate_count")) is not int
+            or not 0 <= item["checked_candidate_count"] <= item["candidate_count"]
+            or not isinstance(item.get("blockers"), list)
+            or any(
+                not isinstance(blocker, str)
+                or re.fullmatch(r"[a-z0-9_]+", blocker) is None
+                for blocker in item["blockers"]
+            )
+        ):
+            raise ValueError("Quality supersession overview is malformed")
+        if item["proof_status"] == "verified":
+            if (
+                not isinstance(item.get("successor_job_id"), str)
+                or re.fullmatch(r"[0-9a-f]{12}", item["successor_job_id"])
+                is None
+                or type(item.get("successor_score")) is not int
+                or not 0 <= item["successor_score"] <= 100
+                or not isinstance(item.get("evaluator_version"), str)
+                or re.fullmatch(r"[A-Za-z0-9._-]+", item["evaluator_version"])
+                is None
+                or not isinstance(item.get("proof_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["proof_sha256"])
+                is None
+                or item["blockers"]
+                or item.get("next_action") != "none"
+            ):
+                raise ValueError("Quality supersession overview is malformed")
+        elif (
+            item.get("successor_job_id") is not None
+            or item.get("successor_score") is not None
+            or item.get("evaluator_version") is not None
+            or item.get("proof_sha256") is not None
+            or not item["blockers"]
+            or item.get("next_action") != "review_superseded_failure"
+        ):
+            raise ValueError("Quality supersession overview is malformed")
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    def tokens(values: list[str]) -> str:
+        return "<ul>" + "".join(
+            f"<li><code>{cell(value)}</code></li>" for value in values
+        ) + "</ul>" if values else '<span class="muted">none</span>'
+
+    rows = "".join(
+        "<tr>"
+        f'<td><a href="/quality-supersession/{cell(item["queue_id"])}">'
+        f'<code>{cell(item["queue_id"])}</code></a><br>'
+        f'<span class="meta">mission <code>{cell(item["failed_job_id"])}</code></span></td>'
+        f'<td><span class="{cell(item["proof_status"])}">'
+        f'{cell(item["proof_status"])}</span></td>'
+        f'<td>{cell(item["candidate_count"])} exact<br>'
+        f'<span class="meta">{cell(item["checked_candidate_count"])} current</span></td>'
+        f'<td>{("<code>" + cell(item["successor_job_id"]) + "</code><br>" + cell(item["successor_score"]) + "/100<br><span class=\"meta\"><code>" + cell(item["evaluator_version"]) + "</code></span>") if item["successor_job_id"] else "<span class=\"muted\">none</span>"}</td>'
+        f'<td>{tokens(item["blockers"])}</td>'
+        f'<td><code>{cell(item["proof_sha256"] or "none")}</code></td>'
+        f'<td><code>{cell(item["next_action"])}</code></td>'
+        "</tr>"
+        for item in items
+    ) or '<tr><td colspan="7" class="empty">No retired quality failures.</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retired failure proof review</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:1240px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.meta,.muted {{ color:#9aa7bd; }} .metrics {{ display:flex; gap:28px; flex-wrap:wrap; }}
+.metric {{ font-size:30px; font-weight:800; color:#ffd479; }} .verified {{ color:#87e6a8; }}
+.review_required {{ color:#ffb3b3; }} .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; margin-top:24px; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
+td code {{ overflow-wrap:anywhere; }} .empty {{ color:#6f7d95; text-align:center; }} .table-wrap {{ overflow-x:auto; }}
+</style></head><body><p><a href="/">&larr; Dashboard</a> &middot; <a href="/quality-failures">Active failures</a></p>
+<h1>Retired failure proof review</h1>
+<div class="metrics"><div><div class="metric">{cell(count)}</div><div class="meta">retired</div></div><div><div class="metric verified">{cell(verified_count)}</div><div class="meta">currently verified</div></div><div><div class="metric review_required">{cell(review_count)}</div><div class="meta">review required</div></div></div>
+<p class="boundary">Read-only current proof review. It changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reports, paths, source text, evidence text, and claims are withheld. A current warning does not rewrite the historical audit record.</p>
+<div class="table-wrap"><table><thead><tr><th>Retired queue</th><th>Proof status</th><th>Candidates</th><th>Successor</th><th>Blockers</th><th>Proof SHA-256</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div>
+<p class="meta">Next action: <code>{cell(overview['next_action'])}</code> &middot; schema <code>{cell(overview['schema'])}</code></p>
 </body></html>"""
 
 
@@ -1575,6 +1721,18 @@ def create_dashboard_server(
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                 except (KeyError, RuntimeError, TypeError, ValueError):
                     body = b"Quality failure recovery unavailable; retry after local state is stable."
+                    self.send_response(409)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+            elif not parsed.query and parsed.path == "/quality-supersessions":
+                try:
+                    body = render_quality_supersession_overview(company).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                except (KeyError, RuntimeError, TypeError, ValueError):
+                    body = (
+                        b"Retired failure proof review unavailable; retry after "
+                        b"local state is stable."
+                    )
                     self.send_response(409)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif not parsed.query and (
