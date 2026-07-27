@@ -39,6 +39,7 @@ class TestRunnerTests(unittest.TestCase):
         summary = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(summary["schema"], run_tests.SCHEMA)
         self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["reason"], "none")
         self.assertGreater(summary["tests_run"], 0)
         self.assertEqual(summary["verbosity"], "concise")
         self.assertNotIn("test_fetch_health", completed.stderr)
@@ -68,6 +69,29 @@ class TestRunnerTests(unittest.TestCase):
         summary = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(summary["verbosity"], "verbose")
         self.assertIn("test_fetch_health", completed.stderr)
+
+    def test_missing_pattern_fails_closed_without_running_tests(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--pattern",
+                "no_such_test_file.py",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        summary = json.loads(completed.stdout)
+        self.assertEqual(summary["schema"], run_tests.SCHEMA)
+        self.assertEqual(summary["status"], "invalid")
+        self.assertEqual(summary["reason"], "no_tests_discovered")
+        self.assertEqual(summary["tests_run"], 0)
 
     def test_configure_import_paths_is_idempotent(self):
         src = str(ROOT / "src")

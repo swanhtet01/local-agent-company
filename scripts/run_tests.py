@@ -9,7 +9,7 @@ import warnings
 from pathlib import Path
 
 
-SCHEMA = "local-company.tests.v2"
+SCHEMA = "local-company.tests.v3"
 
 
 def project_root() -> Path:
@@ -49,6 +49,34 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def emit_summary(
+    *,
+    errors: int,
+    failures: int,
+    reason: str,
+    skipped: int,
+    status: str,
+    tests_run: int,
+    verbose: bool,
+) -> None:
+    print(
+        json.dumps(
+            {
+                "errors": errors,
+                "failures": failures,
+                "reason": reason,
+                "schema": SCHEMA,
+                "skipped": skipped,
+                "status": status,
+                "tests_run": tests_run,
+                "verbosity": "verbose" if verbose else "concise",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     root = project_root()
@@ -59,29 +87,35 @@ def main(argv: list[str] | None = None) -> int:
     previous_directory = Path.cwd()
     try:
         os.chdir(root)
+        suite = build_suite(root, args.pattern)
+        if suite.countTestCases() == 0:
+            emit_summary(
+                errors=0,
+                failures=0,
+                reason="no_tests_discovered",
+                skipped=0,
+                status="invalid",
+                tests_run=0,
+                verbose=args.verbose,
+            )
+            return 2
         result = unittest.TextTestRunner(verbosity=2 if args.verbose else 0).run(
-            build_suite(root, args.pattern)
+            suite
         )
     finally:
         os.chdir(previous_directory)
 
-    status = "passed" if result.wasSuccessful() else "failed"
-    print(
-        json.dumps(
-            {
-                "errors": len(result.errors),
-                "failures": len(result.failures),
-                "schema": SCHEMA,
-                "skipped": len(result.skipped),
-                "status": status,
-                "tests_run": result.testsRun,
-                "verbosity": "verbose" if args.verbose else "concise",
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+    successful = result.wasSuccessful()
+    emit_summary(
+        errors=len(result.errors),
+        failures=len(result.failures),
+        reason="none" if successful else "test_failures",
+        skipped=len(result.skipped),
+        status="passed" if successful else "failed",
+        tests_run=result.testsRun,
+        verbose=args.verbose,
     )
-    return 0 if result.wasSuccessful() else 1
+    return 0 if successful else 1
 
 
 if __name__ == "__main__":

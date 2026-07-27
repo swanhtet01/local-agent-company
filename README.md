@@ -21,6 +21,8 @@ It does not initialize or mutate company state, start a service, or call a
 model. Use `--pattern test_readiness.py` only for a focused development check;
 the command without a pattern is the release suite. Passing runs are concise by
 default; add `--verbose` when individual test names are needed for diagnosis.
+An unmatched `--pattern` fails closed with exit 2 instead of treating zero
+discovered tests as a successful verification.
 
 ## Start immediately
 
