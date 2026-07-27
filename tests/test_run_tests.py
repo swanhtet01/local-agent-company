@@ -40,6 +40,34 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(summary["schema"], run_tests.SCHEMA)
         self.assertEqual(summary["status"], "passed")
         self.assertGreater(summary["tests_run"], 0)
+        self.assertEqual(summary["verbosity"], "concise")
+        self.assertNotIn("test_fetch_health", completed.stderr)
+
+    def test_verbose_mode_prints_individual_test_names(self):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONWARNINGS", None)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--pattern",
+                "test_live_build.py",
+                "--verbose",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        summary = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(summary["verbosity"], "verbose")
+        self.assertIn("test_fetch_health", completed.stderr)
 
     def test_configure_import_paths_is_idempotent(self):
         src = str(ROOT / "src")

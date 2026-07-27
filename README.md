@@ -19,7 +19,8 @@ The runner supplies the repository and `src` import roots, treats warnings as
 errors, and does not require an activated environment or a `PYTHONPATH` value.
 It does not initialize or mutate company state, start a service, or call a
 model. Use `--pattern test_readiness.py` only for a focused development check;
-the command without a pattern is the release suite.
+the command without a pattern is the release suite. Passing runs are concise by
+default; add `--verbose` when individual test names are needed for diagnosis.
 
 ## Start immediately
 

@@ -9,7 +9,7 @@ import warnings
 from pathlib import Path
 
 
-SCHEMA = "local-company.tests.v1"
+SCHEMA = "local-company.tests.v2"
 
 
 def project_root() -> Path:
@@ -41,6 +41,11 @@ def parser() -> argparse.ArgumentParser:
         default="test*.py",
         help="unittest discovery filename pattern (default: test*.py)",
     )
+    result.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print every test name instead of the concise release summary",
+    )
     return result
 
 
@@ -54,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     previous_directory = Path.cwd()
     try:
         os.chdir(root)
-        result = unittest.TextTestRunner(verbosity=2).run(
+        result = unittest.TextTestRunner(verbosity=2 if args.verbose else 0).run(
             build_suite(root, args.pattern)
         )
     finally:
@@ -70,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
                 "skipped": len(result.skipped),
                 "status": status,
                 "tests_run": result.testsRun,
+                "verbosity": "verbose" if args.verbose else "concise",
             },
             separators=(",", ":"),
             sort_keys=True,
