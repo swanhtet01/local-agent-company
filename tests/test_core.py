@@ -338,7 +338,6 @@ class StructuredRepairModel(MockModel):
                 "Perform the bounded local analysis and save its output",
                 "Review evidence limitations quality checks and owner decisions",
             ],
-            "success_checks": ["Require one grounded report with every deterministic gate passing"],
             "failure_modes": ["Stop on stale sources malformed structure or unsupported claims"],
         }
 
@@ -2601,9 +2600,6 @@ class CompanyTests(unittest.TestCase):
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
                     ],
-                    "success_checks": [
-                        "Require grounded output with every deterministic check passing"
-                    ],
                     "failure_modes": [
                         "Stop on stale inputs malformed structure or unsupported claims"
                     ],
@@ -2704,9 +2700,6 @@ class CompanyTests(unittest.TestCase):
                         "Capture the objective frozen inputs and local owner gate",
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
-                    ],
-                    "success_checks": [
-                        "Require grounded output with every deterministic check passing"
                     ],
                     "failure_modes": [
                         "Stop on stale inputs malformed structure or unsupported claims"
@@ -2872,6 +2865,7 @@ class CompanyTests(unittest.TestCase):
                 model.schemas[0]["properties"]["task_templates"]["items"]["maxLength"],
                 80,
             )
+            self.assertNotIn("success_checks", model.schemas[0]["properties"])
             self.assertNotIn("alpha.md", model.structured_prompts[0][1].lower())
             self.assertIn("3 to 12 words", model.structured_prompts[0][0])
             detail = company.job_detail(job_id)
@@ -2901,6 +2895,11 @@ class CompanyTests(unittest.TestCase):
             ))
             self.assertNotIn("revenue increased", synthesis.lower())
             self.assertNotIn("bypass review", synthesis.lower())
+            self.assertIn(
+                "Success checks: Require a sealed local report, valid hashes, and every "
+                "deterministic quality gate to pass.",
+                synthesis,
+            )
             self.assertTrue(synthesis.endswith("Owner review required."))
             self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", synthesis)), 180)
             self.assertTrue(any(
@@ -2908,10 +2907,12 @@ class CompanyTests(unittest.TestCase):
                 and "schema-constrained synthesis" in event[1]
                 for event in detail["events"]
             ))
-            self.assertTrue(any(
-                event[0] == "structured_synthesis_validated"
-                for event in detail["events"]
-            ))
+            validated = next(
+                json.loads(event[1]) for event in detail["events"]
+                if event[0] == "structured_synthesis_validated"
+            )
+            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v2")
+            self.assertNotIn("success_checks", validated["fields"])
 
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
         objective = (
@@ -3013,10 +3014,10 @@ class CompanyTests(unittest.TestCase):
 
             def complete_structured(self, system, prompt, schema):
                 self.structured_prompts.append(prompt)
-                success_check = (
-                    "Grounding passes"
+                failure_mode = (
+                    "Evidence stale"
                     if len(self.structured_prompts) == 1
-                    else "Require grounded output with every deterministic check passing"
+                    else "Stop on stale inputs malformed structure or unsupported claims"
                 )
                 return {
                     "task_templates": [
@@ -3024,10 +3025,7 @@ class CompanyTests(unittest.TestCase):
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
                     ],
-                    "success_checks": [success_check],
-                    "failure_modes": [
-                        "Stop on stale inputs malformed structure or unsupported claims"
-                    ],
+                    "failure_modes": [failure_mode],
                 }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3046,7 +3044,7 @@ class CompanyTests(unittest.TestCase):
 
             self.assertTrue(evaluation["passed"])
             self.assertEqual(len(model.structured_prompts), 2)
-            self.assertNotIn("Grounding passes", model.structured_prompts[1])
+            self.assertNotIn("Evidence stale", model.structured_prompts[1])
             self.assertIn("Correction codes:", model.structured_prompts[1])
             self.assertIn(
                 "structured_synthesis_retry_scheduled",
@@ -3088,7 +3086,6 @@ class CompanyTests(unittest.TestCase):
                 "Perform bounded analysis and preserve the local output",
                 "Review evidence limitations checks and owner decisions",
             ],
-            "success_checks": ["Require grounded output with every deterministic check passing"],
             "failure_modes": ["Stop on stale inputs malformed structure or unsupported claims"],
         }
 
@@ -3115,6 +3112,11 @@ class CompanyTests(unittest.TestCase):
         self.assertIn(
             "Daily review cadence: Review the local queue, failed gates, source freshness, "
             "and owner decisions each morning.",
+            rendered,
+        )
+        self.assertIn(
+            "Success checks: Require a sealed local report, valid hashes, and every "
+            "deterministic quality gate to pass.",
             rendered,
         )
         self.assertNotIn("until.", rendered)
@@ -3157,7 +3159,7 @@ class CompanyTests(unittest.TestCase):
         for unsafe in unsafe_values:
             with self.subTest(value=unsafe):
                 invalid = json.loads(json.dumps(payload))
-                invalid["success_checks"] = [unsafe]
+                invalid["failure_modes"] = [unsafe]
                 with self.assertRaises(ValueError):
                     render_structured_synthesis(
                         invalid, labels, 3, sources, "Use frozen evidence", 177,

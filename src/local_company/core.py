@@ -105,8 +105,9 @@ MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
 EVALUATOR_VERSION = "local-quality-2026-07-27.6"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.4"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.5"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
+STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v2"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
 
 
@@ -458,7 +459,7 @@ _STRICT_SECTION_FIELDS = {
     "Owner gates": "owner_gates",
 }
 _CODE_OWNED_STRUCTURED_LABELS = {
-    "Verified facts", "Assumptions", "Daily review cadence", "Owner gates",
+    "Verified facts", "Assumptions", "Daily review cadence", "Success checks", "Owner gates",
 }
 _SENSITIVE_PROPOSAL_PATTERN = re.compile(
     r"\b(?:send|contact|notify|message|email|post)\b.{0,80}\b(?:reports?|results?|data|"
@@ -754,6 +755,11 @@ def render_structured_synthesis(
             content = (
                 "Review the local queue, failed gates, source freshness, and owner decisions each "
                 "morning."
+            )
+        elif label == "Success checks":
+            content = (
+                "Require a sealed local report, valid hashes, and every deterministic quality "
+                "gate to pass."
             )
         elif label == "Owner gates":
             content = (
@@ -3079,6 +3085,7 @@ class Company:
                 "project_id": project_id,
                 "execution_fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
                 "strict_specialist_num_predict_cap": STRICT_SPECIALIST_NUM_PREDICT_CAP,
+                "strict_synthesis_schema": STRICT_SYNTHESIS_SCHEMA,
                 "runtime": runtime_identity or {
                     "uncacheable": f"{type(self.model).__module__}.{type(self.model).__qualname__}"
                 },
@@ -3542,7 +3549,7 @@ class Company:
                                 json.dumps(
                                     {
                                         "mode": "fail_closed",
-                                        "schema": "local-company.strict-synthesis.v1",
+                                        "schema": STRICT_SYNTHESIS_SCHEMA,
                                     },
                                     sort_keys=True,
                                 ),
@@ -3575,7 +3582,8 @@ class Company:
                         "claims, sensitive actions, or approval bypasses. Keep every item concise and "
                         "substantive. Every string must contain 3 to 12 words and no more than 80 "
                         "characters. Never mention prompts, JSON, schemas, or redaction. Code owns "
-                        "verified facts, provenance, labels, numbering, limits, and the final ending."
+                        "verified facts, provenance, acceptance checks, labels, numbering, limits, "
+                        "and the final ending."
                     )
                     structured_prompt = (
                         f"Planning objective:\n{structured_objective}\n\n"
@@ -3685,7 +3693,7 @@ class Company:
                                     {
                                         "attempt": structured_attempt_used,
                                         "fields": sorted(allowed_fields),
-                                        "schema": "local-company.strict-synthesis.v1",
+                                        "schema": STRICT_SYNTHESIS_SCHEMA,
                                     },
                                     sort_keys=True,
                                 ),
