@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,9 @@ else:
 GUARD_SCHEMA = "local-company.runtime-guard.v1"
 RESULT_JOURNAL_NAME = "runtime-guard-last.json"
 MAX_RENDERED_RESULT_BYTES = 2048
+MAX_OLLAMA_EXECUTABLE_BYTES = 256 * 1024 * 1024
+OLLAMA_EXECUTABLE_HASH_CHUNK_BYTES = 1024 * 1024
+OLLAMA_SHA256_PATTERN = re.compile(r"\A[0-9a-f]{64}\Z")
 KNOWN_PROCESS_RELATIONS = {
     "match", "mismatch", "absent", "unavailable", "legacy",
 }
@@ -84,6 +88,14 @@ class GuardLockError(RuntimeError):
 
 
 class GuardExecutableError(RuntimeError):
+    pass
+
+
+class GuardExecutableHashMismatch(GuardExecutableError):
+    pass
+
+
+class GuardExecutableCleanupError(GuardExecutableError):
     pass
 
 
@@ -584,8 +596,177 @@ def _trusted_ollama_executable(explicit: Path | None) -> Path | None:
     return None
 
 
+def _executable_signature(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns,
+    )
+
+
+def _executable_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns,
+    )
+
+
+def _open_executable_descriptor(executable: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if os.name != "nt":
+        return os.open(executable, flags)
+
+    # Denying write/delete sharing keeps the verified Windows image fixed until
+    # CreateProcess has opened it. The child may still open the file for reading.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(executable), 0x80000000, 0x00000001, None, 3,
+        0x00200000 | 0x08000000, None,
+    )
+    invalid_handle = wintypes.HANDLE(-1).value
+    if handle in (None, invalid_handle):
+        error = ctypes.get_last_error()
+        raise OSError(error, "executable could not be opened safely")
+    try:
+        descriptor_flags = flags | getattr(os, "O_NOINHERIT", 0)
+        return msvcrt.open_osfhandle(handle, descriptor_flags)
+    except (OSError, OverflowError):
+        close_handle(handle)
+        raise
+
+
+@contextmanager
+def _verified_executable_sha256(
+    executable: Path, expected: str,
+):
+    if type(expected) is not str or OLLAMA_SHA256_PATTERN.fullmatch(expected) is None:
+        raise GuardExecutableError("executable digest is invalid")
+    try:
+        before = os.stat(executable, follow_symlinks=False)
+        if (
+            _is_link_or_reparse_metadata(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > MAX_OLLAMA_EXECUTABLE_BYTES
+        ):
+            raise GuardExecutableError("executable size is unsafe")
+        descriptor = _open_executable_descriptor(executable)
+        try:
+            handle = os.fdopen(descriptor, "rb")
+        except (OSError, ValueError):
+            os.close(descriptor)
+            raise
+    except GuardExecutableError:
+        raise
+    except (OSError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
+        raise GuardExecutableError("executable could not be verified") from exc
+
+    with handle:
+        try:
+            opened = os.fstat(handle.fileno())
+            if (
+                _is_link_or_reparse_metadata(opened)
+                or not stat.S_ISREG(opened.st_mode)
+                or _executable_identity(opened) != _executable_identity(before)
+            ):
+                raise GuardExecutableError("executable changed while it was opened")
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = handle.read(OLLAMA_EXECUTABLE_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_OLLAMA_EXECUTABLE_BYTES:
+                    raise GuardExecutableError("executable size is unsafe")
+                digest.update(chunk)
+            after = os.fstat(handle.fileno())
+            current = os.stat(executable, follow_symlinks=False)
+            signatures = {
+                _executable_identity(item) for item in (before, opened, after, current)
+            }
+            if (
+                len(signatures) != 1
+                or total != opened.st_size
+                or any(
+                    _is_link_or_reparse_metadata(item)
+                    for item in (before, opened, after, current)
+                )
+                or not stat.S_ISREG(current.st_mode)
+            ):
+                raise GuardExecutableError("executable changed while it was hashed")
+            if not secrets.compare_digest(digest.hexdigest(), expected):
+                raise GuardExecutableHashMismatch("executable digest does not match")
+            signature = _executable_signature(opened)
+            identity = _executable_identity(opened)
+        except GuardExecutableError:
+            raise
+        except (OSError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
+            raise GuardExecutableError("executable could not be verified") from exc
+
+        # Exceptions from the launch body must retain their original category;
+        # only verifier failures are translated to GuardExecutableError.
+        yield signature
+        try:
+            final = os.stat(executable, follow_symlinks=False)
+            if (
+                _is_link_or_reparse_metadata(final)
+                or not stat.S_ISREG(final.st_mode)
+                or _executable_identity(final) != identity
+            ):
+                raise GuardExecutableError("executable changed before launch completed")
+        except GuardExecutableError:
+            raise
+        except (OSError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
+            raise GuardExecutableError("executable could not be verified") from exc
+
+
+def _verify_executable_sha256(
+    executable: Path, expected: str,
+) -> tuple[int, int, int, int, int, int]:
+    try:
+        with _verified_executable_sha256(executable, expected) as signature:
+            return signature
+    except GuardExecutableError:
+        raise
+    except (OSError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
+        raise GuardExecutableError("executable could not be verified") from exc
+
+
+def _assert_executable_signature(
+    executable: Path, signature: tuple[int, int, int, int, int, int],
+) -> None:
+    try:
+        current = os.stat(executable, follow_symlinks=False)
+    except OSError as exc:
+        raise GuardExecutableError("executable path changed before launch") from exc
+    expected_identity = (
+        signature[0], signature[1], signature[3], signature[4], signature[5],
+    )
+    if (
+        _is_link_or_reparse_metadata(current)
+        or not stat.S_ISREG(current.st_mode)
+        or _executable_identity(current) != expected_identity
+    ):
+        raise GuardExecutableError("executable path changed before launch")
+
+
 def _spawn_ollama(
-    executable: Path, *, allow_job_inheritance: bool = False,
+    executable: Path, *, expected_sha256: str | None = None,
+    allow_job_inheritance: bool = False,
 ) -> subprocess.Popen[bytes]:
     creationflags = 0
     popen_kwargs: dict[str, object] = {}
@@ -599,18 +780,54 @@ def _spawn_ollama(
         "cwd": executable.parent, "env": environment,
         "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL, "close_fds": True,
-        "creationflags": creationflags, **popen_kwargs,
+        "creationflags": creationflags, "executable": str(executable),
+        **popen_kwargs,
     }
+
+    @contextmanager
+    def verification():
+        if expected_sha256 is None:
+            yield None
+        else:
+            with _verified_executable_sha256(
+                executable, expected_sha256,
+            ) as signature:
+                yield signature
+
+    process: subprocess.Popen[bytes] | None = None
     try:
-        return subprocess.Popen([str(executable), "serve"], **arguments)
-    except OSError as exc:
-        if not (
-            os.name == "nt" and allow_job_inheritance
-            and _windows_breakaway_denied(exc)
-        ):
+        with verification() as signature:
+            if signature is not None:
+                _assert_executable_signature(executable, signature)
+            try:
+                process = subprocess.Popen([str(executable), "serve"], **arguments)
+            except OSError as exc:
+                if not (
+                    os.name == "nt" and allow_job_inheritance
+                    and _windows_breakaway_denied(exc)
+                ):
+                    raise
+                if signature is not None:
+                    _assert_executable_signature(executable, signature)
+                arguments["creationflags"] = _windows_inherited_creation_flags()
+                process = subprocess.Popen([str(executable), "serve"], **arguments)
+        return process
+    except Exception as exc:
+        if process is None:
             raise
-        arguments["creationflags"] = _windows_inherited_creation_flags()
-        return subprocess.Popen([str(executable), "serve"], **arguments)
+        try:
+            cleaned = _terminate_owned_child(process)
+        except Exception:
+            cleaned = False
+        if not cleaned:
+            raise GuardExecutableCleanupError(
+                "verified executable launch cleanup failed",
+            ) from exc
+        if isinstance(exc, GuardExecutableError):
+            raise
+        raise GuardExecutableError(
+            "verified executable lease failed after launch",
+        ) from exc
 
 
 def _wait_for_ollama(
@@ -760,7 +977,8 @@ def _full_readiness(home: Path, model: str) -> tuple[str, str]:
 def _guard_locked(
     home: Path, pinned_identity: dict[str, str], *, port: int, model: str,
     num_ctx: int, num_predict: int, keep_alive: str, wait_seconds: int,
-    ollama_executable: Path | None, allow_job_inheritance: bool,
+    ollama_executable: Path | None, ollama_sha256: str | None,
+    allow_job_inheritance: bool,
 ) -> tuple[dict[str, object], int]:
     components = _empty_components()
     components["company_store"] = "valid"
@@ -821,12 +1039,12 @@ def _guard_locked(
                 if executable is None:
                     attempt_events.add("ollama_executable_missing")
                 else:
+                    spawn_arguments: dict[str, object] = {}
+                    if ollama_sha256 is not None:
+                        spawn_arguments["expected_sha256"] = ollama_sha256
                     if allow_job_inheritance:
-                        process = _spawn_ollama(
-                            executable, allow_job_inheritance=True,
-                        )
-                    else:
-                        process = _spawn_ollama(executable)
+                        spawn_arguments["allow_job_inheritance"] = True
+                    process = _spawn_ollama(executable, **spawn_arguments)
                     ollama_state, model_installed = _wait_for_ollama(
                         model, process, wait_seconds,
                     )
@@ -839,6 +1057,14 @@ def _guard_locked(
                             indeterminate.append("ollama_response_invalid")
                         else:
                             indeterminate.append("ollama_start_unconfirmed")
+            except GuardExecutableHashMismatch:
+                ollama_state, model_installed = "refused", None
+                indeterminate.append("ollama_executable_hash_mismatch")
+            except GuardExecutableCleanupError:
+                ollama_state, model_installed = "refused", None
+                indeterminate.extend([
+                    "ollama_executable_invalid", "ollama_cleanup_failed",
+                ])
             except GuardExecutableError:
                 ollama_state, model_installed = "refused", None
                 indeterminate.append("ollama_executable_invalid")
@@ -1008,6 +1234,7 @@ def _guard_locked(
         elif (
             "ollama_response_invalid" in indeterminate
             or "ollama_executable_invalid" in indeterminate
+            or "ollama_executable_hash_mismatch" in indeterminate
             or "ollama_cleanup_failed" in indeterminate
             or "ollama_presence_indeterminate" in indeterminate
             or "ollama_start_unconfirmed" in indeterminate
@@ -1044,6 +1271,7 @@ def guard_once(
     home: Path, *, port: int = 8765, model: str = "qwen3.5:0.8b",
     num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
     wait_seconds: int = 10, ollama_executable: Path | None = None,
+    ollama_sha256: str | None = None,
     allow_job_inheritance: bool = False,
     record_result: bool = False,
 ) -> tuple[dict[str, object], int]:
@@ -1051,6 +1279,14 @@ def guard_once(
         type(allow_job_inheritance) is not bool
         or type(record_result) is not bool
         or (allow_job_inheritance and os.name != "nt")
+        or (
+            ollama_sha256 is not None
+            and (
+                ollama_executable is None
+                or type(ollama_sha256) is not str
+                or OLLAMA_SHA256_PATTERN.fullmatch(ollama_sha256) is None
+            )
+        )
         or not _valid_runtime_arguments(
             port, model, num_ctx, num_predict, keep_alive, wait_seconds,
         )
@@ -1077,6 +1313,7 @@ def guard_once(
                 normalized_home, pinned_identity, port=port, model=model,
                 num_ctx=num_ctx, num_predict=num_predict, keep_alive=keep_alive,
                 wait_seconds=wait_seconds, ollama_executable=ollama_executable,
+                ollama_sha256=ollama_sha256,
                 allow_job_inheritance=allow_job_inheritance,
             )
             result_components = result.get("components") if isinstance(result, dict) else None
@@ -1121,6 +1358,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--keep-alive", default="30s")
     result.add_argument("--wait-seconds", type=int, default=10)
     result.add_argument("--ollama-executable", type=Path)
+    result.add_argument("--ollama-sha256")
     result.add_argument("--allow-windows-job-inheritance", action="store_true")
     result.add_argument("--record-result", action="store_true")
     return result
@@ -1134,6 +1372,7 @@ def main(argv: list[str] | None = None) -> int:
             home, port=args.port, model=args.model, num_ctx=args.num_ctx,
             num_predict=args.num_predict, keep_alive=args.keep_alive,
             wait_seconds=args.wait_seconds, ollama_executable=args.ollama_executable,
+            ollama_sha256=args.ollama_sha256,
             allow_job_inheritance=args.allow_windows_job_inheritance,
             record_result=args.record_result,
         )
