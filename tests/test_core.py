@@ -37,7 +37,7 @@ from local_company.core import (
 )
 from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, render_dashboard,
-    render_mission_detail, runtime_build_identity,
+    render_mission_detail, runtime_build_identity, runtime_model_identity,
 )
 from local_company.service import _read_state, _startup_lock, _write_state
 
@@ -1993,9 +1993,35 @@ class CompanyTests(unittest.TestCase):
                 "source_dirty": None,
                 "source_sha256": "a" * 64,
             },
+            {
+                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "endpoint": "loopback_default",
+            },
         )
         self.assertEqual(snapshot["worker"], {"status": "running"})
+        self.assertEqual(
+            snapshot["runtime"], {
+                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "endpoint": "loopback_default",
+            },
+        )
         self.assertLess(len(json.dumps(snapshot).encode("utf-8")), 2048)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ollama_company = Company(Path(tmp), OllamaModel("qwen3.5:0.8b"))
+            self.assertEqual(
+                runtime_model_identity(ollama_company),
+                {
+                    "provider": "ollama", "model": "qwen3.5:0.8b",
+                    "endpoint": "loopback_default",
+                },
+            )
+            ollama_company.model.model = "x" * 257
+            self.assertEqual(runtime_model_identity(ollama_company)["model"], None)
+            external_company = Company(
+                Path(tmp), OllamaModel("qwen3.5:0.8b", host="https://example.invalid"),
+            )
+            self.assertEqual(runtime_model_identity(external_company)["endpoint"], "nonlocal")
 
     def test_dashboard_http_is_local_and_rejects_posts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2008,10 +2034,17 @@ class CompanyTests(unittest.TestCase):
                 "source_dirty": None,
                 "source_sha256": "b" * 64,
             }
+            runtime_identity = {
+                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "endpoint": "loopback_default",
+            }
             with patch(
                 "local_company.dashboard.runtime_build_identity",
                 return_value=build_identity,
-            ) as build_snapshot:
+            ) as build_snapshot, patch(
+                "local_company.dashboard.runtime_model_identity",
+                return_value=runtime_identity,
+            ) as runtime_snapshot:
                 server = create_dashboard_server(company, 0)
             self.assertEqual(server.server_address[0], "127.0.0.1")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2029,9 +2062,11 @@ class CompanyTests(unittest.TestCase):
                     build_status = json.load(response)
                     self.assertLess(int(response.headers["Content-Length"]), 4096)
                 self.assertEqual(
-                    set(build_status), {"status", "pid", "build", "health", "worker"},
+                    set(build_status),
+                    {"status", "pid", "build", "runtime", "health", "worker"},
                 )
                 self.assertEqual(build_status["build"], build_identity)
+                self.assertEqual(build_status["runtime"], runtime_identity)
                 self.assertEqual(build_status["worker"], {"status": "disabled"})
                 with opener.open(base + "/build-status.json", timeout=3) as response:
                     self.assertEqual(json.load(response), build_status)
@@ -2043,6 +2078,7 @@ class CompanyTests(unittest.TestCase):
                 self.assertIn("b" * 64, page)
                 self.assertIn("/build-status.json", page)
                 build_snapshot.assert_called_once_with()
+                runtime_snapshot.assert_called_once_with(company)
                 request = urllib.request.Request(base + "/", data=b"", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as raised:
                     opener.open(request, timeout=3)

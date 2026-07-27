@@ -12,7 +12,9 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
-from .core import Company, PLAYBOOKS, QueueClaim, ReportFinalizationPending
+from .core import (
+    Company, MockModel, OllamaModel, PLAYBOOKS, QueueClaim, ReportFinalizationPending,
+)
 
 
 MAX_FORM_BYTES = 16 * 1024
@@ -31,6 +33,28 @@ def runtime_build_identity() -> dict[str, object]:
         "source_dirty": None,
         "source_sha256": SOURCE_SHA256,
     }
+
+
+def runtime_model_identity(company: Company) -> dict[str, object]:
+    """Return bounded non-secret model configuration for readiness checks."""
+    if isinstance(company.model, OllamaModel):
+        model_name = company.model.model
+        return {
+            "provider": "ollama",
+            "model": (
+                model_name
+                if type(model_name) is str and 1 <= len(model_name) <= 256
+                else None
+            ),
+            "endpoint": (
+                "loopback_default"
+                if company.model.host == "http://127.0.0.1:11434"
+                else "nonlocal"
+            ),
+        }
+    if isinstance(company.model, MockModel):
+        return {"provider": "mock", "model": None, "endpoint": None}
+    return {"provider": "unknown", "model": None, "endpoint": None}
 
 
 class LocalQueueWorker:
@@ -138,6 +162,7 @@ def build_status_snapshot(
     company: Company,
     worker: LocalQueueWorker | None,
     build_identity: dict[str, object],
+    runtime_identity: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Return the bounded state required to decide whether restart is safe."""
     work_state = company.work_state_snapshot()
@@ -146,6 +171,10 @@ def build_status_snapshot(
         "status": "ready",
         "pid": os.getpid(),
         "build": dict(build_identity),
+        "runtime": dict(
+            runtime_model_identity(company)
+            if runtime_identity is None else runtime_identity
+        ),
         "health": work_state,
         "worker": {"status": worker_state.get("status")},
     }
@@ -488,6 +517,7 @@ def create_dashboard_server(
         raise ValueError("Dashboard port must be between 0 and 65535")
     worker = LocalQueueWorker(company) if service_token else None
     build_identity = runtime_build_identity()
+    runtime_identity = runtime_model_identity(company)
 
     class Handler(BaseHTTPRequestHandler):
         def _local_authorities(self) -> set[str]:
@@ -567,7 +597,9 @@ def create_dashboard_server(
                 parsed.path == "/health.json" and parsed.query == "view=build-status"
             ):
                 body = json.dumps(
-                    build_status_snapshot(company, worker, build_identity)
+                    build_status_snapshot(
+                        company, worker, build_identity, runtime_identity,
+                    )
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

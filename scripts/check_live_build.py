@@ -39,6 +39,19 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def reject_json_constant(_: str) -> object:
+    raise ValueError("non-standard JSON constant")
+
+
 def fetch_health() -> dict[str, object]:
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _NoRedirectHandler(),
@@ -51,14 +64,26 @@ def fetch_health() -> dict[str, object]:
         with opener.open(request, timeout=5) as response:
             if response.status != 200:
                 raise LiveBuildError("Loopback health endpoint did not return HTTP 200")
+            content_type = response.headers.get("Content-Type", "")
+            media_type = content_type.split(";", 1)[0].strip().lower()
+            if media_type != "application/json":
+                raise LiveBuildError("Loopback build-status content type is invalid")
             body = response.read(MAX_BUILD_STATUS_BYTES + 1)
         if len(body) > MAX_BUILD_STATUS_BYTES:
             raise LiveBuildError("Loopback build-status response exceeds its byte limit")
-        payload = json.loads(body.decode("utf-8", errors="strict"))
+        payload = json.loads(
+            body.decode("utf-8", errors="strict"),
+            object_pairs_hook=unique_json_object,
+            parse_constant=reject_json_constant,
+        )
     except LiveBuildError:
         raise
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise LiveBuildError("Loopback health returned an invalid HTTP response") from exc
     except (
-        OSError, UnicodeError, ValueError, RecursionError, urllib.error.URLError,
+        AttributeError, OSError, TypeError, UnicodeError, ValueError, RecursionError,
+        urllib.error.URLError,
         http.client.HTTPException,
     ) as exc:
         raise LiveBuildError(f"Could not read loopback health: {exc}") from exc

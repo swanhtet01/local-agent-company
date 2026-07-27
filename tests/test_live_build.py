@@ -12,6 +12,7 @@ from scripts.check_live_build import (
 class _Response:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
+        self.headers = {"Content-Type": "application/json; charset=utf-8"}
         self.body = json.dumps(payload).encode("utf-8")
 
     def __enter__(self) -> "_Response":
@@ -81,6 +82,11 @@ class LiveBuildTests(unittest.TestCase):
         stale["worker"] = {"status": "needs_approval"}
         needs_approval = compare_live_build(self._disk(), stale)
         self.assertFalse(needs_approval["restart_safe_now"])
+
+        stale["worker"] = {"status": "disabled"}
+        disabled = compare_live_build(self._disk(), stale)
+        self.assertTrue(disabled["restart_safe_now"])
+        self.assertEqual(disabled["work_state"]["worker_status"], "disabled")
 
         newer_live = self._health()
         newer_live["build"] = dict(
@@ -163,6 +169,7 @@ class LiveBuildTests(unittest.TestCase):
 
         oversized = Mock()
         oversized.status = 200
+        oversized.headers = {"Content-Type": "application/json"}
         oversized.__enter__ = Mock(return_value=oversized)
         oversized.__exit__ = Mock(return_value=None)
         oversized.read.return_value = b"x" * (MAX_BUILD_STATUS_BYTES + 1)
@@ -176,6 +183,7 @@ class LiveBuildTests(unittest.TestCase):
 
         deeply_nested = Mock()
         deeply_nested.status = 200
+        deeply_nested.headers = {"Content-Type": "application/json"}
         deeply_nested.__enter__ = Mock(return_value=deeply_nested)
         deeply_nested.__exit__ = Mock(return_value=None)
         deeply_nested.read.return_value = (
@@ -189,8 +197,40 @@ class LiveBuildTests(unittest.TestCase):
             with self.assertRaises(LiveBuildError):
                 fetch_health()
 
+        for content_type in (
+            "text/plain", "application/jsonp", "application/json-evil",
+            "application/json garbage",
+        ):
+            hostile_type = _Response(payload)
+            hostile_type.headers = {"Content-Type": content_type}
+            opener.open.return_value = hostile_type
+            with patch(
+                "scripts.check_live_build.urllib.request.build_opener",
+                return_value=opener,
+            ):
+                with self.assertRaises(LiveBuildError):
+                    fetch_health()
+
+        raw_bodies = (
+            b'{"status":"not-ready","status":"ready"}',
+            b'{"status":"ready","build":{"schema":"bad","schema":"good"}}',
+            b'{"status":"ready","runtime":{"provider":"mock","provider":"ollama"}}',
+            b'{"status":"ready","pid":NaN}',
+        )
+        for body in raw_bodies:
+            duplicate_or_constant = _Response(payload)
+            duplicate_or_constant.body = body
+            opener.open.return_value = duplicate_or_constant
+            with patch(
+                "scripts.check_live_build.urllib.request.build_opener",
+                return_value=opener,
+            ):
+                with self.assertRaises(LiveBuildError):
+                    fetch_health()
+
         truncated = Mock()
         truncated.status = 200
+        truncated.headers = {"Content-Type": "application/json"}
         truncated.__enter__ = Mock(return_value=truncated)
         truncated.__exit__ = Mock(return_value=None)
         truncated.read.side_effect = http.client.IncompleteRead(b"{")

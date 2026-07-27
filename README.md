@@ -13,11 +13,13 @@ No package download is required:
 ```powershell
 cd C:\Users\thesw\Projects\local-agent-company
 .\local-company.cmd init
-.\local-company.cmd doctor
+.\local-company.cmd service start --port 8765
+python .\scripts\check_readiness.py --model qwen3.5:0.8b
 .\local-company.cmd run "Design a 30-day launch plan for a local tyre shop"
 ```
 
 The default provider is now the installed local Ollama runtime. Use `--provider mock` only when you intentionally want a fast workflow simulation without real model reasoning.
+The readiness command is the release gate for accepting a new local mission. `doctor` remains an advisory diagnostic and its exit code must not be used as that gate.
 
 ## Use a real local model
 
@@ -149,7 +151,7 @@ Each due schedule produces at most one occurrence per tick and advances beyond t
 .\local-company.cmd export "C:\path\to\approved-export-directory"
 ```
 
-Health reports local disk, database, reports, Ollama model storage, active work, queue depth, approvals, and metadata-only pending-completion phases. The dashboard's `/health.json` also carries one startup-cached `build` identity from an embedded release manifest: package version, build ID, and the release-validated SHA-256 of all operational package Python files. The manifest file itself is excluded from that digest to avoid self-reference. `/build-status.json` and the compatibility URL `/health.json?view=build-status` return only that identity, the service PID, direct SQLite work counters, and the worker status; their response does not grow with project, job, queue, dataset, schedule, report, or worker-output history. Runtime build identity performs no filesystem, environment, or Git reads, never launches another process, and exposes no repository paths. Unavailable `git_commit` and `source_dirty` values deliberately remain `null` instead of being guessed. `pending_report_finalizations`, `pending_evaluations`, and `pending_completion` identify durable work that is between report preparation, sealing, evaluation, and queue reconciliation without exposing lease tokens, paths, or report bytes. Export writes a version-3 timestamped JSON audit plus a `.sha256` manifest, including report seals, evidence-manifest indexes, and append-only evaluation history. It includes source paths and content hashes but deliberately excludes imported source bodies and frozen source quotes.
+Health reports local disk, database, reports, Ollama model storage, active work, queue depth, approvals, and metadata-only pending-completion phases. The dashboard's `/health.json` also carries one startup-cached `build` identity from an embedded release manifest: package version, build ID, and the release-validated SHA-256 of all operational package Python files. The manifest file itself is excluded from that digest to avoid self-reference. `/build-status.json` and the compatibility URL `/health.json?view=build-status` return only that identity, the service PID, direct SQLite work counters, worker status, and a bounded startup runtime attestation. That attestation exposes only the provider, configured model name, and the endpoint class `loopback_default` or `nonlocal`; it never exposes a URL, token, or environment value. The compact response does not grow with project, job, queue, dataset, schedule, report, or worker-output history. Runtime build identity performs no filesystem, environment, or Git reads, never launches another process, and exposes no repository paths. Unavailable `git_commit` and `source_dirty` values deliberately remain `null` instead of being guessed. `pending_report_finalizations`, `pending_evaluations`, and `pending_completion` identify durable work that is between report preparation, sealing, evaluation, and queue reconciliation without exposing lease tokens, paths, or report bytes. Export writes a version-3 timestamped JSON audit plus a `.sha256` manifest, including report seals, evidence-manifest indexes, and append-only evaluation history. It includes source paths and content hashes but deliberately excludes imported source bodies and frozen source quotes.
 
 Verify the embedded manifest before tests or release. After changing any operational package Python file, refresh it with a new, explicit, monotonic build ID and check it again. These commands touch no company state or service process:
 
@@ -166,6 +168,14 @@ After commit or restart, compare that checked disk manifest with the fixed loopb
 ```powershell
 python .\scripts\check_live_build.py
 ```
+
+Use the composed readiness gate before accepting a new local mission:
+
+```powershell
+python .\scripts\check_readiness.py --model qwen3.5:0.8b
+```
+
+It returns exit 0 only when the disk manifest is valid, the live build exactly matches it, local work is idle, the queue worker is enabled, the service is startup-attested to the requested Ollama model on the fixed loopback endpoint, Ollama is reachable, and that exact model is installed. Exit 1 reports a bounded, known local action; exit 2 means live or dependency status is unavailable or malformed; exit 3 means the disk manifest or checker itself is indeterminate. Follow the JSON `action`, then rerun the gate. The Ollama tags probe does not generate text, so `generation_tested` remains false; use `benchmark` separately when an inference proof is required.
 
 ## Inspect and recover work
 
