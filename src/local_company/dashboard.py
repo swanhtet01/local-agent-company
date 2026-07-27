@@ -194,6 +194,74 @@ def build_status_snapshot(
     }
 
 
+def health_endpoint_snapshot(
+    company: Company,
+    worker: LocalQueueWorker | None,
+    build_identity: dict[str, object],
+    company_identity: dict[str, str],
+    service_instance_id: str | None = None,
+) -> dict[str, object]:
+    """Return bounded operational telemetry without business records or paths."""
+    observed = company.health_snapshot()
+
+    def bounded_text(value: object) -> str | None:
+        if not isinstance(value, str) or len(value) > 200:
+            return None
+        return value
+
+    def bounded_count(value: object) -> int | None:
+        return value if type(value) is int and 0 <= value <= (1 << 63) - 1 else None
+
+    installed_models = observed.get("installed_models")
+    worker_state = worker.snapshot() if worker else {"status": "disabled"}
+    raw_worker_status = worker_state.get("status")
+    worker_status = (
+        raw_worker_status
+        if isinstance(raw_worker_status, str)
+        and re.fullmatch(r"[a-z][a-z0-9_]{0,39}", raw_worker_status)
+        else "unknown"
+    )
+    health = {
+        "python": bounded_text(observed.get("python")),
+        "platform": bounded_text(observed.get("platform")),
+        "database_bytes": bounded_count(observed.get("database_bytes")),
+        "report_count": bounded_count(observed.get("report_count")),
+        "report_bytes": bounded_count(observed.get("report_bytes")),
+        "disk_free_bytes": bounded_count(observed.get("disk_free_bytes")),
+        "disk_total_bytes": bounded_count(observed.get("disk_total_bytes")),
+        "ollama_model_storage_bytes": bounded_count(
+            observed.get("ollama_model_storage_bytes")
+        ),
+        "ollama_reachable": isinstance(installed_models, list),
+        "installed_model_count": (
+            len(installed_models) if isinstance(installed_models, list) else None
+        ),
+        "dataset_count": bounded_count(observed.get("dataset_count")),
+        "active_jobs": bounded_count(observed.get("active_jobs")),
+        "queued_missions": bounded_count(observed.get("queued_missions")),
+        "running_missions": bounded_count(observed.get("running_missions")),
+        "pending_approvals": bounded_count(observed.get("pending_approvals")),
+        "pending_report_finalizations": bounded_count(
+            observed.get("pending_report_finalizations")
+        ),
+        "pending_evaluations": bounded_count(observed.get("pending_evaluations")),
+    }
+    service_identity = (
+        {"service_instance_id": service_instance_id}
+        if service_instance_id is not None else {}
+    )
+    return {
+        "schema": "local-company.health.v1",
+        "status": "ready",
+        "pid": os.getpid(),
+        **service_identity,
+        "build": dict(build_identity),
+        "company": dict(company_identity),
+        "health": health,
+        "worker": {"status": worker_status},
+    }
+
+
 def render_dashboard(
     company: Company, service_token: str | None = None, notice: str = "",
     worker: LocalQueueWorker | None = None,
@@ -803,18 +871,11 @@ def create_dashboard_server(
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
             elif parsed.path == "/health.json":
-                service_identity = (
-                    {"service_instance_id": service_instance_id}
-                    if service_instance_id is not None else {}
-                )
                 body = json.dumps(
-                    {
-                        "status": "ready", "pid": os.getpid(),
-                        **service_identity,
-                        "build": dict(build_identity),
-                        "company": dict(company_identity),
-                        **dashboard_snapshot(company, worker),
-                    }
+                    health_endpoint_snapshot(
+                        company, worker, build_identity, company_identity,
+                        service_instance_id,
+                    )
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

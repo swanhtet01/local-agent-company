@@ -45,7 +45,8 @@ from local_company.core import (
 )
 from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
-    render_dashboard, render_dataset_quality_detail, render_mission_detail,
+    health_endpoint_snapshot, render_dashboard, render_dataset_quality_detail,
+    render_mission_detail,
     runtime_build_identity, runtime_model_identity,
 )
 from local_company.service import (
@@ -3057,6 +3058,93 @@ class CompanyTests(unittest.TestCase):
                         opener.open(base + missing_path, timeout=3)
                     self.assertEqual(missing.exception.code, 404)
                     missing.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_health_endpoint_is_bounded_and_withholds_business_records(self):
+        class NoisyWorker:
+            def snapshot(self):
+                return {
+                    "status": "running",
+                    "output": "health-private-worker-output" * 100_000,
+                    "error": "health-private-worker-error",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "health-private-source.json"
+            source.write_text(
+                '[{"id": 1, "label": "health-private-row-value"}]',
+                encoding="utf-8",
+            )
+            company = Company(root / "state", MockModel())
+            project_id = company.create_project("health-private-project")
+            company.enqueue("health-private-queue-objective", project=project_id)
+            company.request_action("health-private-approval-description")
+            company.profile_dataset(source, "health-private-project", key_columns=["id"])
+            worker = NoisyWorker()
+            service_instance_id = "c" * 32
+            direct = health_endpoint_snapshot(
+                company,
+                worker,
+                {"build_id": "health-private-build-secret"},
+                company.company_identity(),
+                service_instance_id,
+            )
+            self.assertEqual(direct["worker"], {"status": "running"})
+            self.assertNotIn("worker-output", json.dumps(direct))
+            self.assertNotIn("worker-error", json.dumps(direct))
+            server = create_dashboard_server(
+                company,
+                0,
+                service_token="health-private-service-token",
+                service_instance_id=service_instance_id,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(base + "/health.json", timeout=3) as response:
+                    payload_bytes = response.read()
+                    self.assertLess(int(response.headers["Content-Length"]), 4096)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                payload = json.loads(payload_bytes)
+                self.assertEqual(set(payload), {
+                    "schema", "status", "pid", "service_instance_id", "build",
+                    "company", "health", "worker",
+                })
+                self.assertEqual(payload["schema"], "local-company.health.v1")
+                self.assertEqual(payload["service_instance_id"], service_instance_id)
+                self.assertEqual(payload["worker"], {"status": "idle"})
+                self.assertEqual(set(payload["health"]), {
+                    "python", "platform", "database_bytes", "report_count",
+                    "report_bytes", "disk_free_bytes", "disk_total_bytes",
+                    "ollama_model_storage_bytes", "ollama_reachable",
+                    "installed_model_count", "dataset_count", "active_jobs",
+                    "queued_missions", "running_missions", "pending_approvals",
+                    "pending_report_finalizations", "pending_evaluations",
+                })
+                self.assertEqual(payload["health"]["dataset_count"], 1)
+                self.assertEqual(payload["health"]["queued_missions"], 1)
+                self.assertEqual(payload["health"]["pending_approvals"], 1)
+                self.assertFalse(payload["health"]["ollama_reachable"])
+                self.assertIsNone(payload["health"]["installed_model_count"])
+                serialized = payload_bytes.decode("utf-8")
+                self.assertNotIn("health-private", serialized)
+                self.assertNotIn(str(source), serialized)
+                self.assertNotIn(str(company.home), serialized)
+                self.assertNotIn("pending_completion", serialized)
+                self.assertNotIn('"projects":', serialized)
+                self.assertNotIn('"queue":', serialized)
+                self.assertNotIn('"datasets":', serialized)
+
+                with opener.open(base + "/", timeout=3) as response:
+                    page = response.read().decode("utf-8")
+                self.assertIn("health-private-project", page)
+                self.assertIn("health-private-queue-objective", page)
             finally:
                 server.shutdown()
                 server.server_close()
