@@ -629,6 +629,7 @@ def render_quality_failure_overview(company: Company) -> str:
     current_failed_count = overview.get("current_failed_count")
     current_passed_count = overview.get("current_passed_count")
     changed_count = overview.get("current_preview_changed_count")
+    strict_retry_count = overview.get("strict_retry_policy_count")
     stored_checks = overview.get("common_stored_failed_checks")
     stored_actions = overview.get("common_stored_repair_actions")
     current_checks = overview.get("common_current_failed_checks")
@@ -656,7 +657,8 @@ def render_quality_failure_overview(company: Company) -> str:
         overview.get("schema") != QUALITY_RECOVERY_LIST_SCHEMA
         or set(overview) != {
             "schema", "quality_failed_count", "current_failed_count",
-            "current_passed_count", "current_preview_changed_count", "items",
+            "current_passed_count", "current_preview_changed_count",
+            "strict_retry_policy_count", "items",
             "common_stored_failed_checks", "common_stored_repair_actions",
             "common_current_failed_checks", "common_current_repair_actions",
             "next_action", "effects",
@@ -673,6 +675,7 @@ def render_quality_failure_overview(company: Company) -> str:
         or type(current_passed_count) is not int or current_passed_count < 0
         or current_failed_count + current_passed_count != count
         or type(changed_count) is not int or not 0 <= changed_count <= count
+        or type(strict_retry_count) is not int or not 0 <= strict_retry_count <= count
         or not aggregate_rows_valid(stored_checks, "check", token_length=80)
         or not aggregate_rows_valid(stored_actions, "action", token_length=120)
         or not aggregate_rows_valid(current_checks, "check", token_length=80)
@@ -700,7 +703,7 @@ def render_quality_failure_overview(company: Company) -> str:
         if (
             set(item) != {
                 "queue_id", "job_id", "queue_status", "priority", "stored_result",
-                "current_preview", "comparison", "next_action",
+                "current_preview", "comparison", "retry_policy", "next_action",
             }
             or not isinstance(item.get("queue_id"), str)
             or re.fullmatch(r"[0-9a-f]{12}", item["queue_id"]) is None
@@ -709,6 +712,7 @@ def render_quality_failure_overview(company: Company) -> str:
             or item.get("queue_status") != "quality_failed"
             or type(item.get("priority")) is not int
             or not 0 <= item["priority"] <= 100
+            or item.get("retry_policy") not in {"strict_grounded", "standard"}
             or not isinstance(stored, dict)
             or set(stored) != {
                 "quality_status", "score", "evaluator_version", "evaluated_at",
@@ -796,12 +800,13 @@ def render_quality_failure_overview(company: Company) -> str:
             f"{token_list(current['incomplete_specialist_roles'], 'no incomplete roles')}"
             f"{token_list(integrity)}</td>"
             f"<td>{delta}</td>"
+            f"<td><code>{cell(item['retry_policy'])}</code></td>"
             f"<td>{token_list(current['repair_actions'])}</td>"
             f"<td><code>{cell(item['next_action'])}</code></td>"
             "</tr>"
         )
     rows = "".join(rows_parts) or (
-        '<tr><td colspan="8" class="empty">No quality-failed missions.</td></tr>'
+        '<tr><td colspan="9" class="empty">No quality-failed missions.</td></tr>'
     )
     current_check_rows = "".join(
         f"<tr><td><code>{cell(item['check'])}</code></td><td>{cell(item['count'])}</td></tr>"
@@ -823,7 +828,7 @@ def render_quality_failure_overview(company: Company) -> str:
 body {{ max-width:1280px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
 .meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
 .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }} section {{ margin-top:26px; }}
+.grid {{ display:grid; grid-template-columns:repeat(5,1fr); gap:18px; }} section {{ margin-top:26px; }}
 table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
 th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
 th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
@@ -832,9 +837,9 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 </style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Quality failure recovery</h1>
 <p><a href="/quality-supersessions">Review retired failure proofs</a></p>
-<div class="grid"><div><p class="metric">{count}</p><p class="meta">active stored failures</p></div><div><p class="metric">{current_failed_count}</p><p class="meta">currently failing</p></div><div><p class="metric">{current_passed_count}</p><p class="meta">currently passing, review only</p></div><div><p class="metric">{changed_count}</p><p class="meta">evaluator or result changed</p></div></div>
+<div class="grid"><div><p class="metric">{count}</p><p class="meta">active stored failures</p></div><div><p class="metric">{current_failed_count}</p><p class="meta">currently failing</p></div><div><p class="metric">{current_passed_count}</p><p class="meta">currently passing, review only</p></div><div><p class="metric">{changed_count}</p><p class="meta">evaluator or result changed</p></div><div><p class="metric">{strict_retry_count}</p><p class="meta">strictly grounded on retry</p></div></div>
 <p class="boundary">Stored results are historical. Current repair guidance comes from the exact current evaluator on a discarded clone for each item and is individually race-checked. Objectives, projects, reports, source paths, evidence text, claims, and model output are withheld. This view appends no evaluation, calls no model, changes no queue item, and starts no work.</p>
-<section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Stored result</th><th>Current preview</th><th>Gate delta</th><th>Current repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+<section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Stored result</th><th>Current preview</th><th>Gate delta</th><th>Retry policy</th><th>Current repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
 <div class="grid"><section><h2>Current common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{current_check_rows}</tbody></table></section>
 <section><h2>Current common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{current_action_rows}</tbody></table></section>
 <section><h2>Stored historical failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{stored_check_rows}</tbody></table></section></div>

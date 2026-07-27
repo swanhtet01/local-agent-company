@@ -4903,6 +4903,14 @@ class CompanyTests(unittest.TestCase):
                     "SELECT MAX(id) FROM evaluation_history WHERE job_id=?)",
                     (low_score, encoded, low_job),
                 )
+                db.execute(
+                    "UPDATE jobs SET objective=? WHERE id=?",
+                    (
+                        "Using imported evidence, prepare a 7-day plan and separate "
+                        "verified facts from assumptions.",
+                        high_job,
+                    ),
+                )
                 history_before = db.execute(
                     "SELECT COUNT(*) FROM evaluation_history"
                 ).fetchone()[0]
@@ -4918,7 +4926,8 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual([item["priority"] for item in overview["items"]], [90, 20])
             self.assertEqual(overview["current_failed_count"], 2)
             self.assertEqual(overview["current_passed_count"], 0)
-            self.assertEqual(overview["current_preview_changed_count"], 1)
+            self.assertEqual(overview["current_preview_changed_count"], 2)
+            self.assertEqual(overview["strict_retry_policy_count"], 1)
             stored_counts = {
                 item["check"]: item["count"]
                 for item in overview["common_stored_failed_checks"]
@@ -4956,7 +4965,9 @@ class CompanyTests(unittest.TestCase):
                 low_item["comparison"]["new_failed_checks"],
             )
             self.assertTrue(low_item["comparison"]["evaluator_changed"])
+            self.assertEqual(low_item["retry_policy"], "standard")
             self.assertEqual(high_job, overview["items"][0]["job_id"])
+            self.assertEqual(overview["items"][0]["retry_policy"], "strict_grounded")
             self.assertTrue(all(value is False for value in overview["effects"].values()))
 
             cli_model = CountingMockModel()
@@ -4992,6 +5003,7 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(empty["quality_failed_count"], 0)
             self.assertEqual(empty["current_failed_count"], 0)
             self.assertEqual(empty["current_passed_count"], 0)
+            self.assertEqual(empty["strict_retry_policy_count"], 0)
             self.assertEqual(empty["items"], [])
             self.assertEqual(empty["next_action"], "none")
 
@@ -5006,7 +5018,7 @@ class CompanyTests(unittest.TestCase):
 
             row = (
                 "a" * 12, "b" * 12, 50,
-                "2026-07-28T00:00:00+00:00", 1,
+                "2026-07-28T00:00:00+00:00", 1, "Bounded objective",
             )
             overflow = {"database_sha256": "1" * 64, "rows": (row,) * 101}
             with patch.object(
@@ -5130,6 +5142,9 @@ class CompanyTests(unittest.TestCase):
             self.assertIn(QUALITY_RECOVERY_LIST_SCHEMA, page)
             self.assertIn("Stored result", page)
             self.assertIn("Current common failed gates", page)
+            self.assertIn("Retry policy", page)
+            self.assertIn("strictly grounded on retry", page)
+            self.assertIn("standard", page)
             self.assertIn(queue_id, page)
             self.assertIn(f'href="/missions/{job_id}"', page)
             self.assertIn("facts_assumptions_separated", page)

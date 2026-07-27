@@ -201,7 +201,7 @@ QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
-QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v2"
+QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v3"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
 OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
@@ -7842,7 +7842,9 @@ class Company:
             rows = tuple(tuple(row) for row in db.execute(
                 "SELECT q.id, q.job_id, q.priority, q.scheduled_at, "
                 "COALESCE((SELECT MAX(h.id) FROM evaluation_history h "
-                "WHERE h.job_id=q.job_id), 0) FROM mission_queue q "
+                "WHERE h.job_id=q.job_id), 0), "
+                "(SELECT j.objective FROM jobs j WHERE j.id=q.job_id) "
+                "FROM mission_queue q "
                 "WHERE q.status='quality_failed' "
                 "ORDER BY q.priority DESC, q.scheduled_at, q.created_at, q.id "
                 "LIMIT ?",
@@ -7862,7 +7864,7 @@ class Company:
             or not isinstance(before.get("database_sha256"), str)
             or re.fullmatch(r"[0-9a-f]{64}", before["database_sha256"]) is None
             or not isinstance(rows, tuple)
-            or any(not isinstance(row, tuple) or len(row) != 5 for row in rows)
+            or any(not isinstance(row, tuple) or len(row) != 6 for row in rows)
         ):
             raise ValueError("Stored quality-failure queue index is malformed")
         if len(rows) > MAX_QUALITY_RECOVERY_ITEMS:
@@ -7879,6 +7881,7 @@ class Company:
         current_failed_count = 0
         current_passed_count = 0
         current_preview_changed_count = 0
+        strict_retry_policy_count = 0
 
         def bounded_tokens(
             value: object, *, maximum: int, token_length: int,
@@ -7894,13 +7897,15 @@ class Company:
                 and value == sorted(set(value))
             )
 
-        for queue_id, job_id, priority, scheduled_at, history_id in rows:
+        for queue_id, job_id, priority, scheduled_at, history_id, objective in rows:
             if (
                 not isinstance(queue_id, str) or not re.fullmatch(r"[0-9a-f]{12}", queue_id)
                 or not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{12}", job_id)
                 or type(priority) is not int or not 0 <= priority <= 100
                 or not isinstance(scheduled_at, str) or not 1 <= len(scheduled_at) <= 64
                 or type(history_id) is not int or history_id <= 0
+                or not isinstance(objective, str)
+                or not 1 <= len(objective) <= MAX_OBJECTIVE_CHARS
             ):
                 raise ValueError("Stored quality-failure queue link is malformed")
             try:
@@ -8062,6 +8067,12 @@ class Company:
                 raise ValueError("Current quality recovery comparison is malformed")
 
             current_actions = self._quality_repair_actions(current["failed_checks"])
+            retry_policy = (
+                "strict_grounded" if _requires_strict_grounded_synthesis(objective)
+                else "standard"
+            )
+            if retry_policy == "strict_grounded":
+                strict_retry_policy_count += 1
             if (
                 not isinstance(current_actions, list)
                 or len(current_actions) > 16
@@ -8102,6 +8113,7 @@ class Company:
                 },
                 "current_preview": {**current, "repair_actions": current_actions},
                 "comparison": comparison,
+                "retry_policy": retry_policy,
                 "next_action": preview["next_action"],
             })
 
@@ -8117,6 +8129,7 @@ class Company:
             "current_failed_count": current_failed_count,
             "current_passed_count": current_passed_count,
             "current_preview_changed_count": current_preview_changed_count,
+            "strict_retry_policy_count": strict_retry_policy_count,
             "items": items,
             "common_stored_failed_checks": [
                 {"check": check, "count": count}
