@@ -2965,6 +2965,19 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual(profile["key_check"]["duplicate_rows"], 2)
 
+            legacy_profile = dict(profile)
+            legacy_profile["schema"] = "local-company.dataset-profile.v2"
+            legacy_profile.pop("contract_check", None)
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE datasets SET profile_json=? WHERE id=?",
+                    (json.dumps(legacy_profile), dataset_id),
+                )
+            legacy = company.dataset_quality_items()[0]
+            self.assertEqual(legacy["profile_status"], "ready")
+            self.assertEqual(legacy["profile_schema"], "local-company.dataset-profile.v2")
+            self.assertEqual(legacy["contract_status"], "not configured")
+
             bounded_profile = dict(profile)
             bounded_profile["columns"] = {
                 f"bounded-column-{index:03}": {
@@ -3858,7 +3871,8 @@ class CompanyTests(unittest.TestCase):
                 source, "Data Lab", key_columns=["id"]
             )
             self.assertEqual(source.read_bytes(), original)
-            self.assertEqual(profile["schema"], "local-company.dataset-profile.v2")
+            self.assertEqual(profile["schema"], "local-company.dataset-profile.v3")
+            self.assertEqual(profile["contract_check"]["status"], "not_configured")
             self.assertEqual(profile["profiled_rows"], 4)
             self.assertEqual(profile["quality_flags"]["duplicate_rows"], 1)
             self.assertEqual(profile["quality_flags"]["duplicate_rows_affected"], 2)
@@ -3960,6 +3974,213 @@ class CompanyTests(unittest.TestCase):
             brief_text = brief.read_text(encoding="utf-8")
             self.assertIn("Non-finite numeric columns: value", brief_text)
             self.assertNotIn("Infinity", brief_text)
+
+    def test_dataset_contract_checks_explicit_rules_without_storing_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "contract.csv"
+            source.write_text(
+                "id,amount,note,label\n"
+                "1,10,ok,raw-secret-alpha\n"
+                "2,100,,raw-secret-beta\n"
+                "3,oops,present,raw-secret-gamma\n",
+                encoding="utf-8",
+            )
+            original = source.read_bytes()
+            company = Company(root / "state", MockModel())
+            company.create_project("Contract Lab")
+            dataset_id, brief, profile = company.profile_dataset(
+                source,
+                "Contract Lab",
+                required_columns=["id", "note", "absent_required"],
+                allowed_type_rules=[
+                    ("amount", "numeric"),
+                    ("label", "string"),
+                    ("absent_typed", "string"),
+                ],
+                numeric_minimum_rules=[("amount", "0"), ("absent_numeric", "0")],
+                numeric_maximum_rules=[("amount", "50")],
+            )
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(profile["schema"], "local-company.dataset-profile.v3")
+            contract = profile["contract_check"]
+            self.assertEqual(contract["schema"], "local-company.dataset-contract.v1")
+            self.assertEqual(contract["status"], "violations")
+            self.assertTrue(contract["source_rows_complete"])
+            self.assertEqual(contract["rule_count"], 8)
+            self.assertEqual(contract["failed_rules"], 6)
+            self.assertEqual(contract["required"][1]["missing_rows"], 1)
+            self.assertEqual(contract["required"][1]["missing_rate"], 0.333333)
+            self.assertFalse(contract["required"][2]["column_present"])
+            self.assertEqual(contract["required"][2]["missing_rows"], 3)
+            self.assertEqual(contract["types"][0]["checked_non_missing_rows"], 3)
+            self.assertEqual(contract["types"][0]["unexpected_type_rows"], 1)
+            self.assertEqual(contract["types"][0]["unexpected_type_rate"], 0.333333)
+            self.assertFalse(contract["types"][2]["column_present"])
+            amount_range = contract["numeric_ranges"][0]
+            self.assertEqual(amount_range["checked_finite_rows"], 2)
+            self.assertEqual(amount_range["uncheckable_non_missing_rows"], 1)
+            self.assertEqual(amount_range["below_minimum_rows"], 0)
+            self.assertEqual(amount_range["above_maximum_rows"], 1)
+            self.assertEqual(amount_range["violation_rows"], 2)
+            self.assertEqual(amount_range["violation_rate"], 0.666667)
+            self.assertFalse(contract["numeric_ranges"][1]["column_present"])
+            serialized_profile = json.dumps(profile, allow_nan=False)
+            self.assertNotIn("raw-secret", serialized_profile)
+            brief_text = brief.read_text(encoding="utf-8")
+            self.assertIn("Declared contract: violations", brief_text)
+            self.assertIn("Failed rules: 6", brief_text)
+            self.assertIn("uncheckable_non_missing=1", brief_text)
+            self.assertNotIn("raw-secret", brief_text)
+
+            overview = next(
+                item for item in company.dataset_quality_items() if item["id"] == dataset_id
+            )
+            self.assertEqual(overview["contract_status"], "violations")
+            self.assertEqual(overview["quality_status"], "review")
+            detail_payload = company.dataset_quality_detail(dataset_id)
+            serialized_detail = json.dumps(detail_payload)
+            self.assertNotIn(str(source), serialized_detail)
+            self.assertNotIn("raw-secret", serialized_detail)
+            detail_page = render_dataset_quality_detail(company, dataset_id)
+            self.assertIn("Declared dataset contract", detail_page)
+            self.assertIn("Required columns", detail_page)
+            self.assertIn("Finite numeric ranges", detail_page)
+            self.assertIn("violations", detail_page)
+            self.assertNotIn(str(source), detail_page)
+            self.assertNotIn("raw-secret", detail_page)
+
+            clean_source = root / "clean.json"
+            clean_source.write_text(
+                '[{"id": 1, "amount": 10}, {"id": 2, "amount": 20}]',
+                encoding="utf-8",
+            )
+            clean_id, _, clean_profile = company.profile_dataset(
+                clean_source,
+                "Contract Lab",
+                required_columns=["id"],
+                allowed_type_rules=[("amount", "numeric")],
+                numeric_minimum_rules=[("amount", 0)],
+                numeric_maximum_rules=[("amount", "20.0000000000004")],
+            )
+            self.assertEqual(clean_profile["contract_check"]["status"], "conforms")
+            self.assertEqual(clean_profile["contract_check"]["failed_rules"], 0)
+            self.assertEqual(
+                clean_profile["contract_check"]["numeric_ranges"][0]["maximum"],
+                20.0000000000004,
+            )
+            clean_overview = next(
+                item for item in company.dataset_quality_items() if item["id"] == clean_id
+            )
+            self.assertEqual(clean_overview["contract_status"], "conforms")
+
+            corrupted_profile = json.loads(json.dumps(profile))
+            corrupted_profile["contract_check"]["required"][0]["column_present"] = False
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE datasets SET profile_json=? WHERE id=?",
+                    (json.dumps(corrupted_profile), dataset_id),
+                )
+            corrupted = next(
+                item for item in company.dataset_quality_items() if item["id"] == dataset_id
+            )
+            self.assertEqual(corrupted["profile_status"], "unavailable")
+
+    def test_dataset_contract_labels_clean_truncated_data_as_profiled_rows_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "truncated.csv"
+            source.write_text(
+                "id\n" + "".join(f"{index}\n" for index in range(10_001)),
+                encoding="utf-8",
+            )
+            company = Company(root / "state", MockModel())
+            company.create_project("Truncated Contract Lab")
+
+            dataset_id, _, profile = company.profile_dataset(
+                source,
+                "Truncated Contract Lab",
+                required_columns=["id"],
+                allowed_type_rules=[("id", "integer")],
+                numeric_minimum_rules=[("id", 0)],
+            )
+
+            contract = profile["contract_check"]
+            self.assertEqual(profile["profiled_rows"], 10_000)
+            self.assertTrue(profile["quality_flags"]["truncated"])
+            self.assertFalse(contract["source_rows_complete"])
+            self.assertEqual(contract["status"], "conforms_profiled_rows")
+            self.assertEqual(contract["failed_rules"], 0)
+            overview = next(
+                item for item in company.dataset_quality_items() if item["id"] == dataset_id
+            )
+            self.assertEqual(overview["contract_status"], "conforms profiled rows")
+
+    def test_dataset_contract_declarations_fail_closed_before_source_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rules.csv"
+            source.write_text("id,amount\n1,5\n", encoding="utf-8")
+            original = source.read_bytes()
+            company = Company(root / "state", MockModel())
+            company.create_project("Rules Lab")
+            cases = (
+                ({"required_columns": ["id", "id"]}, "required-column declarations"),
+                ({"allowed_type_rules": [("id", "mystery")]}, "type must be one of"),
+                ({
+                    "allowed_type_rules": [("id", "numeric"), ("id", "numeric")],
+                }, "type declarations must be unique"),
+                ({"numeric_minimum_rules": [("amount", "NaN")]}, "finite numbers"),
+                ({
+                    "numeric_minimum_rules": [("amount", 10)],
+                    "numeric_maximum_rules": [("amount", 1)],
+                }, "minimum exceeds maximum"),
+                ({"allowed_type_rules": [("id",)]}, "require COLUMN and VALUE"),
+                ({
+                    "required_columns": [f"column-{index}" for index in range(65)],
+                }, "at most 64 columns"),
+                ({
+                    "required_columns": [f"column-{index}" for index in range(257)],
+                }, "at most 256 declarations"),
+            )
+            for kwargs, message in cases:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(ValueError, message):
+                        company.profile_dataset(source, "Rules Lab", **kwargs)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(company.dataset_items(), [])
+
+    def test_dataset_contract_cli_flags_are_repeatable_and_persist_aggregates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            source = root / "cli-contract.csv"
+            source.write_text("id,amount,note\n1,10,ok\n2,20,\n", encoding="utf-8")
+            original = source.read_bytes()
+            Company(state, MockModel()).create_project("CLI Contract Lab")
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "datasets", "add",
+                    str(source), "--project", "CLI Contract Lab",
+                    "--required", "id", "--required", "note",
+                    "--type", "amount", "numeric",
+                    "--min", "amount", "0", "--max", "amount", "15",
+                ],
+            ), patch("sys.stdout", output):
+                exit_code = cli_main()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Contract: violations, failed_rules=2", output.getvalue())
+            self.assertIn("Source was read-only", output.getvalue())
+            self.assertEqual(source.read_bytes(), original)
+            company = Company(state, MockModel())
+            dataset_id = company.dataset_items()[0][0]
+            contract = company.dataset_detail(dataset_id)["profile"]["contract_check"]
+            self.assertEqual(contract["rule_count"], 4)
+            self.assertEqual(contract["failed_rules"], 2)
+            self.assertEqual(contract["required"][1]["missing_rows"], 1)
+            self.assertEqual(contract["numeric_ranges"][0]["above_maximum_rows"], 1)
 
     def test_quality_rejects_model_length_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:

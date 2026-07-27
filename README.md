@@ -303,7 +303,12 @@ modifying the source:
   --project "Yangon Tyre" `
   --allow-root "C:\approved-data" `
   --sheet "Sales" `
-  --key "invoice_id"
+  --key "invoice_id" `
+  --required "invoice_id" `
+  --required "amount" `
+  --type "amount" "numeric" `
+  --min "amount" "0" `
+  --max "amount" "100000"
 .\local-company.cmd datasets list --project "Yangon Tyre"
 ```
 
@@ -319,9 +324,25 @@ statistics, not copied source rows. Profiles include missing and uniqueness
 rates, exact-duplicate impact, compact numeric min/quartile/median/max/mean,
 zero/negative rates, and IQR outlier counts. Repeat `--key` for a composite key
 to measure declared-grain completeness and uniqueness without storing key
-values. Business keys, required fields, units, date semantics, validity rules,
-and freshness limits are never guessed. `--allow-root` is optional but available
-as the same containment check for CSV and JSON; `--sheet` is XLSX-only.
+values.
+
+Dataset contracts are owner-declared on each profiling command. Repeat
+`--required COLUMN` to require presence and no missing rows; repeat
+`--type COLUMN TYPE` to allow multiple non-missing types (`array`, `boolean`,
+`integer`, `number`, `numeric`, `object`, or `string`). `numeric` accepts both
+integer and number observations. `--min COLUMN VALUE` and `--max COLUMN VALUE`
+set inclusive finite numeric bounds. Missing values are checked only by
+`--required`; non-missing values that cannot be checked as finite numbers count
+as range violations. An absent declared column is a violation. A clean check on
+a source capped at 10,000 profiled rows is labeled `conforms_profiled_rows`, not
+full-source conformance. Reprofiling the same source replaces its prior declared
+contract with the flags supplied on that command.
+
+Contract storage and the private dashboard contain declared column names,
+types, bounds, counts, rates, and results only—never source row values. Business
+keys, units, date semantics, allowed values, severity, freshness limits, and
+fitness for use are never guessed. `--allow-root` is optional but available as
+the same containment check for CSV and JSON; `--sheet` is XLSX-only.
 
 All runtime data stays under `.local-company` by default:
 

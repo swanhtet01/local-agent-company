@@ -142,6 +142,39 @@ def parser() -> argparse.ArgumentParser:
         dest="key_columns",
         help="Declare one key column for completeness/uniqueness checks; repeat for a composite key",
     )
+    dataset_add.add_argument(
+        "--required",
+        action="append",
+        dest="required_columns",
+        help="Require one column to exist with no missing rows; repeat for more columns",
+    )
+    dataset_add.add_argument(
+        "--type",
+        action="append",
+        nargs=2,
+        metavar=("COLUMN", "TYPE"),
+        dest="allowed_type_rules",
+        help=(
+            "Allow one non-missing profile type for a column; repeat to allow more. "
+            "Use numeric for integer or number"
+        ),
+    )
+    dataset_add.add_argument(
+        "--min",
+        action="append",
+        nargs=2,
+        metavar=("COLUMN", "VALUE"),
+        dest="numeric_minimum_rules",
+        help="Declare an inclusive finite numeric minimum; repeat by column",
+    )
+    dataset_add.add_argument(
+        "--max",
+        action="append",
+        nargs=2,
+        metavar=("COLUMN", "VALUE"),
+        dest="numeric_maximum_rules",
+        help="Declare an inclusive finite numeric maximum; repeat by column",
+    )
     dataset_list = dataset_sub.add_parser("list", help="List profiled datasets")
     dataset_list.add_argument("--project")
     dataset_show = dataset_sub.add_parser("show", help="Show one statistical profile")
@@ -340,9 +373,15 @@ def main() -> int:
                     allowed_root=args.allow_root,
                     sheet=args.sheet,
                     key_columns=args.key_columns,
+                    required_columns=args.required_columns,
+                    allowed_type_rules=args.allowed_type_rules,
+                    numeric_minimum_rules=args.numeric_minimum_rules,
+                    numeric_maximum_rules=args.numeric_maximum_rules,
                 )
                 print(
                     f"Dataset {dataset_id}: rows={profile['profiled_rows']}, columns={profile['column_count']}\n"
+                    f"Contract: {profile['contract_check']['status']}, "
+                    f"failed_rules={profile['contract_check']['failed_rules']}\n"
                     f"Brief: {brief_path}\nSource was read-only."
                 )
             elif args.dataset_command == "list":

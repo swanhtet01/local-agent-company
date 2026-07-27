@@ -357,14 +357,24 @@ def render_dashboard(
             return f'<span class="review">review ({cell(signal_count)} signal categories)</span>'
         return '<span class="clear">no deterministic flags</span>'
 
+    def dataset_contract_label(item: dict[str, object]) -> str:
+        status = str(item.get("contract_status", "unavailable"))
+        css = (
+            "review" if status == "violations" else
+            "clear" if status in {"conforms", "conforms profiled rows"} else
+            "unavailable" if status == "unavailable" else ""
+        )
+        return f'<span class="{css}">{cell(status)}</span>'
+
     dataset_rows = "".join(
         f'<tr><td><a href="/datasets/{cell(item["id"])}"><code>{cell(item["id"])}</code></a></td>'
         f'<td>{cell(item["project"])}</td><td>{cell(item["format"])}</td>'
         f'<td>{cell(item["row_count"])}</td><td>{cell(item["column_count"])}</td>'
         f'<td>{dataset_quality_label(item)}</td><td>{cell(item["key_status"])}</td>'
+        f'<td>{dataset_contract_label(item)}</td>'
         f'<td>{cell(item["added_at"])}</td></tr>'
         for item in snapshot["datasets"][:30]
-    ) or '<tr><td colspan="8" class="empty">No datasets</td></tr>'
+    ) or '<tr><td colspan="9" class="empty">No datasets</td></tr>'
     approval_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[2])}</td><td>{cell(row[4])}</td></tr>"
         for row in snapshot["pending_approvals"]
@@ -444,7 +454,7 @@ def render_dashboard(
         f'{cell("unknown" if live_build.get("source_dirty") is None else live_build.get("source_dirty"))}</p>'
         '<p class="hint">Captured at service startup. Use the local live-build checker '
         'after a release to detect whether a restart is required. Compact build status: '
-        '<a href="/build-status.json">build-status.json</a>; raw health: '
+        '<a href="/build-status.json">build-status.json</a>; bounded health: '
         '<a href="/health.json">health.json</a>.</p></section>'
     )
 
@@ -493,7 +503,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 </div>
 <section><h2>Mission queue</h2><table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
-<section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Flags are deterministic screening signals, not business-validity claims.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
+<section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Only explicitly declared contract rules are treated as business checks.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Contract</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>
 <section><h2>Projects</h2><table><thead><tr><th>ID</th><th>Name</th><th>Missions</th></tr></thead><tbody>{project_rows}</tbody></table></section>
 <section><h2>Approval inbox</h2><table><thead><tr><th>ID</th><th>Category</th><th>Proposed action</th></tr></thead><tbody>{approval_rows}</tbody></table></section>
@@ -621,6 +631,79 @@ def render_dataset_quality_detail(company: Company, dataset_id: str) -> str:
                 '<p class="warning">No key was declared, so this profile makes no primary-key '
                 'completeness or uniqueness claim.</p>'
             )
+        contract_check = (
+            profile.get("contract_check")
+            if isinstance(profile.get("contract_check"), dict) else {}
+        )
+        if contract_check.get("configured") is True:
+            contract_sections: list[str] = []
+            required = contract_check.get("required", [])
+            if required:
+                required_rows = "".join(
+                    f'<tr><td><code>{cell(item.get("column", ""))}</code></td>'
+                    f'<td>{"yes" if item.get("column_present") is True else "no"}</td>'
+                    f'<td>{count(item.get("missing_rows"))} '
+                    f'({rate(item.get("missing_rate"))})</td>'
+                    f'<td>{"conforms" if item.get("passed") is True else "violation"}</td></tr>'
+                    for item in required if isinstance(item, dict)
+                )
+                contract_sections.append(
+                    '<h3>Required columns</h3><table><thead><tr><th>Column</th>'
+                    '<th>Present</th><th>Missing rows</th><th>Result</th></tr></thead>'
+                    f'<tbody>{required_rows}</tbody></table>'
+                )
+            type_checks = contract_check.get("types", [])
+            if type_checks:
+                type_rows = "".join(
+                    f'<tr><td><code>{cell(item.get("column", ""))}</code></td>'
+                    f'<td>{"yes" if item.get("column_present") is True else "no"}</td>'
+                    f'<td>{names(item.get("allowed_types"), 8)}</td>'
+                    f'<td>{count(item.get("checked_non_missing_rows"))}</td>'
+                    f'<td>{count(item.get("unexpected_type_rows"))} '
+                    f'({rate(item.get("unexpected_type_rate"))})</td>'
+                    f'<td>{"conforms" if item.get("passed") is True else "violation"}</td></tr>'
+                    for item in type_checks if isinstance(item, dict)
+                )
+                contract_sections.append(
+                    '<h3>Allowed types</h3><table><thead><tr><th>Column</th>'
+                    '<th>Present</th><th>Allowed</th><th>Checked non-missing</th>'
+                    '<th>Unexpected</th><th>Result</th></tr></thead>'
+                    f'<tbody>{type_rows}</tbody></table>'
+                )
+            ranges = contract_check.get("numeric_ranges", [])
+            if ranges:
+                range_rows = "".join(
+                    f'<tr><td><code>{cell(item.get("column", ""))}</code></td>'
+                    f'<td>{"yes" if item.get("column_present") is True else "no"}</td>'
+                    f'<td>{number(item.get("minimum"))} to {number(item.get("maximum"))}</td>'
+                    f'<td>{count(item.get("checked_finite_rows"))}</td>'
+                    f'<td>{count(item.get("uncheckable_non_missing_rows"))}</td>'
+                    f'<td>{count(item.get("below_minimum_rows"))} / '
+                    f'{count(item.get("above_maximum_rows"))}</td>'
+                    f'<td>{count(item.get("violation_rows"))} '
+                    f'({rate(item.get("violation_rate"))})</td>'
+                    f'<td>{"conforms" if item.get("passed") is True else "violation"}</td></tr>'
+                    for item in ranges if isinstance(item, dict)
+                )
+                contract_sections.append(
+                    '<h3>Finite numeric ranges</h3><table><thead><tr><th>Column</th>'
+                    '<th>Present</th><th>Inclusive bounds</th><th>Checked finite</th>'
+                    '<th>Uncheckable</th><th>Below / above</th><th>Violations</th>'
+                    f'<th>Result</th></tr></thead><tbody>{range_rows}</tbody></table>'
+                )
+            contract_html = (
+                f'<p><strong>Status:</strong> {cell(contract_check.get("status", "unavailable"))} '
+                f'&middot; Rules: {count(contract_check.get("rule_count"))} '
+                f'&middot; Failed: {count(contract_check.get("failed_rules"))} '
+                f'&middot; Full source rows: '
+                f'{"yes" if contract_check.get("source_rows_complete") is True else "no"}</p>'
+                + "".join(contract_sections)
+            )
+        else:
+            contract_html = (
+                '<p class="warning">No contract was declared, so this profile makes no '
+                'required-column, allowed-type, or numeric-range conformance claim.</p>'
+            )
         sheet_html = (
             f' &middot; Sheet: <code>{cell(profile["sheet"])}</code>'
             if isinstance(profile.get("sheet"), str) else ""
@@ -632,6 +715,7 @@ Grain assumption: {cell(profile.get('grain_assumption', 'not recorded'))}</p></s
 <section><h2>Deterministic quality flags</h2>
 <table><thead><tr><th>Signal</th><th>Aggregate result</th></tr></thead><tbody>{quality_rows}</tbody></table></section>
 <section><h2>Declared key check</h2>{key_html}</section>
+<section><h2>Declared dataset contract</h2>{contract_html}</section>
 <section><h2>Column aggregates</h2>{omitted_html}
 <table><thead><tr><th>Column</th><th>Types</th><th>Missing</th><th>Distinct non-missing</th>
 <th>Mixed</th><th>Non-finite / excluded</th><th>Finite numeric summary</th></tr></thead>
@@ -654,8 +738,8 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ overflow
 <p class="meta">Project: {cell(detail['project'])} &middot; Format: {cell(detail['format'])} &middot;
 Rows: {count(detail['row_count'])} &middot; Columns: {count(detail['column_count'])} &middot;
 Profiled UTC: {cell(detail['added_at'])}<br>Source SHA-256: <code>{cell(detail['sha256'], 80)}</code></p>
-<p class="{quality_class}"><strong>Screening status:</strong> {cell(quality_status)}; declared key: {cell(detail.get('key_status', 'unavailable'))}.</p>
-<p class="warning">This localhost page displays stored aggregate statistics only. It withholds source and brief paths and never displays source row values. Business rules, required fields, dates, units, freshness, and fitness for use still require an owner-defined review.</p>
+<p class="{quality_class}"><strong>Screening status:</strong> {cell(quality_status)}; declared key: {cell(detail.get('key_status', 'unavailable'))}; contract: {cell(detail.get('contract_status', 'unavailable'))}.</p>
+<p class="warning">This localhost page displays stored aggregate statistics only. It withholds source and brief paths and never displays source row values. Only declared key and contract rules are checked; dates, units, allowed values, severity, freshness, and fitness for use still require owner definitions.</p>
 {profile_html}</body></html>"""
 
 

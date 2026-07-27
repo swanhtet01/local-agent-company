@@ -116,7 +116,14 @@ EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.13"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
-DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v2"
+DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v3"
+LEGACY_DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v2"
+DATASET_CONTRACT_SCHEMA = "local-company.dataset-contract.v1"
+DATASET_CONTRACT_TYPES = frozenset({
+    "array", "boolean", "integer", "number", "numeric", "object", "string",
+})
+MAX_DATASET_CONTRACT_COLUMNS = 64
+MAX_DATASET_CONTRACT_DECLARATIONS = 256
 
 
 def count_words(text: str) -> int:
@@ -2459,6 +2466,239 @@ class Company:
             "iqr_outlier_rate": cls._profile_rate(outliers, count),
         }
 
+    @staticmethod
+    def _dataset_contract_column(value: object) -> str:
+        column = str(value).strip()
+        if (
+            not column
+            or len(column) > 256
+            or any(ord(character) < 32 for character in column)
+        ):
+            raise ValueError("Dataset contract columns must be non-empty names")
+        return column
+
+    @classmethod
+    def _normalize_dataset_contract(
+        cls,
+        required_columns: list[str] | None,
+        allowed_type_rules: list[tuple[object, object]] | None,
+        numeric_minimum_rules: list[tuple[object, object]] | None,
+        numeric_maximum_rules: list[tuple[object, object]] | None,
+    ) -> dict[str, object]:
+        required_inputs = list(required_columns or [])
+        type_inputs = list(allowed_type_rules or [])
+        minimum_inputs = list(numeric_minimum_rules or [])
+        maximum_inputs = list(numeric_maximum_rules or [])
+        if sum(map(len, (required_inputs, type_inputs, minimum_inputs, maximum_inputs))) > (
+            MAX_DATASET_CONTRACT_DECLARATIONS
+        ):
+            raise ValueError(
+                f"Dataset contracts support at most {MAX_DATASET_CONTRACT_DECLARATIONS} declarations"
+            )
+
+        required: list[str] = []
+        required_seen: set[str] = set()
+        for raw_column in required_inputs:
+            column = cls._dataset_contract_column(raw_column)
+            if column in required_seen:
+                raise ValueError("Dataset required-column declarations must be unique")
+            required_seen.add(column)
+            required.append(column)
+
+        def pair(rule: object, label: str) -> tuple[object, object]:
+            if not isinstance(rule, (list, tuple)) or len(rule) != 2:
+                raise ValueError(f"Dataset {label} declarations require COLUMN and VALUE")
+            return rule[0], rule[1]
+
+        allowed_types: dict[str, set[str]] = {}
+        for raw_rule in type_inputs:
+            raw_column, raw_type = pair(raw_rule, "type")
+            column = cls._dataset_contract_column(raw_column)
+            value_type = str(raw_type).strip().lower()
+            if value_type not in DATASET_CONTRACT_TYPES:
+                raise ValueError(
+                    "Dataset contract type must be one of: "
+                    + ", ".join(sorted(DATASET_CONTRACT_TYPES))
+                )
+            column_types = allowed_types.setdefault(column, set())
+            if value_type in column_types:
+                raise ValueError("Dataset type declarations must be unique")
+            column_types.add(value_type)
+
+        def numeric_limit(raw_value: object) -> int | float:
+            if isinstance(raw_value, bool):
+                raise ValueError("Dataset numeric bounds must be finite numbers")
+            try:
+                value = float(str(raw_value).strip())
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise ValueError("Dataset numeric bounds must be finite numbers") from exc
+            if not math.isfinite(value):
+                raise ValueError("Dataset numeric bounds must be finite numbers")
+            if value == 0:
+                return 0
+            if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+                return int(value)
+            return value
+
+        minimums: dict[str, int | float] = {}
+        for raw_rule in minimum_inputs:
+            raw_column, raw_value = pair(raw_rule, "minimum")
+            column = cls._dataset_contract_column(raw_column)
+            if column in minimums:
+                raise ValueError("Dataset minimum declarations must be unique by column")
+            minimums[column] = numeric_limit(raw_value)
+
+        maximums: dict[str, int | float] = {}
+        for raw_rule in maximum_inputs:
+            raw_column, raw_value = pair(raw_rule, "maximum")
+            column = cls._dataset_contract_column(raw_column)
+            if column in maximums:
+                raise ValueError("Dataset maximum declarations must be unique by column")
+            maximums[column] = numeric_limit(raw_value)
+
+        range_columns = list(minimums)
+        range_columns.extend(column for column in maximums if column not in minimums)
+        numeric_ranges: dict[str, dict[str, int | float | None]] = {}
+        for column in range_columns:
+            minimum = minimums.get(column)
+            maximum = maximums.get(column)
+            if (
+                minimum is not None
+                and maximum is not None
+                and float(minimum) > float(maximum)
+            ):
+                raise ValueError(
+                    f"Dataset numeric minimum exceeds maximum for column: {column}"
+                )
+            numeric_ranges[column] = {"minimum": minimum, "maximum": maximum}
+
+        contract_columns = set(required) | set(allowed_types) | set(numeric_ranges)
+        if len(contract_columns) > MAX_DATASET_CONTRACT_COLUMNS:
+            raise ValueError(
+                f"Dataset contracts support at most {MAX_DATASET_CONTRACT_COLUMNS} columns"
+            )
+        return {
+            "required_columns": required,
+            "allowed_types": {
+                column: sorted(types) for column, types in allowed_types.items()
+            },
+            "numeric_ranges": numeric_ranges,
+        }
+
+    @classmethod
+    def _evaluate_dataset_contract(
+        cls,
+        rows: list[dict[str, object]],
+        columns: set[str],
+        contract: dict[str, object],
+        *,
+        truncated: bool,
+    ) -> dict[str, object]:
+        required_columns = list(contract["required_columns"])
+        allowed_types = dict(contract["allowed_types"])
+        numeric_ranges = dict(contract["numeric_ranges"])
+        configured = bool(required_columns or allowed_types or numeric_ranges)
+        row_count = len(rows)
+
+        required_results: list[dict[str, object]] = []
+        for column in required_columns:
+            present = column in columns
+            missing = (
+                sum(cls._profile_value_type(row.get(column)) == "missing" for row in rows)
+                if present else row_count
+            )
+            required_results.append({
+                "column": column,
+                "column_present": present,
+                "missing_rows": missing,
+                "missing_rate": cls._profile_rate(missing, row_count),
+                "passed": present and missing == 0,
+            })
+
+        type_results: list[dict[str, object]] = []
+        for column, declared_types in allowed_types.items():
+            present = column in columns
+            allowed = set(declared_types)
+            checked = 0
+            unexpected = 0
+            if present:
+                for row in rows:
+                    value_type = cls._profile_value_type(row.get(column))
+                    if value_type == "missing":
+                        continue
+                    checked += 1
+                    accepted = value_type in allowed or (
+                        "numeric" in allowed and value_type in {"integer", "number"}
+                    )
+                    unexpected += int(not accepted)
+            type_results.append({
+                "column": column,
+                "column_present": present,
+                "allowed_types": list(declared_types),
+                "checked_non_missing_rows": checked,
+                "unexpected_type_rows": unexpected,
+                "unexpected_type_rate": cls._profile_rate(unexpected, checked),
+                "passed": present and unexpected == 0,
+            })
+
+        range_results: list[dict[str, object]] = []
+        for column, bounds in numeric_ranges.items():
+            present = column in columns
+            minimum = bounds["minimum"]
+            maximum = bounds["maximum"]
+            non_missing = 0
+            checked = 0
+            uncheckable = 0
+            below = 0
+            above = 0
+            if present:
+                for row in rows:
+                    value = row.get(column)
+                    if cls._profile_value_type(value) == "missing":
+                        continue
+                    non_missing += 1
+                    numeric = cls._finite_numeric_value(value)
+                    if numeric is None:
+                        uncheckable += 1
+                        continue
+                    checked += 1
+                    below += int(minimum is not None and numeric < float(minimum))
+                    above += int(maximum is not None and numeric > float(maximum))
+            violations = uncheckable + below + above
+            range_results.append({
+                "column": column,
+                "column_present": present,
+                "minimum": minimum,
+                "maximum": maximum,
+                "non_missing_rows": non_missing,
+                "checked_finite_rows": checked,
+                "uncheckable_non_missing_rows": uncheckable,
+                "below_minimum_rows": below,
+                "above_maximum_rows": above,
+                "violation_rows": violations,
+                "violation_rate": cls._profile_rate(violations, non_missing),
+                "passed": present and violations == 0,
+            })
+
+        results = required_results + type_results + range_results
+        failed = sum(item["passed"] is not True for item in results)
+        status = "not_configured"
+        if configured:
+            status = "violations" if failed else (
+                "conforms_profiled_rows" if truncated else "conforms"
+            )
+        return {
+            "schema": DATASET_CONTRACT_SCHEMA,
+            "configured": configured,
+            "source_rows_complete": not truncated,
+            "status": status,
+            "rule_count": len(results),
+            "failed_rules": failed,
+            "required": required_results,
+            "types": type_results,
+            "numeric_ranges": range_results,
+        }
+
     def profile_dataset(
         self,
         source: Path,
@@ -2467,6 +2707,10 @@ class Company:
         allowed_root: Path | None = None,
         sheet: str | None = None,
         key_columns: list[str] | None = None,
+        required_columns: list[str] | None = None,
+        allowed_type_rules: list[tuple[object, object]] | None = None,
+        numeric_minimum_rules: list[tuple[object, object]] | None = None,
+        numeric_maximum_rules: list[tuple[object, object]] | None = None,
     ) -> tuple[str, Path, dict[str, object]]:
         self.initialize()
         project_id, project_name = self._resolve_project(project)
@@ -2483,6 +2727,12 @@ class Company:
             normalized_keys.append(key)
         if len(normalized_keys) > 8:
             raise ValueError("Dataset key checks support at most 8 columns")
+        contract = self._normalize_dataset_contract(
+            required_columns,
+            allowed_type_rules,
+            numeric_minimum_rules,
+            numeric_maximum_rules,
+        )
         suffix = source.suffix.lower()
         if suffix not in {".csv", ".json", ".xlsx"}:
             raise ValueError("Datasets must be CSV, JSON, or XLSX")
@@ -2607,6 +2857,9 @@ class Company:
                 "duplicate_values": len(duplicate_key_counts),
                 "duplicate_rows": sum(duplicate_key_counts),
             })
+        contract_check = self._evaluate_dataset_contract(
+            rows, set(columns), contract, truncated=truncated,
+        )
         canonical_rows = [json.dumps(row, sort_keys=True, ensure_ascii=False, default=str) for row in rows]
         canonical_row_counts: dict[str, int] = {}
         for canonical_row in canonical_rows:
@@ -2651,6 +2904,7 @@ class Company:
             "columns": column_profiles,
             "grain_assumption": "one parsed source record per profiled row",
             "key_check": key_check,
+            "contract_check": contract_check,
             "quality_flags": quality_flags,
         }
         if sheet_name is not None:
@@ -2681,6 +2935,7 @@ class Company:
             f"Columns: {len(columns)}",
             "Grain assumption: one parsed source record per profiled row",
             f"Declared key: {', '.join(normalized_keys) if normalized_keys else 'not configured'}",
+            f"Declared contract: {contract_check['status']}",
             "",
             "## Columns",
             "",
@@ -2712,6 +2967,44 @@ class Company:
             lines.append(
                 "- Not configured; no primary-key uniqueness or completeness claim was made."
             )
+        lines.extend(["", "## Declared contract checks", ""])
+        if contract_check["configured"]:
+            lines.extend([
+                f"- Status: {contract_check['status']}",
+                f"- Rules checked: {contract_check['rule_count']}",
+                f"- Failed rules: {contract_check['failed_rules']}",
+                f"- Source rows complete: {str(contract_check['source_rows_complete']).lower()}",
+            ])
+            for item in contract_check["required"]:
+                lines.append(
+                    f"- Required `{item['column']}`: present={str(item['column_present']).lower()}, "
+                    f"missing_rows={item['missing_rows']} "
+                    f"({float(item['missing_rate']):.2%}), passed={str(item['passed']).lower()}"
+                )
+            for item in contract_check["types"]:
+                lines.append(
+                    f"- Types `{item['column']}` allowed={','.join(item['allowed_types'])}: "
+                    f"checked_non_missing={item['checked_non_missing_rows']}, "
+                    f"unexpected={item['unexpected_type_rows']} "
+                    f"({float(item['unexpected_type_rate']):.2%}), "
+                    f"passed={str(item['passed']).lower()}"
+                )
+            for item in contract_check["numeric_ranges"]:
+                minimum = item["minimum"] if item["minimum"] is not None else "not set"
+                maximum = item["maximum"] if item["maximum"] is not None else "not set"
+                lines.append(
+                    f"- Numeric range `{item['column']}` min={minimum}, max={maximum}: "
+                    f"checked_finite={item['checked_finite_rows']}, "
+                    f"uncheckable_non_missing={item['uncheckable_non_missing_rows']}, "
+                    f"below={item['below_minimum_rows']}, above={item['above_maximum_rows']}, "
+                    f"violations={item['violation_rows']} "
+                    f"({float(item['violation_rate']):.2%}), "
+                    f"passed={str(item['passed']).lower()}"
+                )
+        else:
+            lines.append(
+                "- Not configured; no required-column, type, or numeric-range claim was made."
+            )
         lines.extend([
             "", "## Quality flags", "",
             f"- All-missing columns: {', '.join(quality_flags['all_missing_columns']) or 'none'}",
@@ -2732,7 +3025,7 @@ class Company:
         lines.extend([
             "",
             "This brief contains aggregate statistics only. It does not copy source rows or modify the source file.",
-            "Business validity rules, required fields, date semantics, units, and freshness thresholds are not inferred; configure and review them for the intended use.",
+            "Only explicitly declared required-column, type, numeric-range, and key rules are checked. Other business validity rules, date semantics, units, allowed values, severity, and freshness thresholds are not inferred.",
         ])
         brief_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         with closing(self._connect(immediate=True)) as db, db:
@@ -2778,6 +3071,7 @@ class Company:
             "missing_columns": None,
             "outlier_columns": None,
             "key_status": "unavailable",
+            "contract_status": "unavailable",
         }
         try:
             profile = json.loads(
@@ -2789,11 +3083,14 @@ class Company:
         columns = profile.get("columns") if isinstance(profile, dict) else None
         flags = profile.get("quality_flags") if isinstance(profile, dict) else None
         key_check = profile.get("key_check") if isinstance(profile, dict) else None
+        contract_check = profile.get("contract_check") if isinstance(profile, dict) else None
         if (
-            schema != DATASET_PROFILE_SCHEMA
+            schema not in {DATASET_PROFILE_SCHEMA, LEGACY_DATASET_PROFILE_SCHEMA}
             or not isinstance(columns, dict)
             or not isinstance(flags, dict)
             or not isinstance(key_check, dict)
+            or (schema == DATASET_PROFILE_SCHEMA and not isinstance(contract_check, dict))
+            or (contract_check is not None and not isinstance(contract_check, dict))
         ):
             return unavailable
 
@@ -2905,6 +3202,195 @@ class Company:
         ):
             return unavailable
 
+        contract_status = "not configured"
+        if contract_check is not None:
+            required_results = contract_check.get("required")
+            type_results = contract_check.get("types")
+            range_results = contract_check.get("numeric_ranges")
+            if (
+                contract_check.get("schema") != DATASET_CONTRACT_SCHEMA
+                or type(contract_check.get("configured")) is not bool
+                or type(contract_check.get("source_rows_complete")) is not bool
+                or contract_check.get("source_rows_complete") != (not flags["truncated"])
+                or not valid_count(contract_check.get("rule_count"))
+                or not valid_count(contract_check.get("failed_rules"))
+                or not isinstance(required_results, list)
+                or not isinstance(type_results, list)
+                or not isinstance(range_results, list)
+                or any(
+                    len(items) > MAX_DATASET_CONTRACT_COLUMNS
+                    for items in (required_results, type_results, range_results)
+                )
+                or contract_check["rule_count"] != (
+                    len(required_results) + len(type_results) + len(range_results)
+                )
+            ):
+                return unavailable
+
+            def valid_rule_column(item: object) -> bool:
+                return (
+                    isinstance(item, dict)
+                    and isinstance(item.get("column"), str)
+                    and 0 < len(item["column"]) <= 256
+                    and not any(ord(character) < 32 for character in item["column"])
+                    and type(item.get("column_present")) is bool
+                    and type(item.get("passed")) is bool
+                )
+
+            seen_required: set[str] = set()
+            for item in required_results:
+                if (
+                    not valid_rule_column(item)
+                    or item["column"] in seen_required
+                    or not valid_count(item.get("missing_rows"))
+                    or item["missing_rows"] > profile["profiled_rows"]
+                    or not valid_rate(item.get("missing_rate"))
+                    or item["missing_rate"] != cls._profile_rate(
+                        item["missing_rows"], profile["profiled_rows"],
+                    )
+                ):
+                    return unavailable
+                column_present = item["column"] in columns
+                expected_missing = (
+                    columns[item["column"]]["missing"]
+                    if column_present else profile["profiled_rows"]
+                )
+                if (
+                    item["column_present"] is not column_present
+                    or item["missing_rows"] != expected_missing
+                    or item["passed"] is not (column_present and expected_missing == 0)
+                ):
+                    return unavailable
+                seen_required.add(item["column"])
+
+            seen_types: set[str] = set()
+            for item in type_results:
+                allowed = item.get("allowed_types") if isinstance(item, dict) else None
+                if (
+                    not valid_rule_column(item)
+                    or item["column"] in seen_types
+                    or not isinstance(allowed, list)
+                    or not allowed
+                    or not all(
+                        isinstance(value, str) and value in DATASET_CONTRACT_TYPES
+                        for value in allowed
+                    )
+                    or len(allowed) != len(set(allowed))
+                    or allowed != sorted(allowed)
+                    or not valid_count(item.get("checked_non_missing_rows"))
+                    or item["checked_non_missing_rows"] > profile["profiled_rows"]
+                    or not valid_count(item.get("unexpected_type_rows"))
+                    or item["unexpected_type_rows"] > item["checked_non_missing_rows"]
+                    or not valid_rate(item.get("unexpected_type_rate"))
+                    or item["unexpected_type_rate"] != cls._profile_rate(
+                        item["unexpected_type_rows"], item["checked_non_missing_rows"],
+                    )
+                ):
+                    return unavailable
+                column_present = item["column"] in columns
+                column_types = (
+                    columns[item["column"]]["types"] if column_present else {}
+                )
+                expected_checked = sum(
+                    count for value_type, count in column_types.items()
+                    if value_type != "missing"
+                )
+                expected_unexpected = sum(
+                    count for value_type, count in column_types.items()
+                    if value_type != "missing"
+                    and value_type not in allowed
+                    and not (
+                        "numeric" in allowed
+                        and value_type in {"integer", "number"}
+                    )
+                )
+                if (
+                    item["column_present"] is not column_present
+                    or item["checked_non_missing_rows"] != expected_checked
+                    or item["unexpected_type_rows"] != expected_unexpected
+                    or item["passed"] is not (
+                        column_present and expected_unexpected == 0
+                    )
+                ):
+                    return unavailable
+                seen_types.add(item["column"])
+
+            seen_ranges: set[str] = set()
+            for item in range_results:
+                minimum = item.get("minimum") if isinstance(item, dict) else None
+                maximum = item.get("maximum") if isinstance(item, dict) else None
+                count_names = (
+                    "non_missing_rows", "checked_finite_rows",
+                    "uncheckable_non_missing_rows", "below_minimum_rows",
+                    "above_maximum_rows", "violation_rows",
+                )
+                if (
+                    not valid_rule_column(item)
+                    or item["column"] in seen_ranges
+                    or (minimum is None and maximum is None)
+                    or (minimum is not None and not valid_number(minimum))
+                    or (maximum is not None and not valid_number(maximum))
+                    or (
+                        minimum is not None
+                        and maximum is not None
+                        and float(minimum) > float(maximum)
+                    )
+                    or not all(valid_count(item.get(name)) for name in count_names)
+                    or item["non_missing_rows"] > profile["profiled_rows"]
+                    or item["checked_finite_rows"] + item["uncheckable_non_missing_rows"]
+                    != item["non_missing_rows"]
+                    or item["below_minimum_rows"] + item["above_maximum_rows"]
+                    > item["checked_finite_rows"]
+                    or item["violation_rows"] != (
+                        item["uncheckable_non_missing_rows"]
+                        + item["below_minimum_rows"]
+                        + item["above_maximum_rows"]
+                    )
+                    or not valid_rate(item.get("violation_rate"))
+                    or item["violation_rate"] != cls._profile_rate(
+                        item["violation_rows"], item["non_missing_rows"],
+                    )
+                ):
+                    return unavailable
+                column_present = item["column"] in columns
+                expected_non_missing = (
+                    profile["profiled_rows"] - columns[item["column"]]["missing"]
+                    if column_present else 0
+                )
+                if (
+                    item["column_present"] is not column_present
+                    or item["non_missing_rows"] != expected_non_missing
+                    or item["passed"] is not (
+                        column_present and item["violation_rows"] == 0
+                    )
+                    or (
+                        not column_present
+                        and any(item[name] != 0 for name in count_names)
+                    )
+                ):
+                    return unavailable
+                seen_ranges.add(item["column"])
+
+            if len(seen_required | seen_types | seen_ranges) > MAX_DATASET_CONTRACT_COLUMNS:
+                return unavailable
+
+            results = required_results + type_results + range_results
+            calculated_failed = sum(item["passed"] is not True for item in results)
+            configured = contract_check["configured"]
+            expected_status = "not_configured"
+            if configured:
+                expected_status = "violations" if calculated_failed else (
+                    "conforms_profiled_rows" if flags["truncated"] else "conforms"
+                )
+            if (
+                configured is bool(results)
+                and contract_check["failed_rules"] == calculated_failed
+                and contract_check.get("status") == expected_status
+            ):
+                contract_status = str(contract_check["status"]).replace("_", " ")
+            else:
+                return unavailable
+
         def positive_count(value: object) -> bool:
             return type(value) is int and value > 0
 
@@ -2933,6 +3419,7 @@ class Company:
         signals += int(flags.get("truncated") is True)
         signals += int(positive_count(flags.get("formula_cells_ignored")))
         signals += int(positive_count(flags.get("error_cells_ignored")))
+        signals += int(contract_check is not None and contract_check.get("status") == "violations")
 
         configured = key_check.get("configured") is True
         if configured:
@@ -2946,12 +3433,13 @@ class Company:
             key_status = "not configured"
         return {
             "profile_status": "ready",
-            "profile_schema": DATASET_PROFILE_SCHEMA,
+            "profile_schema": schema,
             "quality_status": "review" if signals else "no deterministic flags",
             "quality_signal_count": signals,
             "missing_columns": missing_columns,
             "outlier_columns": outlier_columns,
             "key_status": key_status,
+            "contract_status": contract_status,
         }
 
     def dataset_quality_items(self) -> list[dict[str, object]]:
@@ -3011,6 +3499,50 @@ class Company:
                     "key_check": parsed["key_check"],
                     "quality_flags": parsed["quality_flags"],
                 }
+                contract = parsed.get("contract_check")
+                if isinstance(contract, dict):
+                    profile["contract_check"] = {
+                        "schema": contract["schema"],
+                        "configured": contract["configured"],
+                        "source_rows_complete": contract["source_rows_complete"],
+                        "status": contract["status"],
+                        "rule_count": contract["rule_count"],
+                        "failed_rules": contract["failed_rules"],
+                        "required": [
+                            {
+                                key: item[key]
+                                for key in (
+                                    "column", "column_present", "missing_rows",
+                                    "missing_rate", "passed",
+                                )
+                            }
+                            for item in contract["required"]
+                        ],
+                        "types": [
+                            {
+                                key: item[key]
+                                for key in (
+                                    "column", "column_present", "allowed_types",
+                                    "checked_non_missing_rows", "unexpected_type_rows",
+                                    "unexpected_type_rate", "passed",
+                                )
+                            }
+                            for item in contract["types"]
+                        ],
+                        "numeric_ranges": [
+                            {
+                                key: item[key]
+                                for key in (
+                                    "column", "column_present", "minimum", "maximum",
+                                    "non_missing_rows", "checked_finite_rows",
+                                    "uncheckable_non_missing_rows", "below_minimum_rows",
+                                    "above_maximum_rows", "violation_rows",
+                                    "violation_rate", "passed",
+                                )
+                            }
+                            for item in contract["numeric_ranges"]
+                        ],
+                    }
                 if isinstance(parsed.get("sheet"), str):
                     profile["sheet"] = parsed["sheet"]
         return {
