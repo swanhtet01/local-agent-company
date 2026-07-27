@@ -327,7 +327,6 @@ class StructuredRepairModel(MockModel):
                 "Perform the bounded local analysis and save its output",
                 "Review evidence limitations quality checks and owner decisions",
             ],
-            "daily_review_cadence": "Inspect the local queue reports and failed gates each morning",
             "success_checks": ["Require one grounded report with every deterministic gate passing"],
             "failure_modes": ["Stop on stale sources malformed structure or unsupported claims"],
         }
@@ -357,6 +356,26 @@ class CompanyTests(unittest.TestCase):
             [("activation.md", "This is a local release gate, not hosted activation.")],
         )
         self.assertEqual(findings, [])
+        provenance = source_limitation_conflicts(
+            "CURRENT.md [EVIDENCE:aaaaaaaaaaaaaaaa] is verified as a frozen local source "
+            "for this brief.",
+            [(
+                "trial.md",
+                "Evidence-grounded briefs cannot claim unsupported facts or execute actions.",
+            )],
+            evidence_source_names={"aaaaaaaaaaaaaaaa": "CURRENT.md"},
+        )
+        self.assertEqual(provenance, [])
+        piggyback = source_limitation_conflicts(
+            "Telemetry is active and CURRENT.md [EVIDENCE:aaaaaaaaaaaaaaaa] is verified as a "
+            "frozen local source for this brief.",
+            [(
+                "activation.md",
+                "Telemetry is not active or connected in the current local evidence.",
+            )],
+            evidence_source_names={"aaaaaaaaaaaaaaaa": "CURRENT.md"},
+        )
+        self.assertTrue(piggyback)
 
     def test_default_local_runtime_releases_idle_model_memory(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -2382,6 +2401,172 @@ class CompanyTests(unittest.TestCase):
             self.assertFalse(evaluation["passed"])
             self.assertFalse(evaluation["checks"]["model_stopped_cleanly"])
 
+    def test_quality_fails_conservatively_on_malformed_incomplete_metric_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, _ = company.run("Plan inventory", roles=["operations"])
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                company._event(
+                    db, job_id, "specialist_draft_isolated",
+                    json.dumps({"role": "operations", "status": []}),
+                )
+                company._event(
+                    db, job_id, "model_metrics",
+                    json.dumps({"stage": [], "done_reason": "length"}),
+                )
+            evaluation = company.evaluate_job(job_id)
+            self.assertFalse(evaluation["passed"])
+            self.assertFalse(evaluation["checks"]["model_stopped_cleanly"])
+
+    def test_strict_quality_withholds_and_excludes_incomplete_specialist_draft(self):
+        class IncompleteSpecialistModel(MockModel):
+            def __init__(self):
+                self.last_metrics = {}
+
+            def complete(self, system, prompt):
+                self.last_metrics = {
+                    "done": True, "done_reason": "length", "output_tokens": 500,
+                }
+                return "Partial specialist text that must never enter trusted synthesis " * 20
+
+            def complete_structured(self, system, prompt, schema):
+                self.last_metrics = {
+                    "done": True, "done_reason": "stop", "output_tokens": 60,
+                }
+                return {
+                    "task_templates": [
+                        "Capture the objective frozen inputs and local owner gate",
+                        "Perform bounded analysis and preserve the local output",
+                        "Review evidence limitations checks and owner decisions",
+                    ],
+                    "success_checks": [
+                        "Require grounded output with every deterministic check passing"
+                    ],
+                    "failure_modes": [
+                        "Stop on stale inputs malformed structure or unsupported claims"
+                    ],
+                }
+
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Define three "
+            "reusable task templates, a daily review cadence, success checks, failure modes, and "
+            "owner gates. Every verified claim must name its exact source filename and matching "
+            "supplied evidence ID. Each specialist must use at most 90 words. Executive synthesis "
+            "at most 180 words and end with: Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Hosted activation remains pending owner review.", encoding="utf-8",
+            )
+            company = Company(root / "state", IncompleteSpecialistModel())
+            project = company.create_project("Incomplete Isolation")
+            company.add_knowledge(source, project)
+            job_id, _ = company.run(objective, roles=["operations"], project=project)
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                result = db.execute(
+                    "SELECT result FROM assignments WHERE job_id=?", (job_id,),
+                ).fetchone()[0]
+            self.assertIn("withheld after incomplete model output", result)
+            isolated = [
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "specialist_draft_isolated"
+            ]
+            self.assertEqual(isolated[0]["status"], "incomplete_withheld")
+
+    def test_strict_resume_rebinds_legacy_incomplete_specialist_draft(self):
+        class LegacyIncompleteModel(MockModel):
+            def __init__(self):
+                self.last_metrics = {}
+                self.fail_structured = True
+
+            def complete(self, system, prompt):
+                self.last_metrics = {
+                    "done": True, "done_reason": "length", "output_tokens": 500,
+                }
+                return "Legacy partial claim that must be withheld on recovery."
+
+            def complete_structured(self, system, prompt, schema):
+                self.last_metrics = {
+                    "done": True, "done_reason": "stop", "output_tokens": 60,
+                }
+                if self.fail_structured:
+                    raise RuntimeError("legacy structured interruption")
+                return {
+                    "task_templates": [
+                        "Capture the objective frozen inputs and local owner gate",
+                        "Perform bounded analysis and preserve the local output",
+                        "Review evidence limitations checks and owner decisions",
+                    ],
+                    "success_checks": [
+                        "Require grounded output with every deterministic check passing"
+                    ],
+                    "failure_modes": [
+                        "Stop on stale inputs malformed structure or unsupported claims"
+                    ],
+                }
+
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Define three "
+            "reusable task templates, a daily review cadence, success checks, failure modes, and "
+            "owner gates. Every verified claim must name its exact source filename and matching "
+            "supplied evidence ID. Each specialist must use at most 90 words. Executive synthesis "
+            "at most 180 words and end with: Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Hosted activation remains pending owner review.", encoding="utf-8",
+            )
+            model = LegacyIncompleteModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Legacy Incomplete Recovery")
+            company.add_knowledge(source, project)
+            with self.assertRaisesRegex(RuntimeError, "failed closed"):
+                company.run(objective, roles=["operations"], project=project)
+            job_id = company.jobs()[0][0]
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE assignments SET result=? WHERE job_id=? AND role='operations'",
+                    ("Legacy partial claim that must not survive resume.", job_id),
+                )
+                db.execute(
+                    "DELETE FROM events WHERE job_id=? AND kind='specialist_draft_isolated'",
+                    (job_id,),
+                )
+            model.fail_structured = False
+            resumed_id, _ = company.resume(job_id)
+            self.assertEqual(resumed_id, job_id)
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
+            with closing(sqlite3.connect(company.db_path)) as db:
+                result = db.execute(
+                    "SELECT result FROM assignments WHERE job_id=? AND role='operations'",
+                    (job_id,),
+                ).fetchone()[0]
+            self.assertEqual(
+                result,
+                "Not verified or performed: specialist draft withheld after incomplete model "
+                "output.",
+            )
+            isolated = [
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "specialist_draft_isolated"
+            ]
+            self.assertEqual(
+                isolated[-1], {"role": "operations", "status": "incomplete_withheld"},
+            )
+
     def test_quality_enforces_explicit_objective_constraints_and_claim_safety(self):
         objective = (
             "Define three task templates, a daily review cadence, success checks, failure modes, "
@@ -2626,10 +2811,10 @@ class CompanyTests(unittest.TestCase):
 
             def complete_structured(self, system, prompt, schema):
                 self.structured_prompts.append(prompt)
-                cadence = (
-                    "Review the local queue once every week"
+                success_check = (
+                    "Grounding passes"
                     if len(self.structured_prompts) == 1
-                    else "Review the local queue and failed gates each morning"
+                    else "Require grounded output with every deterministic check passing"
                 )
                 return {
                     "task_templates": [
@@ -2637,10 +2822,7 @@ class CompanyTests(unittest.TestCase):
                         "Perform bounded analysis and preserve the local output",
                         "Review evidence limitations checks and owner decisions",
                     ],
-                    "daily_review_cadence": cadence,
-                    "success_checks": [
-                        "Require grounded output with every deterministic check passing"
-                    ],
+                    "success_checks": [success_check],
                     "failure_modes": [
                         "Stop on stale inputs malformed structure or unsupported claims"
                     ],
@@ -2662,7 +2844,7 @@ class CompanyTests(unittest.TestCase):
 
             self.assertTrue(evaluation["passed"])
             self.assertEqual(len(model.structured_prompts), 2)
-            self.assertNotIn("once every week", model.structured_prompts[1])
+            self.assertNotIn("Grounding passes", model.structured_prompts[1])
             self.assertIn("Correction codes:", model.structured_prompts[1])
             self.assertIn(
                 "structured_synthesis_retry_scheduled",
@@ -2704,7 +2886,6 @@ class CompanyTests(unittest.TestCase):
                 "Perform bounded analysis and preserve the local output",
                 "Review evidence limitations checks and owner decisions",
             ],
-            "daily_review_cadence": "Inspect local queue reports and failed gates each morning",
             "success_checks": ["Require grounded output with every deterministic check passing"],
             "failure_modes": ["Stop on stale inputs malformed structure or unsupported claims"],
         }
@@ -2727,6 +2908,11 @@ class CompanyTests(unittest.TestCase):
         self.assertIn(
             "Owner gates: External sends, credentials, payments, browser actions, and "
             "deployment require owner approval.",
+            rendered,
+        )
+        self.assertIn(
+            "Daily review cadence: Review the local queue, failed gates, source freshness, "
+            "and owner decisions each morning.",
             rendered,
         )
         self.assertNotIn("until.", rendered)
@@ -2780,13 +2966,6 @@ class CompanyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             render_structured_synthesis(
                 duplicate, labels, 3, sources, "Use frozen evidence", 177,
-            )
-
-        weekly = json.loads(json.dumps(payload))
-        weekly["daily_review_cadence"] = "Review the local queue once every week"
-        with self.assertRaisesRegex(ValueError, "must explicitly be daily"):
-            render_structured_synthesis(
-                weekly, labels, 3, sources, "Use frozen evidence", 177,
             )
 
         unsafe_source = SourceHit(

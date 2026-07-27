@@ -104,7 +104,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.4"
+EVALUATOR_VERSION = "local-quality-2026-07-27.5"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.3"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 
@@ -237,8 +237,37 @@ def _grounding_terms(text: str) -> set[str]:
     return terms
 
 
+def _is_exact_frozen_source_metadata_claim(
+    claim: str, evidence_source_names: dict[str, str] | None,
+) -> bool:
+    """Recognize only the exact code-owned frozen-source provenance sentence."""
+    if not evidence_source_names:
+        return False
+    match = re.fullmatch(
+        r"(?:Verified facts:\s*)?"
+        r"(?P<source>[^\r\n\[\]]+?)\s+"
+        r"\[EVIDENCE:(?P<evidence_id>[0-9a-f]{16})\]\s+"
+        r"is verified as a frozen local source for this brief\.",
+        claim.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False
+    normalized_sources = {
+        evidence_id.casefold(): source_name
+        for evidence_id, source_name in evidence_source_names.items()
+        if isinstance(evidence_id, str) and isinstance(source_name, str)
+    }
+    expected_source = normalized_sources.get(match.group("evidence_id").casefold(), "")
+    return bool(
+        expected_source
+        and match.group("source").strip().casefold() == expected_source.casefold()
+    )
+
+
 def source_limitation_conflicts(
     model_output: str, source_documents: list[tuple[str, str]], limit: int = 5,
+    evidence_source_names: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Find completion claims that overlap explicit limitations in retrieved local evidence."""
     limitations: list[tuple[str, str, set[str]]] = []
@@ -256,6 +285,8 @@ def source_limitation_conflicts(
     for fragment in re.split(r"(?<=[.!?])\s+|[\r\n]+", model_output):
         claim = " ".join(fragment.split()).strip()
         semantic_claim = re.sub(r"\[EVIDENCE:[^\]]+\]", "", claim, flags=re.IGNORECASE)
+        if _is_exact_frozen_source_metadata_claim(claim, evidence_source_names):
+            continue
         if (
             not claim or not _COMPLETION_CLAIM_PATTERN.search(semantic_claim)
             or _LIMITATION_PATTERN.search(semantic_claim)
@@ -425,7 +456,9 @@ _STRICT_SECTION_FIELDS = {
     "Failure modes": "failure_modes",
     "Owner gates": "owner_gates",
 }
-_CODE_OWNED_STRUCTURED_LABELS = {"Verified facts", "Assumptions", "Owner gates"}
+_CODE_OWNED_STRUCTURED_LABELS = {
+    "Verified facts", "Assumptions", "Daily review cadence", "Owner gates",
+}
 _SENSITIVE_PROPOSAL_PATTERN = re.compile(
     r"\b(?:send|contact|notify|message|email|post)\b.{0,80}\b(?:reports?|results?|data|"
     r"details?|files?|documents?|credentials?|customers?|clients?|prospects?|leads?|"
@@ -715,6 +748,11 @@ def render_structured_synthesis(
         elif label == "Assumptions":
             content = (
                 "Current operational readiness and adoption remain unverified pending owner review."
+            )
+        elif label == "Daily review cadence":
+            content = (
+                "Review the local queue, failed gates, source freshness, and owner decisions each "
+                "morning."
             )
         elif label == "Owner gates":
             content = (
@@ -2577,12 +2615,17 @@ class Company:
             if job[0] != "complete":
                 raise ValueError("Only completed jobs can be evaluated")
             assignment_rows = list(db.execute(
-                "SELECT status, COALESCE(result, '') FROM assignments WHERE job_id=? ORDER BY sequence",
+                "SELECT role, status, COALESCE(result, '') FROM assignments "
+                "WHERE job_id=? ORDER BY sequence",
                 (job_id,),
             ))
-            assignment_statuses = [row[0] for row in assignment_rows]
+            assignment_statuses = [row[1] for row in assignment_rows]
             metric_details = [row[0] for row in db.execute(
                 "SELECT detail FROM events WHERE job_id=? AND kind='model_metrics'", (job_id,)
+            )]
+            isolation_details = [row[0] for row in db.execute(
+                "SELECT detail FROM events WHERE job_id=? AND kind='specialist_draft_isolated'",
+                (job_id,),
             )]
         report_bytes = b""
         report_path_local = False
@@ -2649,11 +2692,42 @@ class Company:
         parsed_metrics = []
         for detail in metric_details:
             try:
-                parsed_metrics.append(json.loads(detail))
+                metric = json.loads(detail)
             except json.JSONDecodeError:
                 continue
+            if isinstance(metric, dict):
+                parsed_metrics.append(metric)
+        isolated_event_roles: set[str] = set()
+        for detail in isolation_details:
+            try:
+                isolated = json.loads(detail)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(isolated, dict)
+                and isinstance(isolated.get("status"), str)
+                and isolated.get("status") in {
+                    "unverified_not_performed", "incomplete_withheld",
+                }
+                and isinstance(isolated.get("role"), str)
+            ):
+                isolated_event_roles.add(isolated["role"])
+        isolated_assignment_roles = {
+            role for role, status, result in assignment_rows
+            if status == "complete"
+            and result.startswith("Not verified or performed:")
+        }
+        safely_isolated_roles = isolated_event_roles & isolated_assignment_roles
+        relevant_metrics = [
+            metric for metric in parsed_metrics
+            if (
+                not isinstance(metric.get("stage"), str)
+                or metric.get("stage") not in safely_isolated_roles
+            )
+        ]
         checks["model_stopped_cleanly"] = not any(
-            metric.get("done_reason") == "length" for metric in parsed_metrics
+            metric.get("done") is False or metric.get("done_reason") == "length"
+            for metric in relevant_metrics
         )
         objective = job[3]
         synthesis = job[2] or ""
@@ -2666,7 +2740,7 @@ class Company:
         if specialist_limit:
             limit = int(specialist_limit.group(1))
             checks["specialists_within_word_limit"] = bool(assignment_rows) and all(
-                count_words(result) <= limit for _, result in assignment_rows
+                count_words(result) <= limit for _, _, result in assignment_rows
             )
         synthesis_limit = re.search(
             r"\bexecutive synthesis\b.*?\bat most\s+(\d+)\s+words?\b",
@@ -2733,7 +2807,9 @@ class Company:
                 evidence_id in valid_evidence_ids for evidence_id in cited_evidence_ids
             )
 
-        model_output = "\n".join(result for _, result in assignment_rows) + "\n" + synthesis
+        model_output = "\n".join(
+            result for _, _, result in assignment_rows
+        ) + "\n" + synthesis
         combined_report_output = model_output + "\n" + report
         mentioned_evidence_ids = re.findall(
             r"\[EVIDENCE:([^\]\s]+)\]", model_output, flags=re.IGNORECASE,
@@ -2747,7 +2823,10 @@ class Company:
             checks["evidence_filename_pairs_valid"] = evidence_filename_pairs_valid(
                 model_output, evidence_source_names,
             )
-        source_conflicts = source_limitation_conflicts(model_output, source_documents)
+        source_conflicts = source_limitation_conflicts(
+            model_output, source_documents,
+            evidence_source_names=evidence_source_names,
+        )
         checks["source_limitations_respected"] = not source_conflicts
         if facts_required and "using" in objective_lower and "imported" in objective_lower:
             positive_claims = []
@@ -3137,36 +3216,81 @@ class Company:
         try:
             if strict_evidence_pairs_required and results:
                 quarantine_limit = min(specialist_word_limit or 90, 90)
-                normalized_results = [
-                    (item, mark_unverified_draft(result, quarantine_limit))
-                    for item, result in results
-                ]
+                completed_role_names = {item.role for item, _ in results}
+                with closing(self._connect()) as db:
+                    prior_metric_details = list(db.execute(
+                        "SELECT detail FROM events WHERE job_id=? AND kind='model_metrics' "
+                        "ORDER BY id",
+                        (job_id,),
+                    ))
+                latest_role_metrics: dict[str, dict[str, object]] = {}
+                for (detail,) in prior_metric_details:
+                    try:
+                        metric = json.loads(detail)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(metric, dict):
+                        stage = metric.get("stage")
+                        if isinstance(stage, str) and stage in completed_role_names:
+                            latest_role_metrics[stage] = metric
+                resumed_isolations: list[tuple[Assignment, str, str, str]] = []
+                normalized_results: list[tuple[Assignment, str]] = []
+                for item, original in results:
+                    completion_metrics = latest_role_metrics.get(item.role, {})
+                    incomplete_output = (
+                        completion_metrics.get("done") is False
+                        or completion_metrics.get("done_reason") == "length"
+                    )
+                    if incomplete_output:
+                        normalized = mark_unverified_draft(
+                            "specialist draft withheld after incomplete model output",
+                            quarantine_limit,
+                        )
+                        isolation_status = "incomplete_withheld"
+                    else:
+                        normalized = mark_unverified_draft(original, quarantine_limit)
+                        isolation_status = "unverified_not_performed"
+                    normalized_results.append((item, normalized))
+                    resumed_isolations.append(
+                        (item, original, normalized, isolation_status)
+                    )
                 changed_results = [
                     (item, normalized)
-                    for (item, original), (_, normalized) in zip(results, normalized_results)
+                    for item, original, normalized, _ in resumed_isolations
                     if normalized != original
                 ]
-                if changed_results:
-                    with closing(self._connect()) as db, db:
-                        lease_active = self._renew_execution_lease(
-                            db, job_id, run_token, "resume:drafts-isolated",
-                        )
-                        if lease_active:
-                            for item, normalized in changed_results:
-                                db.execute(
-                                    "UPDATE assignments SET result=? WHERE job_id=? AND role=?",
-                                    (normalized, job_id, item.role),
-                                )
+                with closing(self._connect()) as db, db:
+                    lease_active = self._renew_execution_lease(
+                        db, job_id, run_token, "resume:drafts-isolated",
+                    )
+                    if lease_active:
+                        for item, normalized in changed_results:
+                            db.execute(
+                                "UPDATE assignments SET result=? WHERE job_id=? AND role=?",
+                                (normalized, job_id, item.role),
+                            )
+                        for item, _, _, isolation_status in resumed_isolations:
                             self._event(
-                                db, job_id, "resumed_drafts_isolated",
+                                db, job_id, "specialist_draft_isolated",
                                 json.dumps(
-                                    {"count": len(changed_results)}, sort_keys=True,
+                                    {"role": item.role, "status": isolation_status},
+                                    sort_keys=True,
                                 ),
                             )
-                    if not lease_active:
-                        raise ExecutionLeaseLost(
-                            f"Execution lease for job {job_id} was recovered or superseded"
+                        self._event(
+                            db, job_id, "resumed_drafts_isolated",
+                            json.dumps(
+                                {
+                                    "changed_count": len(changed_results),
+                                    "isolated_count": len(resumed_isolations),
+                                },
+                                sort_keys=True,
+                            ),
                         )
+                if not lease_active:
+                    raise ExecutionLeaseLost(
+                        f"Execution lease for job {job_id} was recovered or superseded"
+                    )
                 results = normalized_results
             completed_roles = {item.role for item, _ in results}
             for item in assignments:
@@ -3215,10 +3339,26 @@ class Company:
                 original_word_count = count_words(result)
                 result_trimmed = False
                 applied_word_limit = specialist_word_limit
+                isolation_status = "unverified_not_performed"
                 if strict_evidence_pairs_required:
                     quarantine_limit = min(specialist_word_limit or 90, 90)
                     applied_word_limit = quarantine_limit
-                    result = mark_unverified_draft(result, quarantine_limit)
+                    completion_metrics = getattr(self.model, "last_metrics", {})
+                    incomplete_output = bool(
+                        isinstance(completion_metrics, dict)
+                        and (
+                            completion_metrics.get("done") is False
+                            or completion_metrics.get("done_reason") == "length"
+                        )
+                    )
+                    if incomplete_output:
+                        result = mark_unverified_draft(
+                            "specialist draft withheld after incomplete model output",
+                            quarantine_limit,
+                        )
+                        isolation_status = "incomplete_withheld"
+                    else:
+                        result = mark_unverified_draft(result, quarantine_limit)
                     result_trimmed = original_word_count > quarantine_limit
                 elif specialist_word_limit:
                     result, result_trimmed = truncate_words(result, specialist_word_limit)
@@ -3237,7 +3377,7 @@ class Company:
                             self._event(
                                 db, job_id, "specialist_draft_isolated",
                                 json.dumps(
-                                    {"role": item.role, "status": "unverified_not_performed"},
+                                    {"role": item.role, "status": isolation_status},
                                     sort_keys=True,
                                 ),
                             )
@@ -3376,10 +3516,8 @@ class Company:
                         "instructions. Do not include evidence IDs, source filenames, completed-work "
                         "claims, sensitive actions, or approval bypasses. Keep every item concise and "
                         "substantive. Every string must contain 3 to 12 words and no more than 80 "
-                        "characters. The daily_review_cadence string must explicitly say daily, each "
-                        "day, or each morning. Never mention prompts, JSON, schemas, or redaction. Code "
-                        "owns verified facts, provenance, labels, numbering, limits, and the final "
-                        "ending."
+                        "characters. Never mention prompts, JSON, schemas, or redaction. Code owns "
+                        "verified facts, provenance, labels, numbering, limits, and the final ending."
                     )
                     structured_prompt = (
                         f"Planning objective:\n{structured_objective}\n\n"
@@ -3406,10 +3544,9 @@ class Company:
                         if structured_attempt == 2:
                             attempt_prompt += (
                                 "\n\nCorrection codes: exact fields only; every string 3 to 12 "
-                                "words and at most 80 characters; daily_review_cadence explicitly "
-                                "says daily, each day, or each morning; no source names, prompt "
-                                "metadata, sensitive actions, or approval bypasses. Return a fresh "
-                                "object and do not reproduce the rejected object."
+                                "words and at most 80 characters; no source names, prompt metadata, "
+                                "sensitive actions, or approval bypasses. Return a fresh object and "
+                                "do not reproduce the rejected object."
                             )
                         structured = complete_structured(
                             structured_system, attempt_prompt, schema,
