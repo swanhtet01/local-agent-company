@@ -152,6 +152,9 @@ def dashboard_snapshot(
     company: Company, worker: LocalQueueWorker | None = None
 ) -> dict[str, object]:
     next_due = company.next_due_queue_item()
+    queue_preflight = company.queue_preflight(
+        str(next_due[0]) if next_due else None,
+    )
     return {
         "projects": company.projects(),
         "jobs": company.jobs(),
@@ -162,6 +165,7 @@ def dashboard_snapshot(
         "pending_approvals": company.action_requests("pending"),
         "due_queue_item": bool(next_due),
         "next_due_queue_item": next_due,
+        "queue_preflight": queue_preflight,
         "worker": worker.snapshot() if worker else {"status": "disabled"},
         "health": company.health_snapshot(),
     }
@@ -417,8 +421,13 @@ def render_dashboard(
     if service_token:
         worker_status = str(snapshot["worker"].get("status", "idle"))
         next_due = snapshot["next_due_queue_item"]
+        queue_preflight = snapshot["queue_preflight"]
+        submission_allowed = queue_preflight.get("submission_allowed") is True
         run_disabled = (
-            " disabled" if worker_status == "running" or completion_items or not next_due else ""
+            " disabled"
+            if worker_status == "running" or completion_items or not next_due
+            or not submission_allowed
+            else ""
         )
         reviewed_queue_id = str(next_due[0]) if next_due else ""
         objective_preview = ""
@@ -426,16 +435,52 @@ def render_dashboard(
             objective_preview = str(next_due[6])
             if len(objective_preview) > 240:
                 objective_preview = objective_preview[:237] + "..."
-        run_hint = (
-            "A local mission is running." if worker_status == "running" else
-            "Mission completion is pending; wait for the worker or recover it after its heartbeat is stale."
-            if completion_items else
-            "No queued mission is due." if not next_due else
-            f"Reviewed next mission {reviewed_queue_id} at priority {next_due[2]}, "
-            f"project {next_due[4] or 'Unscoped'}, due {next_due[3]}: "
-            f"{objective_preview}"
+        if worker_status == "running":
+            run_hint = "A local mission is running."
+        elif completion_items:
+            run_hint = (
+                "Mission completion is pending; wait for the worker or recover it "
+                "after its heartbeat is stale."
+            )
+        elif not next_due:
+            run_hint = "No queued mission is due."
+        else:
+            run_hint = (
+                f"Reviewed next mission {reviewed_queue_id} at priority {next_due[2]}, "
+                f"project {next_due[4] or 'Unscoped'}, due {next_due[3]}: "
+                f"{objective_preview}"
+            )
+            preflight_status = str(queue_preflight.get("status", "blocked"))
+            if preflight_status == "ready":
+                knowledge = queue_preflight.get("knowledge", {})
+                source_count = (
+                    knowledge.get("source_count", 0)
+                    if isinstance(knowledge, dict) else 0
+                )
+                run_hint += (
+                    f" Knowledge preflight ready: {source_count} registered "
+                    "source(s) current; no work or model call started."
+                )
+            elif preflight_status == "owner_gate_required":
+                categories = queue_preflight.get("owner_gate_categories", [])
+                category_text = ", ".join(str(item) for item in categories)
+                run_hint += (
+                    " Owner gate required before model execution"
+                    f" ({category_text}); submission records the request and calls no model."
+                )
+            else:
+                blockers = queue_preflight.get("blockers", [])
+                blocker_text = ", ".join(str(item) for item in blockers) or "not_ready"
+                run_hint += (
+                    f" Run blocked before claim: {blocker_text}. Audit and correct "
+                    "the named local condition, then refresh this page."
+                )
+        run_label = (
+            f"Request owner review for {reviewed_queue_id}"
+            if next_due and queue_preflight.get("status") == "owner_gate_required"
+            else f"Run {reviewed_queue_id} locally"
+            if next_due else "Run reviewed mission locally"
         )
-        run_label = f"Run {reviewed_queue_id} locally" if next_due else "Run reviewed mission locally"
         intake = f"""
 <section class="intake"><h2>Queue a SuperMega task</h2>
 <p class="hint">Previewing is read-only and calls no model. Queuing records work only; neither action performs an external action.</p>

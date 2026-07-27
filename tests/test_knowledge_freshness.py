@@ -14,9 +14,11 @@ from local_company.cli import main as cli_main
 from local_company.core import (
     KNOWLEDGE_FRESHNESS_SCHEMA,
     KNOWLEDGE_REFRESH_SCHEMA,
+    QUEUE_PREFLIGHT_SCHEMA,
     Company,
     MockModel,
 )
+from local_company.dashboard import health_endpoint_snapshot, render_dashboard
 from local_company.spreadsheet import SpreadsheetError
 
 
@@ -265,6 +267,16 @@ class KnowledgeFreshnessTests(unittest.TestCase):
                 company.run("Review the bounded source scope", project=project)
             self.assertEqual(model.calls, 0)
             self.assertEqual(company.jobs(), [])
+            queue_id = company.enqueue(
+                "Review the bounded queued source scope", project=project,
+            )
+            preflight = company.queue_preflight(queue_id)
+            self.assertEqual(preflight["status"], "blocked")
+            self.assertEqual(preflight["blockers"], ["knowledge_scope_over_limit"])
+            self.assertEqual(preflight["knowledge"]["source_count"], 65)
+            with self.assertRaisesRegex(RuntimeError, "knowledge_scope_over_limit"):
+                company.claim_next_queue_item(queue_id)
+            self.assertEqual(company.queue_items()[0][1], "queued")
 
     def test_cli_audit_and_refresh_emit_versioned_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -553,6 +565,248 @@ class KnowledgeFreshnessTests(unittest.TestCase):
             self.assertEqual(model.calls, 0)
             self.assertEqual(company.jobs(), [])
             self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_queue_preflight_ready_contract_is_pathless_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Preflight Ready")
+            source = root / "private-ready.md"
+            source.write_text("confidential readiness datum", encoding="utf-8")
+            company.add_knowledge(source, project)
+            objective = "Review supplier inventory operations"
+            queue_id = company.enqueue(objective, project=project)
+            before = file_sha256(company.db_path)
+
+            result = company.queue_preflight(queue_id)
+
+            self.assertEqual(result["schema"], QUEUE_PREFLIGHT_SCHEMA)
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["queue_id"], queue_id)
+            self.assertEqual(result["project_id"], project)
+            self.assertTrue(result["reviewed_queue_matches"])
+            self.assertTrue(result["submission_allowed"])
+            self.assertTrue(result["model_execution_ready"])
+            self.assertEqual(result["blockers"], [])
+            self.assertEqual(result["owner_gate_categories"], [])
+            self.assertEqual(result["team"]["selection"], "automatic")
+            self.assertIn("operations", result["team"]["roles"])
+            self.assertEqual(result["knowledge"]["status"], "ready")
+            self.assertEqual(result["knowledge"]["source_count"], 1)
+            self.assertEqual(
+                result["knowledge"]["status_counts"],
+                {"current": 1, "changed": 0, "missing": 0, "unavailable": 0},
+            )
+            self.assertEqual(
+                result["effects"],
+                {
+                    "queue_claimed": False,
+                    "job_created": False,
+                    "model_called": False,
+                    "state_mutated": False,
+                    "work_started": False,
+                },
+            )
+            rendered = json.dumps(result, sort_keys=True)
+            for private_value in (
+                objective, str(source.resolve()), "confidential readiness datum", "sha256",
+            ):
+                self.assertNotIn(private_value, rendered)
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.queue_items()[0][1], "queued")
+
+    def test_queue_preflight_reports_drift_and_review_mismatch_without_claiming(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Preflight Drift")
+            source = root / "private-drift.md"
+            source.write_text("old private drift datum", encoding="utf-8")
+            company.add_knowledge(source, project)
+            queue_id = company.enqueue("Prepare a neutral readiness brief", project=project)
+            source.write_text("new private drift datum", encoding="utf-8")
+            before = file_sha256(company.db_path)
+
+            drift = company.queue_preflight(queue_id)
+            mismatch = company.queue_preflight("0" * 12)
+
+            self.assertEqual(drift["status"], "blocked")
+            self.assertFalse(drift["submission_allowed"])
+            self.assertFalse(drift["model_execution_ready"])
+            self.assertEqual(drift["blockers"], ["knowledge_changed"])
+            self.assertEqual(drift["knowledge"]["status_counts"]["changed"], 1)
+            self.assertEqual(mismatch["status"], "blocked")
+            self.assertFalse(mismatch["reviewed_queue_matches"])
+            self.assertEqual(mismatch["blockers"], ["reviewed_queue_not_next"])
+            self.assertEqual(mismatch["knowledge"]["status"], "not_checked")
+            for result in (drift, mismatch):
+                rendered = json.dumps(result, sort_keys=True)
+                self.assertNotIn(str(source.resolve()), rendered)
+                self.assertNotIn("old private drift datum", rendered)
+                self.assertNotIn("new private drift datum", rendered)
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.queue_items()[0][1], "queued")
+
+    def test_queue_preflight_preserves_owner_gate_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Preflight Owner Gate")
+            source = root / "owner-private.md"
+            source.write_text("owner baseline", encoding="utf-8")
+            company.add_knowledge(source, project)
+            queue_id = company.enqueue("Send email to every prospect", project=project)
+            source.write_text("owner baseline drifted", encoding="utf-8")
+            before = file_sha256(company.db_path)
+
+            result = company.queue_preflight(queue_id)
+
+            self.assertEqual(result["status"], "owner_gate_required")
+            self.assertTrue(result["submission_allowed"])
+            self.assertFalse(result["model_execution_ready"])
+            self.assertEqual(result["blockers"], [])
+            self.assertEqual(result["owner_gate_categories"], ["external_communication"])
+            self.assertEqual(result["knowledge"]["status"], "not_checked")
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.queue_items()[0][1], "queued")
+
+    def test_queue_preflight_handles_no_due_and_busy_slot_without_private_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", CountingModel())
+            no_due = company.queue_preflight()
+            self.assertEqual(no_due["status"], "no_due_mission")
+            self.assertEqual(no_due["blockers"], ["no_due_mission"])
+            self.assertFalse(no_due["submission_allowed"])
+
+            queue_id = company.enqueue("Prepare a bounded local brief")
+            with closing(company._connect(immediate=True)) as db, db:
+                db.execute(
+                    "INSERT INTO jobs(id, objective, status, created_at, heartbeat_at) "
+                    "VALUES ('busyjob00001', 'private running objective', 'running', 'now', 'now')"
+                )
+            before = file_sha256(company.db_path)
+            busy = company.queue_preflight(queue_id)
+
+            self.assertEqual(busy["status"], "blocked")
+            self.assertEqual(busy["blockers"], ["execution_slot_busy"])
+            self.assertEqual(busy["knowledge"]["status"], "not_checked")
+            self.assertNotIn("private running objective", json.dumps(busy))
+            self.assertEqual(file_sha256(company.db_path), before)
+
+    def test_queue_preflight_rejects_corrupt_team_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            queue_id = company.enqueue("Prepare a local operations brief")
+            with closing(company._connect(immediate=True)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET roles_json=? WHERE id=?",
+                    ('["operations", "private-corrupt-role"]', queue_id),
+                )
+            before = file_sha256(company.db_path)
+
+            result = company.queue_preflight(queue_id)
+            with self.assertRaisesRegex(RuntimeError, "queued_mission_invalid"):
+                company.claim_next_queue_item(queue_id)
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["blockers"], ["queued_mission_invalid"])
+            self.assertEqual(result["team"]["roles"], [])
+            self.assertNotIn("private-corrupt-role", json.dumps(result))
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.queue_items()[0][1], "queued")
+
+    def test_queue_preflight_cli_emits_json_without_model_or_state_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            source = root / "cli-private.md"
+            source.write_text("CLI private source datum", encoding="utf-8")
+            company = Company(state, CountingModel())
+            project = company.create_project("CLI Preflight")
+            company.add_knowledge(source, project)
+            objective = "Prepare a CLI inventory brief"
+            queue_id = company.enqueue(objective, project=project)
+            before = file_sha256(company.db_path)
+            cli_model = CountingModel()
+            output = io.StringIO()
+
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "queue", "preflight",
+                    "--queue-id", queue_id,
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["schema"], QUEUE_PREFLIGHT_SCHEMA)
+            self.assertEqual(result["status"], "ready")
+            self.assertNotIn(objective, output.getvalue())
+            self.assertNotIn(str(source.resolve()), output.getvalue())
+            self.assertNotIn("CLI private source datum", output.getvalue())
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(cli_model.calls, 0)
+
+    def test_dashboard_disables_drift_but_allows_ready_and_owner_gate_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Dashboard Preflight")
+            source = root / "dashboard-private.md"
+            source.write_text("dashboard private datum", encoding="utf-8")
+            company.add_knowledge(source, project)
+            queue_id = company.enqueue("Prepare a neutral dashboard brief", project=project)
+
+            ready_page = render_dashboard(company, service_token="local-review")
+            self.assertIn("Knowledge preflight ready: 1 registered source(s) current", ready_page)
+            self.assertIn(
+                f'<button type="submit">Run {queue_id} locally</button>', ready_page,
+            )
+
+            source.write_text("dashboard secret changed", encoding="utf-8")
+            before = file_sha256(company.db_path)
+            blocked_page = render_dashboard(company, service_token="local-review")
+            self.assertIn("Run blocked before claim: knowledge_changed", blocked_page)
+            self.assertIn(
+                f'<button type="submit" disabled>Run {queue_id} locally</button>',
+                blocked_page,
+            )
+            self.assertNotIn(str(source.resolve()), blocked_page)
+            self.assertNotIn("dashboard private datum", blocked_page)
+            self.assertNotIn("dashboard secret changed", blocked_page)
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", CountingModel())
+            queue_id = company.enqueue("Send email to every prospect")
+            owner_page = render_dashboard(company, service_token="local-review")
+            self.assertIn("Owner gate required before model execution", owner_page)
+            self.assertIn(
+                f'<button type="submit">Request owner review for {queue_id}</button>',
+                owner_page,
+            )
+            health = health_endpoint_snapshot(
+                company, None,
+                {"schema": "build", "build_id": "test"},
+                {"schema": "company", "instance_id": "a" * 32},
+            )
+            self.assertNotIn("queue_preflight", json.dumps(health))
+            self.assertNotIn("owner_gate", json.dumps(health))
 
 
 if __name__ == "__main__":

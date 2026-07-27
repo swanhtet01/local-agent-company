@@ -69,6 +69,12 @@ def parser() -> argparse.ArgumentParser:
     queue_add.add_argument("--scheduled-at", help="ISO-8601 timestamp; naive values are treated as UTC")
     queue_list = queue_sub.add_parser("list", help="List queued mission records")
     queue_list.add_argument("--status")
+    queue_preflight = queue_sub.add_parser(
+        "preflight", help="Preview the exact next claim gates without starting work"
+    )
+    queue_preflight.add_argument(
+        "--queue-id", help="Compare with this exact reviewed mission ID"
+    )
     queue_run = queue_sub.add_parser(
         "run-next", help="Run the highest-priority due mission, optionally by reviewed ID"
     )
@@ -299,6 +305,8 @@ def main() -> int:
                         f"project={project or '-'}  playbook={playbook or '-'}  job={job_id or '-'}  "
                         f"{objective}{error_text}"
                     )
+            elif args.queue_command == "preflight":
+                print(json.dumps(company.queue_preflight(args.queue_id), indent=2))
             elif args.queue_command == "run-next":
                 queue_id, job_id, output, passed = company.run_next_queue_item(args.queue_id)
                 print(

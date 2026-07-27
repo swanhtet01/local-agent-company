@@ -194,6 +194,7 @@ MAX_KNOWLEDGE_BYTES = 2_000_000
 MAX_KNOWLEDGE_AUDIT_SOURCES = 64
 KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
+QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
@@ -4203,6 +4204,201 @@ class Company:
                 (utc_now(),),
             ).fetchone()
 
+    @staticmethod
+    def _queue_preflight_effects() -> dict[str, bool]:
+        return {
+            "queue_claimed": False,
+            "job_created": False,
+            "model_called": False,
+            "state_mutated": False,
+            "work_started": False,
+        }
+
+    @staticmethod
+    def _unchecked_queue_knowledge() -> dict[str, object]:
+        return {
+            "status": "not_checked",
+            "source_count": None,
+            "status_counts": None,
+        }
+
+    def _queue_preflight_from_row(
+        self,
+        db: sqlite3.Connection,
+        row: tuple[object, ...],
+        *,
+        expected_queue_id: str | None,
+        execution_slot_busy: bool,
+    ) -> dict[str, object]:
+        raw_queue_id, objective, project_id, roles_json, playbook = row
+        valid_queue_id = (
+            raw_queue_id
+            if isinstance(raw_queue_id, str)
+            and re.fullmatch(r"[0-9a-f]{12}", raw_queue_id)
+            else None
+        )
+        valid_project_id = project_id is None or (
+            isinstance(project_id, str)
+            and re.fullmatch(r"[0-9a-f]{12}", project_id) is not None
+            and db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone()
+            is not None
+        )
+        reviewed_matches = (
+            None if expected_queue_id is None
+            else bool(valid_queue_id and expected_queue_id == valid_queue_id)
+        )
+        blockers: list[str] = []
+        if execution_slot_busy:
+            blockers.append("execution_slot_busy")
+        if reviewed_matches is False:
+            blockers.append("reviewed_queue_not_next")
+        if valid_queue_id is None or not valid_project_id:
+            blockers.append("queued_mission_invalid")
+
+        team: dict[str, object] = {
+            "selection": None,
+            "playbook": None,
+            "roles": [],
+        }
+        owner_gate_categories: list[str] = []
+        if "queued_mission_invalid" not in blockers:
+            try:
+                if not isinstance(objective, str):
+                    raise ValueError("invalid objective")
+                normalized_objective = " ".join(objective.split())
+                if not normalized_objective or len(normalized_objective) > MAX_OBJECTIVE_CHARS:
+                    raise ValueError("invalid objective")
+                if playbook is not None and (
+                    not isinstance(playbook, str) or playbook not in PLAYBOOKS
+                ):
+                    raise ValueError("invalid playbook")
+                route = self.routing_preview(normalized_objective, playbook)
+                owner_gate_categories = list(route["owner_gate"]["categories"])
+                parsed_roles: list[str] | None = None
+                if roles_json is not None:
+                    if not isinstance(roles_json, str) or len(roles_json) > 4096:
+                        raise ValueError("invalid roles")
+                    value = json.loads(roles_json)
+                    if (
+                        not isinstance(value, list)
+                        or len(value) > 64
+                        or any(not isinstance(role, str) or role not in ROLES for role in value)
+                    ):
+                        raise ValueError("invalid roles")
+                    parsed_roles = list(dict.fromkeys(value))
+                if playbook is not None:
+                    expected_roles = list(PLAYBOOKS[playbook]["roles"])
+                    if parsed_roles != expected_roles:
+                        raise ValueError("playbook roles do not match")
+                    roles = expected_roles
+                    selection = "playbook"
+                elif parsed_roles:
+                    roles = parsed_roles
+                    selection = "explicit"
+                else:
+                    roles = list(route["roles"])
+                    selection = "automatic"
+                team = {
+                    "selection": selection,
+                    "playbook": playbook,
+                    "roles": roles,
+                }
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
+                blockers.append("queued_mission_invalid")
+
+        knowledge = self._unchecked_queue_knowledge()
+        can_check_knowledge = not blockers and not owner_gate_categories
+        if can_check_knowledge:
+            knowledge_rows = self._select_knowledge_scope_rows(db, project_id)
+            if len(knowledge_rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
+                blockers.append("knowledge_scope_over_limit")
+                knowledge = {
+                    "status": "over_limit",
+                    "source_count": len(knowledge_rows),
+                    "status_counts": None,
+                }
+            else:
+                items, _ = self._collect_knowledge_freshness_rows(
+                    knowledge_rows, retain_content=False,
+                )
+                counts = self._knowledge_status_counts(items)
+                for status in ("changed", "missing", "unavailable"):
+                    if counts[status]:
+                        blockers.append(f"knowledge_{status}")
+                knowledge = {
+                    "status": "ready" if not blockers else "drift",
+                    "source_count": len(knowledge_rows),
+                    "status_counts": counts,
+                }
+
+        submission_allowed = not blockers
+        model_execution_ready = submission_allowed and not owner_gate_categories
+        status = (
+            "blocked" if blockers else
+            "owner_gate_required" if owner_gate_categories else
+            "ready"
+        )
+        return {
+            "schema": QUEUE_PREFLIGHT_SCHEMA,
+            "status": status,
+            "queue_id": valid_queue_id,
+            "project_id": project_id if valid_project_id else None,
+            "reviewed_queue_matches": reviewed_matches,
+            "submission_allowed": submission_allowed,
+            "model_execution_ready": model_execution_ready,
+            "blockers": blockers,
+            "owner_gate_categories": owner_gate_categories,
+            "team": team,
+            "knowledge": knowledge,
+            "effects": self._queue_preflight_effects(),
+        }
+
+    def queue_preflight(
+        self, expected_queue_id: str | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        if expected_queue_id is not None and (
+            not isinstance(expected_queue_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", expected_queue_id) is None
+        ):
+            raise ValueError(
+                "Reviewed queue mission ID must be 12 lowercase hexadecimal characters"
+            )
+        with closing(self._connect()) as db:
+            active = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE status='running'), "
+                "EXISTS(SELECT 1 FROM mission_queue WHERE status='running')"
+            ).fetchone()
+            execution_slot_busy = bool(active and (active[0] or active[1]))
+            row = db.execute(
+                "SELECT id, objective, project_id, roles_json, playbook "
+                "FROM mission_queue WHERE status='queued' AND scheduled_at<=? "
+                "ORDER BY priority DESC, scheduled_at, created_at LIMIT 1",
+                (utc_now(),),
+            ).fetchone()
+            if row:
+                return self._queue_preflight_from_row(
+                    db, row, expected_queue_id=expected_queue_id,
+                    execution_slot_busy=execution_slot_busy,
+                )
+        blockers = ["no_due_mission"]
+        if execution_slot_busy:
+            blockers.insert(0, "execution_slot_busy")
+        return {
+            "schema": QUEUE_PREFLIGHT_SCHEMA,
+            "status": "blocked" if execution_slot_busy else "no_due_mission",
+            "queue_id": None,
+            "project_id": None,
+            "reviewed_queue_matches": None,
+            "submission_allowed": False,
+            "model_execution_ready": False,
+            "blockers": blockers,
+            "owner_gate_categories": [],
+            "team": {"selection": None, "playbook": None, "roles": []},
+            "knowledge": self._unchecked_queue_knowledge(),
+            "effects": self._queue_preflight_effects(),
+        }
+
     def reset_queue_item(self, queue_id: str, source: str = "cli") -> None:
         self.initialize()
         source = " ".join(source.split())
@@ -4248,21 +4444,28 @@ class Company:
             self._ensure_no_active_job(db)
             self._ensure_no_active_queue_claim(db)
             row = db.execute(
-                "SELECT id, objective, project_id, roles_json FROM mission_queue "
+                "SELECT id, objective, project_id, roles_json, playbook FROM mission_queue "
                 "WHERE status='queued' AND scheduled_at<=? "
                 "ORDER BY priority DESC, scheduled_at, created_at LIMIT 1", (utc_now(),),
             ).fetchone()
             if not row:
                 raise ValueError("No queued mission is due")
-            queue_id, objective, project_id, roles_json = row
+            queue_id, objective, project_id, roles_json, _ = row
             if expected_queue_id is not None and queue_id != expected_queue_id:
                 raise RuntimeError(
                     f"Queue changed; reviewed mission {expected_queue_id} is no longer next. "
                     "Refresh before running anything."
                 )
-            if not self.sensitive_categories(objective):
-                knowledge_rows = self._select_knowledge_scope_rows(db, project_id)
-                self._require_current_knowledge_rows(knowledge_rows)
+            preflight = self._queue_preflight_from_row(
+                db, row, expected_queue_id=expected_queue_id,
+                execution_slot_busy=False,
+            )
+            if preflight["submission_allowed"] is not True:
+                blockers = preflight.get("blockers", [])
+                reason = ", ".join(str(item) for item in blockers) or "not_ready"
+                raise RuntimeError(
+                    "Queue preflight refused claim before model work: " + reason
+                )
             claimed = db.execute(
                 "UPDATE mission_queue SET status='running', started_at=?, error=NULL, run_token=? "
                 "WHERE id=? AND status='queued'",
