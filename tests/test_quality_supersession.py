@@ -653,6 +653,67 @@ class QualitySupersessionTests(unittest.TestCase):
             )
             self.assertEqual(company.model.calls, 0)
 
+    def test_retired_review_does_not_hide_unreadable_newer_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company, queue_id, job_id, successor_job_id, objective, _, _ = (
+                self._seed_eligible_failure(root)
+            )
+            retirement_reason = (
+                "Private historical reason must stay absent from every review output."
+            )
+            company.supersede_quality_failure(
+                queue_id, retirement_reason, successor_job_id,
+            )
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                for _ in range(120):
+                    db.execute(
+                        "INSERT INTO events(job_id, kind, detail, created_at) "
+                        "VALUES (?, 'queue_quality_failure_superseded', ?, ?)",
+                        (
+                            None, "{unreadable-unrelated-history",
+                            "2026-07-28T00:00:00+00:00",
+                        ),
+                    )
+
+            unrelated_depth = company.quality_supersession_summaries()
+            self.assertEqual(
+                unrelated_depth["items"][0]["retirement_audit_status"],
+                "input_fingerprint_bound",
+            )
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "INSERT INTO events(job_id, kind, detail, created_at) "
+                    "VALUES (?, 'queue_quality_failure_superseded', ?, ?)",
+                    (
+                        job_id, "{unreadable-newer-history",
+                        "2026-07-28T00:00:01+00:00",
+                    ),
+                )
+
+            malformed = company.quality_supersession_summaries()
+            item = malformed["items"][0]
+            self.assertEqual(item["retirement_audit_status"], "malformed")
+            self.assertIsNone(item["retirement_event_id"])
+            self.assertIsNone(item["retirement_successor_job_id"])
+            self.assertIsNone(item["retirement_proof_sha256"])
+            self.assertIsNone(item["retirement_input_fingerprint_sha256"])
+            self.assertEqual(
+                malformed["retirement_audit_counts"]["malformed"], 1,
+            )
+            self.assertEqual(malformed["retirement_audit_review_required_count"], 1)
+            self.assertEqual(malformed["next_action"], "review_superseded_failures")
+            rendered = json.dumps(malformed, sort_keys=True)
+            self.assertNotIn(retirement_reason, rendered)
+            self.assertNotIn(objective, rendered)
+            page = render_quality_supersession_overview(company)
+            self.assertIn("malformed", page)
+            self.assertNotIn(retirement_reason, page)
+            self.assertNotIn(str(root), page)
+            self.assertEqual(company.model.calls, 0)
+
     def test_retired_review_refuses_crossing_state_and_malformed_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             company, queue_id, _, successor_job_id, _, _, _ = (

@@ -6255,12 +6255,21 @@ class Company:
         selected_detail: dict[str, object] | None = None
         for row in rows:
             if not isinstance(row[1], str) or len(row[1].encode("utf-8")) > 8_192:
-                continue
+                return empty
             try:
                 detail = json.loads(row[1])
             except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(detail, dict) and detail.get("queue_id") == queue_id:
+                return empty
+            if not isinstance(detail, dict):
+                return empty
+            event_queue_id = detail.get("queue_id")
+            if (
+                detail.get("job_id") != failed_job_id
+                or not isinstance(event_queue_id, str)
+                or re.fullmatch(r"[0-9a-f]{12}", event_queue_id) is None
+            ):
+                return empty
+            if event_queue_id == queue_id:
                 selected = row
                 selected_detail = detail
                 break
