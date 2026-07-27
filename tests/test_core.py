@@ -3054,26 +3054,41 @@ class CompanyTests(unittest.TestCase):
                 thread.join(timeout=3)
 
     def test_embedded_runtime_build_identity_matches_operational_source(self):
+        project_root = Path(__file__).parents[1]
         project_metadata = tomllib.loads(
-            (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+            (project_root / "pyproject.toml").read_text(encoding="utf-8")
         )
         self.assertEqual(project_metadata["project"]["version"], __version__)
 
-        source_root = Path(__file__).parents[1] / "src" / "local_company"
-        source_files = sorted(
+        source_root = project_root / "src" / "local_company"
+        release_files = [
             path for path in source_root.rglob("*.py")
             if path.relative_to(source_root).as_posix() != "build_info.py"
+        ] + [
+            project_root / relative for relative in (
+                "scripts/check_live_build.py",
+                "scripts/check_readiness.py",
+                "scripts/runtime_guard.py",
+                "scripts/stamp_build_manifest.py",
+            )
+        ]
+        release_files.sort(
+            key=lambda path: path.relative_to(project_root).as_posix().encode("utf-8"),
         )
         self.assertEqual(
-            {path.relative_to(source_root).as_posix() for path in source_files},
+            {path.relative_to(project_root).as_posix() for path in release_files},
             {
-                "__init__.py", "cli.py", "config.py", "core.py", "dashboard.py",
-                "service.py",
+                "scripts/check_live_build.py", "scripts/check_readiness.py",
+                "scripts/runtime_guard.py", "scripts/stamp_build_manifest.py",
+                "src/local_company/__init__.py", "src/local_company/cli.py",
+                "src/local_company/config.py", "src/local_company/core.py",
+                "src/local_company/dashboard.py", "src/local_company/service.py",
             },
         )
         expected = hashlib.sha256()
-        for path in source_files:
-            relative = path.relative_to(source_root).as_posix().encode("utf-8")
+        expected.update(b"local-company.release-source.v1\0")
+        for path in release_files:
+            relative = path.relative_to(project_root).as_posix().encode("utf-8")
             content = path.read_bytes()
             expected.update(len(relative).to_bytes(4, "big"))
             expected.update(relative)
