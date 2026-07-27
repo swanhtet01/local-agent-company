@@ -765,7 +765,7 @@ def _assert_executable_signature(
 
 
 def _spawn_ollama(
-    executable: Path, *, expected_sha256: str | None = None,
+    executable: Path, *, expected_sha256: str,
     allow_job_inheritance: bool = False,
 ) -> subprocess.Popen[bytes]:
     creationflags = 0
@@ -784,21 +784,12 @@ def _spawn_ollama(
         **popen_kwargs,
     }
 
-    @contextmanager
-    def verification():
-        if expected_sha256 is None:
-            yield None
-        else:
-            with _verified_executable_sha256(
-                executable, expected_sha256,
-            ) as signature:
-                yield signature
-
     process: subprocess.Popen[bytes] | None = None
     try:
-        with verification() as signature:
-            if signature is not None:
-                _assert_executable_signature(executable, signature)
+        with _verified_executable_sha256(
+            executable, expected_sha256,
+        ) as signature:
+            _assert_executable_signature(executable, signature)
             try:
                 process = subprocess.Popen([str(executable), "serve"], **arguments)
             except OSError as exc:
@@ -807,8 +798,7 @@ def _spawn_ollama(
                     and _windows_breakaway_denied(exc)
                 ):
                     raise
-                if signature is not None:
-                    _assert_executable_signature(executable, signature)
+                _assert_executable_signature(executable, signature)
                 arguments["creationflags"] = _windows_inherited_creation_flags()
                 process = subprocess.Popen([str(executable), "serve"], **arguments)
         return process
@@ -1035,28 +1025,31 @@ def _guard_locked(
                         blockers=["disk_manifest_changed"], action="inspect_build_manifest",
                         changes=changes, model=model,
                     ), 2
-                executable = _trusted_ollama_executable(ollama_executable)
-                if executable is None:
-                    attempt_events.add("ollama_executable_missing")
+                if ollama_sha256 is None:
+                    attempt_events.add("ollama_executable_pin_required")
                 else:
-                    spawn_arguments: dict[str, object] = {}
-                    if ollama_sha256 is not None:
-                        spawn_arguments["expected_sha256"] = ollama_sha256
-                    if allow_job_inheritance:
-                        spawn_arguments["allow_job_inheritance"] = True
-                    process = _spawn_ollama(executable, **spawn_arguments)
-                    ollama_state, model_installed = _wait_for_ollama(
-                        model, process, wait_seconds,
-                    )
-                    if ollama_state == "reachable":
-                        changes.append("ollama_started")
+                    executable = _trusted_ollama_executable(ollama_executable)
+                    if executable is None:
+                        attempt_events.add("ollama_executable_missing")
                     else:
-                        if not _terminate_owned_child(process):
-                            indeterminate.append("ollama_cleanup_failed")
-                        if ollama_state == "invalid":
-                            indeterminate.append("ollama_response_invalid")
+                        spawn_arguments: dict[str, object] = {
+                            "expected_sha256": ollama_sha256,
+                        }
+                        if allow_job_inheritance:
+                            spawn_arguments["allow_job_inheritance"] = True
+                        process = _spawn_ollama(executable, **spawn_arguments)
+                        ollama_state, model_installed = _wait_for_ollama(
+                            model, process, wait_seconds,
+                        )
+                        if ollama_state == "reachable":
+                            changes.append("ollama_started")
                         else:
-                            indeterminate.append("ollama_start_unconfirmed")
+                            if not _terminate_owned_child(process):
+                                indeterminate.append("ollama_cleanup_failed")
+                            if ollama_state == "invalid":
+                                indeterminate.append("ollama_response_invalid")
+                            else:
+                                indeterminate.append("ollama_start_unconfirmed")
             except GuardExecutableHashMismatch:
                 ollama_state, model_installed = "refused", None
                 indeterminate.append("ollama_executable_hash_mismatch")
@@ -1167,6 +1160,8 @@ def _guard_locked(
         components["ollama"] = "unavailable"
         components["model"] = "unknown"
         blockers.append("ollama_unavailable")
+        if "ollama_executable_pin_required" in attempt_events:
+            blockers.append("ollama_executable_pin_required")
         if "ollama_executable_missing" in attempt_events:
             blockers.append("ollama_executable_missing")
         if "ollama_start_failed" in attempt_events:
@@ -1252,6 +1247,8 @@ def _guard_locked(
             action = "relaunch_service_manually"
         elif "full_readiness_action_required" in blockers:
             action = readiness_action
+        elif "ollama_executable_pin_required" in blockers:
+            action = "configure_ollama_executable_pin"
         elif "ollama_executable_missing" in blockers or "ollama_start_failed" in blockers or "ollama_unavailable" in blockers:
             action = "start_ollama_manually"
         elif "model_not_installed" in blockers:

@@ -277,6 +277,12 @@ class RuntimeGuardTests(unittest.TestCase):
 
         child = Mock()
         executable_path = Path("C:/trusted/ollama.exe")
+        expected_sha256 = "a" * 64
+        arguments = _locked_arguments(Path("ignored"))
+        arguments.update({
+            "ollama_executable": executable_path,
+            "ollama_sha256": expected_sha256,
+        })
         with tempfile.TemporaryDirectory() as tmp, patch(
             "scripts.runtime_guard._store_unchanged", return_value=True,
         ), patch(
@@ -303,18 +309,79 @@ class RuntimeGuardTests(unittest.TestCase):
         ), patch(
             "scripts.runtime_guard._full_readiness", return_value=("ready", "none"),
         ), patch("scripts.runtime_guard.start_service") as start:
-            payload, code = guard._guard_locked(**_locked_arguments(Path(tmp)))
+            arguments["home"] = Path(tmp)
+            payload, code = guard._guard_locked(**arguments)
         self.assertEqual(code, 0)
         self.assertTrue(payload["ready"])
         self.assertEqual(payload["status"], "recovered")
         self.assertEqual(payload["changes"], ["ollama_started"])
-        spawn.assert_called_once_with(executable_path)
+        spawn.assert_called_once_with(
+            executable_path, expected_sha256=expected_sha256,
+        )
         start.assert_not_called()
+
+    def test_confirmed_ollama_absence_requires_pin_before_launch_effects(self):
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as tmp:
+                executable = Path(tmp) / "SENTINEL-private-ollama.exe"
+                arguments = _locked_arguments(Path(tmp))
+                arguments["ollama_executable"] = executable if explicit else None
+                with patch(
+                    "scripts.runtime_guard._store_unchanged", return_value=True,
+                ), patch(
+                    "scripts.runtime_guard.check_project", return_value={"status": "ok"},
+                ), patch(
+                    "scripts.runtime_guard._probe_ollama",
+                    return_value=("refused", None),
+                ), patch(
+                    "scripts.runtime_guard.time.sleep",
+                ), patch(
+                    "scripts.runtime_guard._ollama_port_state", return_value="refused",
+                ), patch(
+                    "scripts.runtime_guard._trusted_ollama_executable",
+                ) as trusted, patch(
+                    "scripts.runtime_guard._verified_executable_sha256",
+                ) as verify, patch(
+                    "scripts.runtime_guard._open_executable_descriptor",
+                ) as open_executable, patch(
+                    "scripts.runtime_guard._spawn_ollama",
+                ) as spawn, patch(
+                    "scripts.runtime_guard.subprocess.Popen",
+                ) as popen, patch(
+                    "scripts.runtime_guard._wait_for_ollama",
+                ) as wait, patch(
+                    "scripts.runtime_guard._read_service",
+                    return_value=("stale", "absent", False),
+                ), patch("scripts.runtime_guard.start_service") as start:
+                    payload, code = guard._guard_locked(**arguments)
+
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ready"])
+            self.assertIn("ollama_executable_pin_required", payload["blockers"])
+            self.assertEqual(payload["action"], "configure_ollama_executable_pin")
+            self.assertEqual(payload["changes"], [])
+            trusted.assert_not_called()
+            verify.assert_not_called()
+            open_executable.assert_not_called()
+            spawn.assert_not_called()
+            popen.assert_not_called()
+            wait.assert_not_called()
+            start.assert_not_called()
+            rendered = guard._render_result(payload).decode("utf-8")
+            self.assertNotIn("SENTINEL", rendered)
+            self.assertNotIn("private", rendered.lower())
+            self.assertLess(len(rendered.encode("utf-8")), 2048)
 
     def test_failed_owned_ollama_child_is_cleaned_and_cleanup_failure_fails_closed(self):
         child = Mock()
         executable_path = Path("C:/trusted/ollama.exe")
+        expected_sha256 = "b" * 64
         for cleaned in (True, False):
+            arguments = _locked_arguments(Path("ignored"))
+            arguments.update({
+                "ollama_executable": executable_path,
+                "ollama_sha256": expected_sha256,
+            })
             with self.subTest(cleaned=cleaned), tempfile.TemporaryDirectory() as tmp, patch(
                 "scripts.runtime_guard._store_unchanged", return_value=True,
             ), patch(
@@ -338,7 +405,8 @@ class RuntimeGuardTests(unittest.TestCase):
                 "scripts.runtime_guard._read_service",
                 return_value=("stale", "absent", False),
             ), patch("scripts.runtime_guard.start_service") as start:
-                payload, code = guard._guard_locked(**_locked_arguments(Path(tmp)))
+                arguments["home"] = Path(tmp)
+                payload, code = guard._guard_locked(**arguments)
             self.assertEqual(code, 2)
             self.assertFalse(payload["ready"])
             self.assertNotIn("ollama_started", payload["changes"])
@@ -888,6 +956,44 @@ class RuntimeGuardTests(unittest.TestCase):
         open_executable.assert_not_called()
         popen.assert_not_called()
 
+    def test_unpinned_healthy_runtime_remains_ready_and_observation_only(self):
+        executable = Path("C:/trusted/ollama.exe")
+        arguments = _locked_arguments(Path("C:/company"))
+        arguments["ollama_executable"] = executable
+        with patch(
+            "scripts.runtime_guard._store_unchanged", return_value=True,
+        ), patch(
+            "scripts.runtime_guard.check_project", return_value={"status": "ok"},
+        ), patch(
+            "scripts.runtime_guard._probe_ollama", return_value=("reachable", True),
+        ), patch(
+            "scripts.runtime_guard._read_service",
+            return_value=("running", "match", True),
+        ), patch(
+            "scripts.runtime_guard._full_readiness", return_value=("ready", "none"),
+        ), patch(
+            "scripts.runtime_guard._trusted_ollama_executable",
+        ) as trusted, patch(
+            "scripts.runtime_guard._verified_executable_sha256",
+        ) as verify, patch(
+            "scripts.runtime_guard._open_executable_descriptor",
+        ) as open_executable, patch(
+            "scripts.runtime_guard._spawn_ollama",
+        ) as spawn, patch(
+            "scripts.runtime_guard.subprocess.Popen",
+        ) as popen:
+            payload, code = guard._guard_locked(**arguments)
+
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["blockers"], [])
+        self.assertEqual(payload["action"], "none")
+        trusted.assert_not_called()
+        verify.assert_not_called()
+        open_executable.assert_not_called()
+        spawn.assert_not_called()
+        popen.assert_not_called()
+
     def test_pinned_spawn_rejects_a_path_swap_before_popen(self):
         executable = Path("C:/trusted/ollama.exe")
         expected = "a" * 64
@@ -1060,6 +1166,8 @@ class RuntimeGuardTests(unittest.TestCase):
 
     def test_windows_spawn_uses_exact_serve_command_and_breakaway_flags(self):
         executable = Path("C:/trusted/ollama.exe")
+        expected = "e" * 64
+        signature = (1, 2, stat.S_IFREG, 1, 3, 4)
         child = Mock()
         with patch.object(guard.os, "name", "nt"), patch.object(
             guard.subprocess, "DETACHED_PROCESS", 0x01, create=True,
@@ -1068,10 +1176,19 @@ class RuntimeGuardTests(unittest.TestCase):
         ), patch.object(
             guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x04, create=True,
         ), patch(
+            "scripts.runtime_guard._verified_executable_sha256",
+            return_value=contextlib.nullcontext(signature),
+        ) as verify, patch(
+            "scripts.runtime_guard._assert_executable_signature",
+        ) as assert_signature, patch(
             "scripts.runtime_guard.subprocess.Popen", return_value=child,
         ) as popen:
-            self.assertIs(guard._spawn_ollama(executable), child)
+            self.assertIs(guard._spawn_ollama(
+                executable, expected_sha256=expected,
+            ), child)
         popen.assert_called_once()
+        verify.assert_called_once_with(executable, expected)
+        assert_signature.assert_called_once_with(executable, signature)
         args, kwargs = popen.call_args
         self.assertEqual(args, ([str(executable), "serve"],))
         self.assertEqual(kwargs["cwd"], executable.parent)
@@ -1090,7 +1207,7 @@ class RuntimeGuardTests(unittest.TestCase):
             "scripts.runtime_guard.subprocess.Popen",
         ) as unavailable_popen:
             with self.assertRaisesRegex(RuntimeError, "creation flags"):
-                guard._spawn_ollama(executable)
+                guard._spawn_ollama(executable, expected_sha256=expected)
         unavailable_popen.assert_not_called()
 
         denied = PermissionError(13, "scheduler denied breakaway")
@@ -1102,11 +1219,17 @@ class RuntimeGuardTests(unittest.TestCase):
         ), patch.object(
             guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x04, create=True,
         ), patch(
+            "scripts.runtime_guard._verified_executable_sha256",
+            return_value=contextlib.nullcontext(signature),
+        ), patch(
+            "scripts.runtime_guard._assert_executable_signature",
+        ), patch(
             "scripts.runtime_guard.subprocess.Popen",
             side_effect=[denied, child],
         ) as inherited_popen:
             result = guard._spawn_ollama(
-                executable, allow_job_inheritance=True,
+                executable, expected_sha256=expected,
+                allow_job_inheritance=True,
             )
         self.assertIs(result, child)
         self.assertEqual(inherited_popen.call_count, 2)
@@ -1116,10 +1239,15 @@ class RuntimeGuardTests(unittest.TestCase):
         denied_again = PermissionError(13, "scheduler denied breakaway")
         denied_again.winerror = 5
         with patch.object(guard.os, "name", "nt"), patch(
+            "scripts.runtime_guard._verified_executable_sha256",
+            return_value=contextlib.nullcontext(signature),
+        ), patch(
+            "scripts.runtime_guard._assert_executable_signature",
+        ), patch(
             "scripts.runtime_guard.subprocess.Popen", side_effect=denied_again,
         ) as strict_popen:
             with self.assertRaises(PermissionError):
-                guard._spawn_ollama(executable)
+                guard._spawn_ollama(executable, expected_sha256=expected)
         strict_popen.assert_called_once()
 
     def test_opt_in_result_journal_is_fixed_matches_stdout_and_uses_mode_0600(self):
