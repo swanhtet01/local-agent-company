@@ -195,6 +195,7 @@ MAX_KNOWLEDGE_BYTES = 2_000_000
 MAX_KNOWLEDGE_AUDIT_SOURCES = 64
 KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
+KNOWLEDGE_AUTHORITY_SCHEMA = "local-company.knowledge-authority.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
@@ -568,6 +569,7 @@ class SourceHit:
     line_start: int
     line_end: int
     evidence_id: str
+    authority: int = 0
 
 
 @dataclass(frozen=True)
@@ -1503,6 +1505,14 @@ class Company:
                     PRIMARY KEY(project_id, knowledge_id),
                     FOREIGN KEY(project_id) REFERENCES projects(id),
                     FOREIGN KEY(knowledge_id) REFERENCES knowledge(id)
+                );
+                CREATE TABLE IF NOT EXISTS project_knowledge_authority (
+                    project_id TEXT NOT NULL, knowledge_id TEXT NOT NULL,
+                    authority INTEGER NOT NULL CHECK(authority BETWEEN -100 AND 100),
+                    PRIMARY KEY(project_id, knowledge_id),
+                    FOREIGN KEY(project_id, knowledge_id)
+                        REFERENCES project_knowledge(project_id, knowledge_id)
+                        ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS action_requests (
                     id TEXT PRIMARY KEY, job_id TEXT, category TEXT NOT NULL,
@@ -2739,6 +2749,52 @@ class Company:
                 ))
             return list(db.execute("SELECT id, path, added_at FROM knowledge ORDER BY added_at DESC"))
 
+    def set_knowledge_authority(
+        self, source_id: str, project: str, authority: int,
+    ) -> dict[str, object]:
+        """Set an explicit project-scoped retrieval authority without reading a model."""
+        self.initialize()
+        if type(authority) is not int or not -100 <= authority <= 100:
+            raise ValueError("Knowledge authority must be an integer between -100 and 100")
+        project_id = self._resolve_project(project)[0]
+        with closing(self._connect(immediate=True)) as db, db:
+            attached = db.execute(
+                "SELECT COALESCE(pka.authority, 0) FROM project_knowledge pk "
+                "LEFT JOIN project_knowledge_authority pka "
+                "ON pka.project_id=pk.project_id AND pka.knowledge_id=pk.knowledge_id "
+                "WHERE pk.project_id=? AND pk.knowledge_id=?",
+                (project_id, source_id),
+            ).fetchone()
+            if attached is None:
+                raise ValueError("Knowledge source is not attached to the selected project")
+            changed = int(attached[0]) != authority
+            if changed and authority == 0:
+                db.execute(
+                    "DELETE FROM project_knowledge_authority "
+                    "WHERE project_id=? AND knowledge_id=?",
+                    (project_id, source_id),
+                )
+            elif changed:
+                db.execute(
+                    "INSERT INTO project_knowledge_authority"
+                    "(project_id, knowledge_id, authority) VALUES (?, ?, ?) "
+                    "ON CONFLICT(project_id, knowledge_id) DO UPDATE "
+                    "SET authority=excluded.authority",
+                    (project_id, source_id, authority),
+                )
+        return {
+            "schema": KNOWLEDGE_AUTHORITY_SCHEMA,
+            "project_id": project_id,
+            "source_id": source_id,
+            "authority": authority,
+            "effects": {
+                "knowledge_authority_mutated": changed,
+                "source_file_mutated": False,
+                "model_called": False,
+                "work_started": False,
+            },
+        }
+
     def search_knowledge(self, query: str, limit: int = 4, project: str | None = None) -> list[SourceHit]:
         self.initialize()
         if limit < 1:
@@ -2750,16 +2806,23 @@ class Company:
             return []
         hits: list[SourceHit] = []
         named_positions: dict[str, int] = {}
+        authorities: dict[str, int] = {}
         with closing(self._connect()) as db:
             if project_id:
                 rows = db.execute(
-                    "SELECT k.id, k.path, k.sha256, k.content FROM knowledge k "
-                    "JOIN project_knowledge pk ON pk.knowledge_id=k.id WHERE pk.project_id=?",
+                    "SELECT k.id, k.path, k.sha256, k.content, "
+                    "COALESCE(pka.authority, 0) FROM knowledge k "
+                    "JOIN project_knowledge pk ON pk.knowledge_id=k.id "
+                    "LEFT JOIN project_knowledge_authority pka "
+                    "ON pka.project_id=pk.project_id AND pka.knowledge_id=pk.knowledge_id "
+                    "WHERE pk.project_id=?",
                     (project_id,),
                 ).fetchall()
             else:
-                rows = db.execute("SELECT id, path, sha256, content FROM knowledge").fetchall()
-        for source_id, path, source_sha256, content in rows:
+                rows = db.execute(
+                    "SELECT id, path, sha256, content, 0 FROM knowledge"
+                ).fetchall()
+        for source_id, path, source_sha256, content, authority in rows:
             lower = content.lower()
             score = sum(lower.count(term) for term in terms)
             basename = Path(path).name.lower()
@@ -2785,8 +2848,9 @@ class Company:
             ).encode("utf-8")).hexdigest()[:16]
             hits.append(SourceHit(
                 path, excerpt, score, source_id, source_sha256, start, end,
-                line_start, line_end, evidence_id,
+                line_start, line_end, evidence_id, int(authority),
             ))
+            authorities[source_id] = int(authority)
             if explicitly_named:
                 named_positions[source_id] = named_position
         if len(named_positions) > limit:
@@ -2799,6 +2863,7 @@ class Company:
             key=lambda hit: (
                 0 if hit.source_id in named_positions else 1,
                 named_positions.get(hit.source_id, 0),
+                -authorities.get(hit.source_id, 0),
                 -hit.score,
                 hit.path,
             ),
@@ -2820,6 +2885,7 @@ class Company:
             source_items.append({
                 "source_id": hit.source_id, "path": hit.path, "sha256": hit.source_sha256,
                 "captured_at": created_at, "freshness": "current",
+                "authority": hit.authority,
             })
         evidence_items = [{
             "evidence_id": hit.evidence_id, "kind": "source_excerpt",
@@ -2868,7 +2934,7 @@ class Company:
                     str(source["path"]), str(item["quote"]), int(item.get("score", 0)),
                     str(source["source_id"]), str(source["sha256"]), int(item["char_start"]),
                     int(item["char_end"]), int(item["line_start"]), int(item["line_end"]),
-                    str(item["evidence_id"]),
+                    str(item["evidence_id"]), int(source.get("authority", 0)),
                 ))
             except (KeyError, TypeError, ValueError):
                 continue
@@ -2911,6 +2977,9 @@ class Company:
         for source in sources:
             if not isinstance(source, dict) or not isinstance(source.get("source_id"), str):
                 return False, manifest, "invalid_source"
+            authority = source.get("authority", 0)
+            if type(authority) is not int or not -100 <= authority <= 100:
+                return False, manifest, "invalid_source_authority"
             source_id = source["source_id"]
             stored = stored_sources.get(source_id)
             if not stored or Path(str(source.get("path", ""))).name.lower() == "service.json":
@@ -5340,6 +5409,10 @@ class Company:
                 "assignments": rows("SELECT * FROM assignments ORDER BY job_id, sequence"),
                 "knowledge_index": rows("SELECT id, path, sha256, added_at FROM knowledge ORDER BY path"),
                 "project_knowledge": rows("SELECT * FROM project_knowledge ORDER BY project_id, knowledge_id"),
+                "project_knowledge_authority": rows(
+                    "SELECT * FROM project_knowledge_authority "
+                    "ORDER BY project_id, knowledge_id"
+                ),
                 "action_requests": rows("SELECT * FROM action_requests ORDER BY created_at"),
                 "events": rows("SELECT * FROM events ORDER BY id"),
                 "queue": rows(
@@ -6682,7 +6755,7 @@ class Company:
                 ],
                 "sources": [[
                     hit.source_id, hit.path, hit.source_sha256, hit.char_start, hit.char_end,
-                    hit.evidence_id, hit.excerpt, hit.score,
+                    hit.evidence_id, hit.excerpt, hit.score, hit.authority,
                 ] for hit in sources],
             },
             ensure_ascii=False,

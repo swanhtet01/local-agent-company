@@ -161,6 +161,12 @@ def parser() -> argparse.ArgumentParser:
         "refresh", help="Atomically refresh every registered source for one project"
     )
     refresh_knowledge.add_argument("--project", required=True)
+    authority_knowledge = knowledge_sub.add_parser(
+        "authority", help="Set explicit project-scoped retrieval authority"
+    )
+    authority_knowledge.add_argument("source_id")
+    authority_knowledge.add_argument("--project", required=True)
+    authority_knowledge.add_argument("--level", type=int, required=True)
     search = knowledge_sub.add_parser("search", help="Preview local retrieval")
     search.add_argument("query")
     search.add_argument("--project")
@@ -448,12 +454,19 @@ def main() -> int:
                 print(json.dumps(
                     company.refresh_project_knowledge(args.project), indent=2,
                 ))
+            elif args.knowledge_command == "authority":
+                print(json.dumps(company.set_knowledge_authority(
+                    args.source_id, args.project, args.level,
+                ), indent=2))
             elif args.knowledge_command == "search":
                 hits = company.search_knowledge(args.query, project=args.project)
                 if not hits:
                     print("No relevant local sources found.")
                 for hit in hits:
-                    print(f"[{hit.score}] {hit.path}\n{hit.excerpt}\n")
+                    print(
+                        f"[score={hit.score} authority={hit.authority}] "
+                        f"{hit.path}\n{hit.excerpt}\n"
+                    )
         elif args.command == "datasets":
             if args.dataset_command == "add":
                 dataset_id, brief_path, profile = company.profile_dataset(

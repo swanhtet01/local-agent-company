@@ -2553,6 +2553,52 @@ class CompanyTests(unittest.TestCase):
                     objective + ", n8.md", limit=8, project=project_id,
                 )
 
+    def test_project_knowledge_authority_precedes_frequency_but_not_explicit_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", MockModel())
+            project = company.create_project("Authority Lab")
+            stale = root / "stale.md"
+            current = root / "current.md"
+            stale.write_text("current live release commit " * 10, encoding="utf-8")
+            current.write_text("current live release commit is new", encoding="utf-8")
+            stale_id, _ = company.add_knowledge(stale, project)
+            current_id, _ = company.add_knowledge(current, project)
+
+            self.assertEqual(
+                Path(company.search_knowledge(
+                    "current live release commit", project=project,
+                )[0].path).name,
+                "stale.md",
+            )
+            result = company.set_knowledge_authority(current_id, project, 100)
+            self.assertEqual(result["authority"], 100)
+            self.assertFalse(result["effects"]["model_called"])
+            current_hit = company.search_knowledge(
+                "current live release commit", project=project,
+            )[0]
+            self.assertEqual(Path(current_hit.path).name, "current.md")
+            self.assertEqual(current_hit.authority, 100)
+            unchanged = company.set_knowledge_authority(current_id, project, 100)
+            self.assertFalse(unchanged["effects"]["knowledge_authority_mutated"])
+            self.assertEqual(
+                Path(company.search_knowledge(
+                    "Use stale.md for the current live release commit", project=project,
+                )[0].path).name,
+                "stale.md",
+            )
+            company.set_knowledge_authority(current_id, project, 0)
+            self.assertEqual(
+                Path(company.search_knowledge(
+                    "current live release commit", project=project,
+                )[0].path).name,
+                "stale.md",
+            )
+            with self.assertRaisesRegex(ValueError, "between -100 and 100"):
+                company.set_knowledge_authority(current_id, project, 101)
+            with self.assertRaisesRegex(ValueError, "not attached"):
+                company.set_knowledge_authority("missing", project, 1)
+
     def test_unknown_role_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
@@ -4115,6 +4161,7 @@ class CompanyTests(unittest.TestCase):
             self.assertNotIn("run_token", payload["queue"][0])
             self.assertNotIn("content", payload["knowledge_index"][0])
             self.assertNotIn("private local reference body", audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["project_knowledge_authority"], [])
 
     def test_health_snapshot_reports_local_storage(self):
         with tempfile.TemporaryDirectory() as tmp:
