@@ -569,6 +569,16 @@ def _terminate_owned_child(process: subprocess.Popen[bytes]) -> bool:
         return False
 
 
+def _windows_detached_creation_flags() -> int:
+    names = (
+        "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_BREAKAWAY_FROM_JOB",
+    )
+    values = tuple(getattr(subprocess, name, None) for name in names)
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise RuntimeError("Required detached-process creation flags are unavailable")
+    return values[0] | values[1] | values[2]
+
+
 def _existing_state_blocks_start(state: dict[str, object]) -> tuple[bool, str]:
     observation = _observe_process(int(state["pid"]))
     if not _has_current_identity(state):
@@ -628,11 +638,7 @@ def start_service(
         creationflags = 0
         popen_kwargs: dict[str, object] = {}
         if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                | getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
+            creationflags = _windows_detached_creation_flags()
         else:
             popen_kwargs["start_new_session"] = True
         process: subprocess.Popen[bytes] | None = None

@@ -16,6 +16,32 @@ The default 4K context and 30-second model keep-alive are the Ally-safe profile.
 
 Repeated direct runs reuse a prior 24-hour report only when its inputs, stable model identity/configuration, current evaluator pass, and sealed bytes all match. Legacy, failed, changed, moved, or uncacheable work runs fresh. Use `retry JOB_ID` deliberately when the prior result—not the inputs—needs another model attempt.
 
+## One-shot runtime guard and Windows cutover
+
+Use the runtime guard only to converge the local Ollama listener and detached dashboard around an existing validated store. It never runs missions, advances schedules, pulls models, invokes service shutdown, or kills an existing recorded process:
+
+```powershell
+cd C:\Users\YOUR-NAME\Projects\local-agent-company
+python .\scripts\runtime_guard.py `
+  --home "C:\Users\YOUR-NAME\Projects\supermega-local-company-state" `
+  --ollama-executable "C:\Users\YOUR-NAME\AppData\Local\Programs\Ollama\ollama.exe"
+```
+
+Replace the example paths with absolute fixed-local-drive paths for this machine. Exit `0` means Ollama, the configured model, the checked build, live-build identity, store/runtime attestations, idle work state, worker availability, and exact service identity are ready. Exit `1` names a determinate manual action. Exit `2` means the runtime is indeterminate; the only possible cleanup mutation is reaping the exact Ollama child launched by that guard run. Exit `3` means the arguments are invalid. Inspect the single JSON object's `action`, `blockers`, and `changes`; do not infer success merely because a process exists. Then run `python .\scripts\check_readiness.py --home "COMPANY-HOME" --model qwen3.5:0.8b` independently before accepting work.
+
+Automatic recovery is deliberately narrow. The guard launches Ollama only when two fixed `127.0.0.1:11434` probes and a socket check confirm no listener. It does not launch on a timeout, malformed response, HTTP error, unsafe executable, or missing model. It starts the `127.0.0.1:8765` service only for a confirmed absent, stale, safely stopped, or safely failed state. A legacy PID, matching but unreachable process, endpoint mismatch, configuration mismatch, or unavailable identity requires inspection and remains untouched.
+
+The Windows task is an operator cutover procedure; it is not registered or claimed live by this documentation:
+
+1. Pause source edits, validate and commit the stamped build, run the guard manually with the final absolute paths, and require exit `0` followed by readiness exit `0`.
+2. In Task Scheduler, create one task owned by the current user with **Run only when user is logged on** and the least-privilege run level. Never select `SYSTEM`, another account, or **Run with highest privileges**.
+3. Use an **At log on** trigger with a short startup delay and repeat it every five minutes indefinitely. Enable **Run task as soon as possible after a scheduled start is missed** and set the multiple-instance rule to **Do not start a new instance**.
+4. Set the action to an absolute `python.exe`, pass the absolute `runtime_guard.py`, `--home`, and `--ollama-executable` paths as arguments, and set **Start in** to the repository root. Put no credentials, service tokens, or other secrets in the task or arguments. Set a bounded execution limit of about three minutes.
+5. Run the task once from Task Scheduler. Require a successful last-run result, then rerun the guard and readiness manually to confirm the same store, fixed endpoints, installed model, and live service.
+6. If this replaces separate Ollama or dashboard logon launchers, disable those older launchers only after the new task passes the prior step. Keep one automatic lifecycle mechanism; the guard's own lock is a second defense, not a reason to keep duplicate launchers.
+
+The five-minute task checks lifecycle only. Queue review and mission execution remain explicit owner actions in the daily loop.
+
 ## Good objectives
 
 - `Create a 14-day inventory improvement plan with daily checks and a maximum budget of 300.`
@@ -27,6 +53,10 @@ Avoid vague instructions such as `run everything`. The coordinator can recruit s
 ## Incident handling
 
 - Ollama unavailable: run `doctor`, confirm Ollama is running, and confirm the requested model has been pulled.
+- Runtime guard reports `install_configured_model`: pull that exact model manually, then rerun the guard. The guard never downloads it.
+- Runtime guard reports an Ollama inspection action: do not launch another copy automatically. A listener existed or the fixed-loopback response was ambiguous; inspect Ollama locally and rerun the guard.
+- Runtime guard reports a service inspection or migration action: do not delete service state or force a restart. Follow the service identity incidents below, then rerun the guard and readiness checks.
+- Runtime guard reports `runtime_guard_busy`: wait for the current one-shot check. The lock file may remain after exit and is not itself evidence that a guard is running.
 - Model call fails: the job becomes `failed`; inspect it with `show`, fix the local runtime, then use `retry`.
 - Process stops: use `recover --stale-minutes 60`. It interrupts stale jobs, revokes their execution leases, and marks stale queue claims failed without a model rerun; late responses are discarded. Then use `resume JOB_ID` deliberately to issue a new lease and preserve completed assignments, or reset the failed queue item after review.
 - Another mission is running: wait for it. Only use `recover` when its heartbeat is genuinely stale.

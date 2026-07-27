@@ -180,6 +180,24 @@ It returns exit 0 only when the selected local company home has a valid identity
 
 The opaque store ID identifies database lineage, not an exact path, freshness, or authenticity. Copies, hardlinks, and restored backups retain it, and a local writer could spoof it. The live process pins its first valid identity and keeps each identity check in the same SQLite transaction as the corresponding read or mutation, so a different valid store cannot be used silently during that operation.
 
+## One-shot local runtime guard
+
+`runtime_guard.py` is a bounded, fail-closed lifecycle check for an already initialized company store. It is not a mission scheduler or worker. It never runs a queued mission, materializes a schedule, calls a model, pulls a model, invokes service shutdown, or kills an existing recorded process. Run it manually with explicit local paths before using it from an operating-system task:
+
+```powershell
+python .\scripts\runtime_guard.py `
+  --home "C:\Users\YOUR-NAME\Projects\supermega-local-company-state" `
+  --ollama-executable "C:\Users\YOUR-NAME\AppData\Local\Programs\Ollama\ollama.exe"
+```
+
+The guard validates the selected store read-only, pins its opaque identity, checks the stamped operational build, and uses a private singleton lock. All HTTP checks remain on loopback: Ollama is fixed at `http://127.0.0.1:11434/api/tags`, and automatic dashboard starts are fixed at `http://127.0.0.1:8765`; the service port argument accepts only `8765`. Proxies and redirects are disabled. Ollama is launched at most once, with `OLLAMA_HOST=127.0.0.1:11434`, only after two strict probes plus a socket check confirm that the listener is absent. On Windows systems that silently time out closed loopback connects, two native IPv4-and-IPv6 TCP listener-table snapshots must both confirm that no listener owns the port. A reset, unexpected HTTP response, malformed or oversized inventory, unsafe executable, unavailable listener table, or other ambiguous result is never treated as permission to launch. If the newly owned Ollama child cannot establish a valid listener, the guard reaps only that exact child and reports an inspection action; it never kills by PID or process name. A reachable Ollama instance without the configured model also starts nothing: install that model deliberately with `ollama pull`, then rerun the guard.
+
+The local service is started only when its checked state is `not_configured`, safely stopped or failed with an absent or mismatched process, stale with an absent process, or `stale_pid_reused` with a mismatched process. A live matching service is left alone. Legacy, unreachable, endpoint-mismatched, configuration-mismatched, PID-ambiguous, or malformed state fails closed; the guard never tries to repair it by stopping or replacing a process. Before any ready result, the guard also runs the composed readiness gate for live-build equality, live company/runtime attestation, idle work state, worker availability, Ollama, and the model. It then rechecks the exact service process, store, build, and Ollama snapshots once more.
+
+The command writes one compact `local-company.runtime-guard.v1` JSON object. Exit `0` means the complete runtime was confirmed ready, with `status` showing whether recovery occurred. Exit `1` reports a bounded operator action such as installing the configured model, starting a component manually, or waiting for the other guard instance. Exit `2` is an indeterminate store, build, listener, service identity, or internal result; exit `3` means invalid arguments. Output includes fixed `missions_started: 0` and `models_pulled: 0` counters and does not expose service tokens or process fingerprints. Follow the returned `action`, rerun the guard, and still use `check_readiness.py` as the authoritative gate before accepting a mission.
+
+The repository does not register a Windows scheduled task by itself. The intended cutover is a current-user, least-privilege task that invokes this one-shot command every five minutes with absolute Python, script, company-home, and Ollama-executable paths. Configure **Run only when user is logged on**, **Do not start a new instance**, **Start the task as soon as possible after a scheduled start is missed**, and a bounded execution limit. Do not run it as `SYSTEM` or an administrator: Ollama models and the company store belong to the selected user. Register and test that task only after a manual exit-0 run; see `OPERATOR.md` for the cutover checklist. The task maintains local listeners only and does not make queue execution autonomous.
+
 ## Inspect and recover work
 
 ```powershell
