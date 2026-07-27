@@ -981,19 +981,34 @@ def render_quality_supersession_overview(company: Company) -> str:
     count = overview.get("superseded_count")
     verified_count = overview.get("verified_count")
     review_count = overview.get("review_required_count")
+    audit_counts = overview.get("retirement_audit_counts")
+    audit_review_count = overview.get("retirement_audit_review_required_count")
+    audit_statuses = {
+        "input_fingerprint_bound", "successor_proof_bound",
+        "legacy_reason_only", "malformed",
+    }
     if (
         overview.get("schema") != QUALITY_SUPERSESSION_LIST_SCHEMA
         or type(count) is not int or count < 0
         or type(verified_count) is not int or verified_count < 0
         or type(review_count) is not int or review_count < 0
         or verified_count + review_count != count
+        or not isinstance(audit_counts, dict)
+        or set(audit_counts) != audit_statuses
+        or any(type(value) is not int or value < 0 for value in audit_counts.values())
+        or sum(audit_counts.values()) != count
+        or type(audit_review_count) is not int
+        or audit_review_count != (
+            audit_counts.get("legacy_reason_only", -1)
+            + audit_counts.get("malformed", -1)
+        )
         or not isinstance(items, list) or len(items) != count
         or overview.get("observed_state_stable") is not True
         or overview.get("next_action") not in {
             "none", "review_superseded_failures",
         }
         or (
-            (review_count > 0)
+            (review_count > 0 or audit_review_count > 0)
             != (overview.get("next_action") == "review_superseded_failures")
         )
         or not isinstance(effects, dict)
@@ -1009,6 +1024,9 @@ def render_quality_supersession_overview(company: Company) -> str:
         "queue_id", "failed_job_id", "proof_status", "candidate_count",
         "checked_candidate_count", "successor_job_id", "successor_score",
         "evaluator_version", "proof_sha256", "blockers", "next_action",
+        "retirement_audit_status", "retirement_event_id",
+        "retirement_recorded_at", "retirement_successor_job_id",
+        "retirement_proof_sha256", "retirement_input_fingerprint_sha256",
     }
     for item in items:
         if (
@@ -1027,6 +1045,22 @@ def render_quality_supersession_overview(company: Company) -> str:
                 not isinstance(blocker, str)
                 or re.fullmatch(r"[a-z0-9_]+", blocker) is None
                 for blocker in item["blockers"]
+            )
+            or item.get("retirement_audit_status") not in audit_statuses
+            or (
+                item.get("retirement_event_id") is not None
+                and (
+                    type(item.get("retirement_event_id")) is not int
+                    or item["retirement_event_id"] < 1
+                )
+            )
+            or (
+                item.get("retirement_recorded_at") is not None
+                and (
+                    not isinstance(item.get("retirement_recorded_at"), str)
+                    or len(item["retirement_recorded_at"]) > 64
+                    or any(ord(character) < 32 for character in item["retirement_recorded_at"])
+                )
             )
         ):
             raise ValueError("Quality supersession overview is malformed")
@@ -1056,6 +1090,52 @@ def render_quality_supersession_overview(company: Company) -> str:
             or item.get("next_action") != "review_superseded_failure"
         ):
             raise ValueError("Quality supersession overview is malformed")
+        audit_status = item["retirement_audit_status"]
+        if audit_status in {
+            "input_fingerprint_bound", "successor_proof_bound",
+        }:
+            if (
+                not isinstance(item.get("retirement_successor_job_id"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{12}", item["retirement_successor_job_id"],
+                ) is None
+                or not isinstance(item.get("retirement_proof_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", item["retirement_proof_sha256"],
+                ) is None
+                or (
+                    audit_status == "input_fingerprint_bound"
+                    and (
+                        not isinstance(
+                            item.get("retirement_input_fingerprint_sha256"), str,
+                        )
+                        or re.fullmatch(
+                            r"[0-9a-f]{64}",
+                            item["retirement_input_fingerprint_sha256"],
+                        ) is None
+                    )
+                )
+                or (
+                    audit_status == "successor_proof_bound"
+                    and item.get("retirement_input_fingerprint_sha256") is not None
+                )
+            ):
+                raise ValueError("Quality supersession overview is malformed")
+        elif any(
+            item.get(key) is not None for key in (
+                "retirement_successor_job_id", "retirement_proof_sha256",
+                "retirement_input_fingerprint_sha256",
+            )
+        ):
+            raise ValueError("Quality supersession overview is malformed")
+        if (
+            audit_status != "malformed"
+            and (
+                item.get("retirement_event_id") is None
+                or item.get("retirement_recorded_at") is None
+            )
+        ):
+            raise ValueError("Quality supersession overview is malformed")
 
     def cell(value: object) -> str:
         return html.escape(str(value))
@@ -1065,6 +1145,42 @@ def render_quality_supersession_overview(company: Company) -> str:
             f"<li><code>{cell(value)}</code></li>" for value in values
         ) + "</ul>" if values else '<span class="muted">none</span>'
 
+    def successor_cell(item: dict[str, object]) -> str:
+        if item["successor_job_id"] is None:
+            return '<span class="muted">none</span>'
+        return (
+            f'<code>{cell(item["successor_job_id"])}</code><br>'
+            f'{cell(item["successor_score"])}/100<br>'
+            f'<span class="meta"><code>{cell(item["evaluator_version"])}</code></span>'
+        )
+
+    def audit_cell(item: dict[str, object]) -> str:
+        parts = [
+            f'<span class="{cell(item["retirement_audit_status"])}">'
+            f'{cell(item["retirement_audit_status"])}</span>',
+        ]
+        if item["retirement_event_id"] is not None:
+            parts.append(
+                f'<span class="meta">event {cell(item["retirement_event_id"])} &middot; '
+                f'{cell(item["retirement_recorded_at"])}</span>'
+            )
+        if item["retirement_successor_job_id"] is not None:
+            parts.append(
+                f'<span class="meta">successor <code>'
+                f'{cell(item["retirement_successor_job_id"])}</code></span>'
+            )
+        if item["retirement_proof_sha256"] is not None:
+            parts.append(
+                f'<span class="meta">proof <code>'
+                f'{cell(item["retirement_proof_sha256"])}</code></span>'
+            )
+        if item["retirement_input_fingerprint_sha256"] is not None:
+            parts.append(
+                f'<span class="meta">inputs <code>'
+                f'{cell(item["retirement_input_fingerprint_sha256"])}</code></span>'
+            )
+        return "<br>".join(parts)
+
     rows = "".join(
         "<tr>"
         f'<td><a href="/quality-supersession/{cell(item["queue_id"])}">'
@@ -1072,15 +1188,16 @@ def render_quality_supersession_overview(company: Company) -> str:
         f'<span class="meta">mission <code>{cell(item["failed_job_id"])}</code></span></td>'
         f'<td><span class="{cell(item["proof_status"])}">'
         f'{cell(item["proof_status"])}</span></td>'
+        f'<td>{audit_cell(item)}</td>'
         f'<td>{cell(item["candidate_count"])} exact<br>'
         f'<span class="meta">{cell(item["checked_candidate_count"])} current</span></td>'
-        f'<td>{("<code>" + cell(item["successor_job_id"]) + "</code><br>" + cell(item["successor_score"]) + "/100<br><span class=\"meta\"><code>" + cell(item["evaluator_version"]) + "</code></span>") if item["successor_job_id"] else "<span class=\"muted\">none</span>"}</td>'
+        f'<td>{successor_cell(item)}</td>'
         f'<td>{tokens(item["blockers"])}</td>'
         f'<td><code>{cell(item["proof_sha256"] or "none")}</code></td>'
         f'<td><code>{cell(item["next_action"])}</code></td>'
         "</tr>"
         for item in items
-    ) or '<tr><td colspan="7" class="empty">No retired quality failures.</td></tr>'
+    ) or '<tr><td colspan="8" class="empty">No retired quality failures.</td></tr>'
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1088,17 +1205,17 @@ def render_quality_supersession_overview(company: Company) -> str:
 :root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
 body {{ max-width:1240px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
 .meta,.muted {{ color:#9aa7bd; }} .metrics {{ display:flex; gap:28px; flex-wrap:wrap; }}
-.metric {{ font-size:30px; font-weight:800; color:#ffd479; }} .verified {{ color:#87e6a8; }}
-.review_required {{ color:#ffb3b3; }} .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.metric {{ font-size:30px; font-weight:800; color:#ffd479; }} .verified,.input_fingerprint_bound {{ color:#87e6a8; }}
+.successor_proof_bound {{ color:#ffd479; }} .review_required,.legacy_reason_only,.malformed {{ color:#ffb3b3; }} .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
 table {{ width:100%; border-collapse:collapse; background:#121a2d; margin-top:24px; }}
 th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
 th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
 td code {{ overflow-wrap:anywhere; }} .empty {{ color:#6f7d95; text-align:center; }} .table-wrap {{ overflow-x:auto; }}
 </style></head><body><p><a href="/">&larr; Dashboard</a> &middot; <a href="/quality-failures">Active failures</a></p>
 <h1>Retired failure proof review</h1>
-<div class="metrics"><div><div class="metric">{cell(count)}</div><div class="meta">retired</div></div><div><div class="metric verified">{cell(verified_count)}</div><div class="meta">currently verified</div></div><div><div class="metric review_required">{cell(review_count)}</div><div class="meta">review required</div></div></div>
-<p class="boundary">Read-only current proof review. It changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reports, paths, source text, evidence text, and claims are withheld. A current warning does not rewrite the historical audit record.</p>
-<div class="table-wrap"><table><thead><tr><th>Retired queue</th><th>Proof status</th><th>Candidates</th><th>Successor</th><th>Blockers</th><th>Proof SHA-256</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div>
+<div class="metrics"><div><div class="metric">{cell(count)}</div><div class="meta">retired</div></div><div><div class="metric verified">{cell(verified_count)}</div><div class="meta">currently verified</div></div><div><div class="metric review_required">{cell(review_count)}</div><div class="meta">current-proof review</div></div><div><div class="metric verified">{cell(audit_counts['input_fingerprint_bound'] + audit_counts['successor_proof_bound'])}</div><div class="meta">retirement proof-bound</div></div><div><div class="metric review_required">{cell(audit_review_count)}</div><div class="meta">retirement-audit review</div></div></div>
+<p class="boundary">Read-only current and historical proof review. Current proof answers whether the successor still verifies now; retirement audit states whether the original event was reason-only, successor-proof-bound, or input-fingerprint-bound. This view changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reasons, reports, paths, source text, evidence text, and claims are withheld. A current warning does not rewrite the historical audit record.</p>
+<div class="table-wrap"><table><thead><tr><th>Retired queue</th><th>Current proof</th><th>Retirement audit</th><th>Candidates</th><th>Current successor</th><th>Blockers</th><th>Current proof SHA-256</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div>
 <p class="meta">Next action: <code>{cell(overview['next_action'])}</code> &middot; schema <code>{cell(overview['schema'])}</code></p>
 </body></html>"""
 

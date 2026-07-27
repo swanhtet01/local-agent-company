@@ -199,7 +199,7 @@ MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
-QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v1"
+QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
 QUALITY_RECOVERY_LIST_SCHEMA = "local-company.quality-recovery-list.v1"
 QUALITY_RECHECK_PREVIEW_SCHEMA = "local-company.quality-recheck-preview.v1"
@@ -207,6 +207,7 @@ OPERATOR_BRIEF_SCHEMA = "local-company.operator-brief.v1"
 MAX_QUALITY_RECOVERY_ITEMS = 100
 MAX_QUALITY_SUPERSESSION_CANDIDATES = 20
 MAX_QUALITY_SUPERSESSION_ITEMS = 20
+MAX_QUALITY_SUPERSESSION_AUDIT_EVENTS = 100
 MAX_OPERATOR_BRIEF_DATASETS = 1_000
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
@@ -6221,6 +6222,144 @@ class Company:
             "queue_ids": queue_ids,
         }
 
+    def _quality_supersession_audit_binding(
+        self, queue_id: str, failed_job_id: str,
+    ) -> dict[str, object]:
+        """Classify the latest matching retirement event without exposing its reason."""
+        empty = {
+            "retirement_audit_status": "malformed",
+            "retirement_event_id": None,
+            "retirement_recorded_at": None,
+            "retirement_successor_job_id": None,
+            "retirement_proof_sha256": None,
+            "retirement_input_fingerprint_sha256": None,
+        }
+        with closing(self._connect()) as db:
+            queue = db.execute(
+                "SELECT job_id, project_id, status FROM mission_queue WHERE id=?",
+                (queue_id,),
+            ).fetchone()
+            rows = list(db.execute(
+                "SELECT id, detail, created_at FROM events WHERE job_id=? "
+                "AND kind='queue_quality_failure_superseded' "
+                "ORDER BY id DESC LIMIT ?",
+                (failed_job_id, MAX_QUALITY_SUPERSESSION_AUDIT_EVENTS + 1),
+            ))
+        if (
+            not queue or queue[0] != failed_job_id or queue[2] != "superseded"
+            or len(rows) > MAX_QUALITY_SUPERSESSION_AUDIT_EVENTS
+        ):
+            return empty
+
+        selected: tuple[object, object, object] | None = None
+        selected_detail: dict[str, object] | None = None
+        for row in rows:
+            if not isinstance(row[1], str) or len(row[1].encode("utf-8")) > 8_192:
+                continue
+            try:
+                detail = json.loads(row[1])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(detail, dict) and detail.get("queue_id") == queue_id:
+                selected = row
+                selected_detail = detail
+                break
+        if selected is None or selected_detail is None:
+            return empty
+
+        event_id, _, created_at = selected
+        recorded_at: str | None = None
+        if isinstance(created_at, str) and len(created_at) <= 64:
+            try:
+                parsed_at = datetime.fromisoformat(created_at)
+                if parsed_at.tzinfo is not None:
+                    recorded_at = created_at
+            except ValueError:
+                pass
+        observed = {
+            **empty,
+            "retirement_event_id": (
+                event_id if type(event_id) is int and event_id > 0 else None
+            ),
+            "retirement_recorded_at": recorded_at,
+        }
+        base_keys = {
+            "job_id", "previous_status", "project_id", "queue_id",
+            "reason", "source",
+        }
+        proof_keys = {
+            "successor_job_id", "successor_evaluator_version",
+            "successor_score", "successor_chain_depth", "proof_schema",
+            "proof_sha256",
+        }
+        input_key = "successor_input_fingerprint_sha256"
+        reason = selected_detail.get("reason")
+        source = selected_detail.get("source")
+        base_valid = bool(
+            observed["retirement_event_id"] is not None
+            and recorded_at is not None
+            and selected_detail.get("job_id") == failed_job_id
+            and selected_detail.get("previous_status") == "quality_failed"
+            and selected_detail.get("project_id") == queue[1]
+            and selected_detail.get("queue_id") == queue_id
+            and isinstance(reason, str)
+            and reason == " ".join(reason.split())
+            and 20 <= len(reason) <= 240
+            and isinstance(source, str)
+            and source == " ".join(source.split())
+            and 1 <= len(source) <= 40
+        )
+        keys = frozenset(selected_detail)
+        if not base_valid:
+            return observed
+        if keys == base_keys:
+            observed["retirement_audit_status"] = "legacy_reason_only"
+            return observed
+        if keys not in {
+            frozenset(base_keys | proof_keys),
+            frozenset(base_keys | proof_keys | {input_key}),
+        }:
+            return observed
+
+        successor_job_id = selected_detail.get("successor_job_id")
+        evaluator_version = selected_detail.get("successor_evaluator_version")
+        score = selected_detail.get("successor_score")
+        chain_depth = selected_detail.get("successor_chain_depth")
+        proof_sha256 = selected_detail.get("proof_sha256")
+        proof_valid = bool(
+            isinstance(successor_job_id, str)
+            and re.fullmatch(r"[0-9a-f]{12}", successor_job_id)
+            and successor_job_id != failed_job_id
+            and isinstance(evaluator_version, str)
+            and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", evaluator_version)
+            and type(score) is int and 0 <= score <= 100
+            and type(chain_depth) is int and 1 <= chain_depth <= 100
+            and selected_detail.get("proof_schema")
+            == QUALITY_SUPERSESSION_PREVIEW_SCHEMA
+            and isinstance(proof_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", proof_sha256)
+        )
+        if not proof_valid:
+            return observed
+        input_fingerprint = selected_detail.get(input_key)
+        if input_key in keys and (
+            not isinstance(input_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", input_fingerprint) is None
+        ):
+            return observed
+        observed.update({
+            "retirement_audit_status": (
+                "input_fingerprint_bound" if input_key in keys
+                else "successor_proof_bound"
+            ),
+            "retirement_successor_job_id": successor_job_id,
+            "retirement_proof_sha256": proof_sha256,
+            "retirement_input_fingerprint_sha256": (
+                input_fingerprint if input_key in keys else None
+            ),
+        })
+        return observed
+
     def quality_supersession_summaries(self) -> dict[str, object]:
         """Return a stable pathless proof review for every bounded retired failure."""
         self.initialize()
@@ -6243,15 +6382,28 @@ class Company:
         first_pass = tuple(
             self.quality_supersession_preview(queue_id) for queue_id in queue_ids
         )
+        first_audits = tuple(
+            self._quality_supersession_audit_binding(
+                queue_id, str(preview.get("failed_job_id", "")),
+            )
+            for queue_id, preview in zip(queue_ids, first_pass, strict=True)
+        )
         index_middle = self._quality_supersession_index_snapshot()
         second_pass = tuple(
             self.quality_supersession_preview(queue_id) for queue_id in queue_ids
+        )
+        second_audits = tuple(
+            self._quality_supersession_audit_binding(
+                queue_id, str(preview.get("failed_job_id", "")),
+            )
+            for queue_id, preview in zip(queue_ids, second_pass, strict=True)
         )
         index_after = self._quality_supersession_index_snapshot()
         if (
             index_before != index_middle
             or index_before != index_after
             or first_pass != second_pass
+            or first_audits != second_audits
         ):
             raise RuntimeError(
                 "Quality supersession review changed during observation; "
@@ -6259,7 +6411,14 @@ class Company:
             )
 
         items: list[dict[str, object]] = []
-        for queue_id, preview in zip(queue_ids, second_pass, strict=True):
+        audit_statuses = {
+            "input_fingerprint_bound", "successor_proof_bound",
+            "legacy_reason_only", "malformed",
+        }
+        audit_counts = {status: 0 for status in sorted(audit_statuses)}
+        for queue_id, preview, audit in zip(
+            queue_ids, second_pass, second_audits, strict=True,
+        ):
             successor = preview.get("successor")
             blockers = preview.get("blockers")
             effects = preview.get("effects")
@@ -6290,6 +6449,80 @@ class Company:
                 or any(value is not False for value in effects.values())
             ):
                 raise ValueError("Quality supersession preview is malformed")
+            if (
+                not isinstance(audit, dict)
+                or set(audit) != {
+                    "retirement_audit_status", "retirement_event_id",
+                    "retirement_recorded_at", "retirement_successor_job_id",
+                    "retirement_proof_sha256",
+                    "retirement_input_fingerprint_sha256",
+                }
+                or audit.get("retirement_audit_status") not in audit_statuses
+                or (
+                    audit.get("retirement_event_id") is not None
+                    and (
+                        type(audit.get("retirement_event_id")) is not int
+                        or audit["retirement_event_id"] < 1
+                    )
+                )
+                or (
+                    audit.get("retirement_recorded_at") is not None
+                    and (
+                        not isinstance(audit.get("retirement_recorded_at"), str)
+                        or len(audit["retirement_recorded_at"]) > 64
+                    )
+                )
+            ):
+                raise ValueError("Quality supersession audit binding is malformed")
+            audit_status = str(audit["retirement_audit_status"])
+            if audit_status in {
+                "input_fingerprint_bound", "successor_proof_bound",
+            }:
+                if (
+                    not isinstance(audit.get("retirement_successor_job_id"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{12}", audit["retirement_successor_job_id"],
+                    ) is None
+                    or not isinstance(audit.get("retirement_proof_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", audit["retirement_proof_sha256"],
+                    ) is None
+                    or (
+                        audit_status == "input_fingerprint_bound"
+                        and (
+                            not isinstance(
+                                audit.get("retirement_input_fingerprint_sha256"),
+                                str,
+                            )
+                            or re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                audit["retirement_input_fingerprint_sha256"],
+                            ) is None
+                        )
+                    )
+                    or (
+                        audit_status == "successor_proof_bound"
+                        and audit.get("retirement_input_fingerprint_sha256")
+                        is not None
+                    )
+                ):
+                    raise ValueError("Quality supersession audit binding is malformed")
+            elif any(
+                audit.get(key) is not None for key in (
+                    "retirement_successor_job_id", "retirement_proof_sha256",
+                    "retirement_input_fingerprint_sha256",
+                )
+            ):
+                raise ValueError("Quality supersession audit binding is malformed")
+            if (
+                audit_status != "malformed"
+                and (
+                    audit.get("retirement_event_id") is None
+                    or audit.get("retirement_recorded_at") is None
+                )
+            ):
+                raise ValueError("Quality supersession audit binding is malformed")
+            audit_counts[audit_status] += 1
             if eligibility == "already_superseded":
                 if (
                     not isinstance(successor, dict)
@@ -6335,21 +6568,29 @@ class Company:
                 "proof_sha256": preview.get("proof_sha256"),
                 "blockers": list(blockers),
                 "next_action": preview["next_action"],
+                **audit,
             })
 
         review_required_count = sum(
             item["proof_status"] == "review_required" for item in items
+        )
+        audit_review_required_count = (
+            audit_counts["legacy_reason_only"] + audit_counts["malformed"]
         )
         return {
             "schema": QUALITY_SUPERSESSION_LIST_SCHEMA,
             "superseded_count": len(items),
             "verified_count": len(items) - review_required_count,
             "review_required_count": review_required_count,
+            "retirement_audit_counts": audit_counts,
+            "retirement_audit_review_required_count": (
+                audit_review_required_count
+            ),
             "items": items,
             "observed_state_stable": True,
             "next_action": (
                 "review_superseded_failures"
-                if review_required_count else "none"
+                if review_required_count or audit_review_required_count else "none"
             ),
             "effects": {
                 "database_mutated": False,

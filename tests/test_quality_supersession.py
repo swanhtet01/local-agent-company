@@ -384,7 +384,7 @@ class QualitySupersessionTests(unittest.TestCase):
                 company, queue_id, job_id, successor_job_id, objective,
                 failed_report, successor_report,
             ) = self._seed_eligible_failure(root)
-            company.supersede_quality_failure(
+            retirement = company.supersede_quality_failure(
                 queue_id,
                 "The exact current retry replaces this result while audit history remains.",
                 successor_job_id,
@@ -399,6 +399,13 @@ class QualitySupersessionTests(unittest.TestCase):
             self.assertEqual(overview["superseded_count"], 1)
             self.assertEqual(overview["verified_count"], 1)
             self.assertEqual(overview["review_required_count"], 0)
+            self.assertEqual(overview["retirement_audit_review_required_count"], 0)
+            self.assertEqual(overview["retirement_audit_counts"], {
+                "input_fingerprint_bound": 1,
+                "legacy_reason_only": 0,
+                "malformed": 0,
+                "successor_proof_bound": 0,
+            })
             self.assertEqual(overview["next_action"], "none")
             item = overview["items"][0]
             self.assertEqual(item["queue_id"], queue_id)
@@ -409,6 +416,21 @@ class QualitySupersessionTests(unittest.TestCase):
             self.assertEqual(item["evaluator_version"], EVALUATOR_VERSION)
             self.assertRegex(item["proof_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(item["blockers"], [])
+            self.assertEqual(
+                item["retirement_audit_status"], "input_fingerprint_bound",
+            )
+            self.assertGreater(item["retirement_event_id"], 0)
+            self.assertIsInstance(item["retirement_recorded_at"], str)
+            self.assertEqual(
+                item["retirement_successor_job_id"], successor_job_id,
+            )
+            self.assertEqual(
+                item["retirement_proof_sha256"], retirement["proof_sha256"],
+            )
+            self.assertEqual(
+                item["retirement_input_fingerprint_sha256"],
+                retirement["successor_input_fingerprint_sha256"],
+            )
             self.assertTrue(all(value is False for value in overview["effects"].values()))
             rendered = json.dumps(overview, sort_keys=True)
             self.assertNotIn(objective, rendered)
@@ -460,9 +482,13 @@ class QualitySupersessionTests(unittest.TestCase):
             overview = company.quality_supersession_summaries()
             self.assertEqual(overview["verified_count"], 0)
             self.assertEqual(overview["review_required_count"], 1)
+            self.assertEqual(overview["retirement_audit_review_required_count"], 0)
             self.assertEqual(overview["next_action"], "review_superseded_failures")
             item = overview["items"][0]
             self.assertEqual(item["proof_status"], "review_required")
+            self.assertEqual(
+                item["retirement_audit_status"], "input_fingerprint_bound",
+            )
             self.assertIsNone(item["successor_job_id"])
             self.assertIsNone(item["proof_sha256"])
             self.assertEqual(
@@ -520,6 +546,111 @@ class QualitySupersessionTests(unittest.TestCase):
                 thread.join(timeout=3)
 
             self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.model.calls, 0)
+
+    def test_retired_review_distinguishes_bound_legacy_and_malformed_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company, queue_id, job_id, successor_job_id, objective, _, _ = (
+                self._seed_eligible_failure(root)
+            )
+            retirement_reason = (
+                "Private historical reason must never appear in the retired review."
+            )
+            company.supersede_quality_failure(
+                queue_id, retirement_reason, successor_job_id,
+            )
+            base_keys = {
+                "job_id", "previous_status", "project_id", "queue_id",
+                "reason", "source",
+            }
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                event_id, raw_detail = db.execute(
+                    "SELECT id, detail FROM events WHERE job_id=? "
+                    "AND kind='queue_quality_failure_superseded'", (job_id,),
+                ).fetchone()
+                detail = json.loads(raw_detail)
+                proof_bound_detail = dict(detail)
+                proof_bound_detail.pop("successor_input_fingerprint_sha256")
+                db.execute(
+                    "UPDATE events SET detail=? WHERE id=?",
+                    (json.dumps(proof_bound_detail, sort_keys=True), event_id),
+                )
+
+            proof_bound = company.quality_supersession_summaries()
+            proof_bound_item = proof_bound["items"][0]
+            self.assertEqual(
+                proof_bound_item["retirement_audit_status"],
+                "successor_proof_bound",
+            )
+            self.assertEqual(
+                proof_bound_item["retirement_successor_job_id"], successor_job_id,
+            )
+            self.assertRegex(
+                proof_bound_item["retirement_proof_sha256"], r"^[0-9a-f]{64}$",
+            )
+            self.assertIsNone(
+                proof_bound_item["retirement_input_fingerprint_sha256"],
+            )
+            self.assertEqual(
+                proof_bound["retirement_audit_review_required_count"], 0,
+            )
+            self.assertEqual(proof_bound["next_action"], "none")
+
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                legacy_detail = {
+                    key: value for key, value in detail.items() if key in base_keys
+                }
+                db.execute(
+                    "UPDATE events SET detail=? WHERE id=?",
+                    (json.dumps(legacy_detail, sort_keys=True), event_id),
+                )
+
+            legacy = company.quality_supersession_summaries()
+            self.assertEqual(legacy["verified_count"], 1)
+            self.assertEqual(legacy["review_required_count"], 0)
+            self.assertEqual(legacy["retirement_audit_review_required_count"], 1)
+            self.assertEqual(legacy["next_action"], "review_superseded_failures")
+            legacy_item = legacy["items"][0]
+            self.assertEqual(
+                legacy_item["retirement_audit_status"], "legacy_reason_only",
+            )
+            self.assertEqual(legacy_item["retirement_event_id"], event_id)
+            self.assertIsNone(legacy_item["retirement_successor_job_id"])
+            self.assertIsNone(legacy_item["retirement_proof_sha256"])
+            self.assertIsNone(
+                legacy_item["retirement_input_fingerprint_sha256"],
+            )
+            rendered = json.dumps(legacy, sort_keys=True)
+            self.assertNotIn(retirement_reason, rendered)
+            self.assertNotIn(objective, rendered)
+            legacy_page = render_quality_supersession_overview(company)
+            self.assertIn("legacy_reason_only", legacy_page)
+            self.assertNotIn(retirement_reason, legacy_page)
+            self.assertNotIn(str(root), legacy_page)
+
+            partial_detail = dict(legacy_detail)
+            partial_detail["successor_job_id"] = successor_job_id
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE events SET detail=? WHERE id=?",
+                    (json.dumps(partial_detail, sort_keys=True), event_id),
+                )
+            malformed = company.quality_supersession_summaries()
+            malformed_item = malformed["items"][0]
+            self.assertEqual(
+                malformed_item["retirement_audit_status"], "malformed",
+            )
+            self.assertEqual(
+                malformed["retirement_audit_counts"]["malformed"], 1,
+            )
+            self.assertEqual(
+                malformed["retirement_audit_review_required_count"], 1,
+            )
+            self.assertIsNone(malformed_item["retirement_successor_job_id"])
+            self.assertIn(
+                "malformed", render_quality_supersession_overview(company),
+            )
             self.assertEqual(company.model.calls, 0)
 
     def test_retired_review_refuses_crossing_state_and_malformed_output(self) -> None:
