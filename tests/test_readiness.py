@@ -2,18 +2,25 @@ import contextlib
 import http.client
 import io
 import json
+import os
+import sqlite3
+import tempfile
 import threading
 import unittest
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+from local_company.config import COMPANY_STORE_SCHEMA
+from local_company.core import Company, MockModel
 from scripts.check_live_build import LiveBuildError
 from scripts.check_readiness import (
-    MAX_OLLAMA_BYTES,
+    MAX_OLLAMA_BYTES, CompanyIdentityError,
     OllamaProbeError,
     main,
     ollama_model_installed,
+    read_company_identity,
     run_readiness,
 )
 from scripts.stamp_build_manifest import ManifestError
@@ -21,6 +28,11 @@ from scripts.stamp_build_manifest import ManifestError
 
 MODEL = "qwen3.5:0.8b"
 DIGEST = "a" * 64
+INSTANCE_ID = "123e4567e89b42d3a456426614174000"
+
+
+def _identity(instance_id: str = INSTANCE_ID) -> dict[str, str]:
+    return {"schema": COMPANY_STORE_SCHEMA, "instance_id": instance_id}
 
 
 class _Headers(dict):
@@ -62,6 +74,7 @@ def _health() -> dict[str, object]:
         "runtime": {
             "provider": "ollama", "model": MODEL, "endpoint": "loopback_default",
         },
+        "company": _identity(),
         "health": {
             "active_jobs": 0,
             "queued_missions": 0,
@@ -97,10 +110,20 @@ class ReadinessTests(unittest.TestCase):
         health: dict[str, object] | None = None,
         live: dict[str, object] | None = None,
         installed: object = True,
+        local_identity: object = None,
     ) -> tuple[dict[str, object], int]:
         health = _health() if health is None else health
         live = _live() if live is None else live
+        local_identity = _identity() if local_identity is None else local_identity
         with patch("scripts.check_readiness.check_project", return_value=_disk()), patch(
+            "scripts.check_readiness.read_company_identity",
+            side_effect=(
+                local_identity if isinstance(local_identity, Exception) else None
+            ),
+            return_value=(
+                local_identity if not isinstance(local_identity, Exception) else None
+            ),
+        ), patch(
             "scripts.check_readiness.fetch_health", return_value=health,
         ), patch(
             "scripts.check_readiness.compare_live_build", return_value=live,
@@ -126,6 +149,7 @@ class ReadinessTests(unittest.TestCase):
                 "live_build": "match",
                 "work_state": "idle",
                 "worker": "enabled",
+                "company_store": "match",
                 "service_runtime": "match",
                 "ollama_service": "reachable",
                 "model_installed": "yes",
@@ -135,6 +159,7 @@ class ReadinessTests(unittest.TestCase):
         self.assertLess(len(rendered.encode("utf-8")), 2048)
         for forbidden in (
             "SENTINEL", "private", "source_sha256", "service_pid", "worker_output",
+            INSTANCE_ID,
         ):
             self.assertNotIn(forbidden, rendered)
 
@@ -142,6 +167,8 @@ class ReadinessTests(unittest.TestCase):
         health = _health()
         health["worker"] = {"status": "disabled"}
         with patch("scripts.check_readiness.check_project", return_value=_disk()), patch(
+            "scripts.check_readiness.read_company_identity", return_value=_identity(),
+        ), patch(
             "scripts.check_readiness.fetch_health", return_value=health,
         ), patch(
             "scripts.check_readiness.ollama_model_installed", return_value=True,
@@ -151,6 +178,206 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(payload["components"]["worker"], "disabled")
         self.assertIn("worker_disabled", payload["blockers"])
         self.assertEqual(payload["action"], "start_worker_enabled_service")
+
+    def test_company_store_identity_must_match_and_legacy_transition_is_bounded(self):
+        other_id = "223e4567e89b42d3a456426614174001"
+        payload, exit_code = self._run(local_identity=_identity(other_id))
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["components"]["company_store"], "mismatch")
+        self.assertEqual(payload["blockers"], ["company_store_mismatch"])
+        self.assertEqual(payload["action"], "align_company_home")
+        rendered = json.dumps(payload)
+        self.assertNotIn(INSTANCE_ID, rendered)
+        self.assertNotIn(other_id, rendered)
+
+        legacy = _health()
+        del legacy["company"]
+        payload, exit_code = self._run(
+            health=legacy, live=_live("restart_required", True),
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("service_restart_required", payload["blockers"])
+        self.assertIn("company_store_unverified", payload["blockers"])
+        self.assertEqual(payload["action"], "restart_local_service")
+
+        payload, exit_code = self._run(health=legacy)
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["blockers"], ["company_store_unverified"])
+
+        malformed_identities = (
+            [],
+            {},
+            {"schema": COMPANY_STORE_SCHEMA},
+            {"schema": COMPANY_STORE_SCHEMA, "instance_id": INSTANCE_ID, "path": "SENTINEL"},
+            {"schema": "wrong", "instance_id": INSTANCE_ID},
+            {"schema": COMPANY_STORE_SCHEMA, "instance_id": INSTANCE_ID.upper()},
+            {"schema": COMPANY_STORE_SCHEMA, "instance_id": "123e4567e89b12d3a456426614174000"},
+            {"schema": COMPANY_STORE_SCHEMA, "instance_id": []},
+        )
+        for identity in malformed_identities:
+            with self.subTest(identity=identity):
+                malformed = _health()
+                malformed["company"] = identity
+                payload, exit_code = self._run(health=malformed)
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(payload["blockers"], ["company_store_indeterminate"])
+                self.assertNotIn("SENTINEL", json.dumps(payload))
+
+        payload, exit_code = self._run(
+            local_identity=CompanyIdentityError("SENTINEL C:\\private"),
+        )
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["blockers"], ["company_store_indeterminate"])
+        self.assertNotIn("SENTINEL", json.dumps(payload))
+
+    def test_ready_result_rereads_store_identity_and_fails_closed_on_change(self):
+        changed = _identity("223e4567e89b42d3a456426614174001")
+        with patch("scripts.check_readiness.check_project", return_value=_disk()), patch(
+            "scripts.check_readiness.read_company_identity",
+            side_effect=[_identity(), changed],
+        ) as identity_reader, patch(
+            "scripts.check_readiness.fetch_health", return_value=_health(),
+        ), patch(
+            "scripts.check_readiness.compare_live_build", return_value=_live(),
+        ), patch(
+            "scripts.check_readiness.ollama_model_installed", return_value=True,
+        ):
+            payload, exit_code = run_readiness(MODEL, Path("selected-home"))
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(payload["ready"])
+        self.assertEqual(
+            payload["components"]["company_store"], "changed_during_check",
+        )
+        self.assertEqual(payload["blockers"], ["company_store_changed_during_check"])
+        self.assertEqual(payload["action"], "retry_readiness")
+        self.assertEqual(identity_reader.call_count, 2)
+        self.assertNotIn(changed["instance_id"], json.dumps(payload))
+
+    def test_company_identity_reader_is_read_only_and_uri_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            special_name = "state # % ü" + (" ?" if os.name != "nt" else "")
+            home = parent / special_name
+            expected = Company(home, MockModel()).company_identity()
+            before = {
+                path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+                for path in home.iterdir()
+            }
+            self.assertEqual(read_company_identity(home), expected)
+            after = {
+                path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+                for path in home.iterdir()
+            }
+            self.assertEqual(after, before)
+            self.assertFalse(any(
+                path.name.endswith(("-journal", "-wal", "-shm"))
+                for path in home.iterdir()
+            ))
+
+            missing = parent / "missing-home"
+            names_before = {path.name for path in parent.iterdir()}
+            with self.assertRaises(CompanyIdentityError):
+                read_company_identity(missing)
+            self.assertEqual({path.name for path in parent.iterdir()}, names_before)
+
+            empty = parent / "empty"
+            empty.mkdir()
+            (empty / "company.db").write_bytes(b"")
+            empty_before = {
+                path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+                for path in empty.iterdir()
+            }
+            with self.assertRaises(CompanyIdentityError):
+                read_company_identity(empty)
+            self.assertEqual(
+                {
+                    path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in empty.iterdir()
+                },
+                empty_before,
+            )
+
+            with contextlib.closing(sqlite3.connect(home / "company.db")) as db, db:
+                db.execute(
+                    "UPDATE company_metadata SET value='wrong' "
+                    "WHERE key='instance_schema'"
+                )
+            with self.assertRaises(CompanyIdentityError):
+                read_company_identity(home)
+
+            hostile = parent / "hostile"
+            hostile.mkdir()
+            with contextlib.closing(sqlite3.connect(hostile / "company.db")) as db, db:
+                db.execute(
+                    "CREATE TABLE company_metadata ("
+                    "key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+                )
+                db.executemany(
+                    "INSERT INTO company_metadata(key, value) VALUES(?, ?)",
+                    (
+                        ("instance_schema", COMPANY_STORE_SCHEMA),
+                        ("instance_id", INSTANCE_ID),
+                        ("extra", sqlite3.Binary(b"SENTINEL" * 131072)),
+                    ),
+                )
+                db.execute("PRAGMA user_version=1")
+            with self.assertRaises(CompanyIdentityError):
+                read_company_identity(hostile)
+            with patch("scripts.check_readiness.check_project", return_value=_disk()), patch(
+                "scripts.check_readiness.fetch_health",
+                side_effect=AssertionError("live probe must not run"),
+            ):
+                payload, exit_code = run_readiness(MODEL, hostile)
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(payload["blockers"], ["company_store_indeterminate"])
+            self.assertNotIn("SENTINEL", json.dumps(payload))
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive classification")
+    def test_company_identity_reader_rejects_remote_paths_before_filesystem_access(self):
+        for path in (
+            Path(r"\\server\share\state"),
+            Path(r"\\?\C:\state"),
+            Path(r"\\.\C:\state"),
+            Path(r"\??\C:\state"),
+            Path(r"\rooted\state"),
+            Path(r"C:drive-relative"),
+        ):
+            with self.subTest(path=str(path)), patch(
+                "scripts.check_readiness._windows_drive_type",
+            ) as drive_type, patch(
+                "scripts.check_readiness.os.lstat",
+            ) as lstat, patch(
+                "scripts.check_readiness.sqlite3.connect",
+            ) as connect:
+                with self.assertRaises(CompanyIdentityError):
+                    read_company_identity(path)
+                drive_type.assert_not_called()
+                lstat.assert_not_called()
+                connect.assert_not_called()
+
+        with patch(
+            "scripts.check_readiness._windows_drive_type", return_value=4,
+        ), patch("scripts.check_readiness.os.lstat") as lstat, patch(
+            "scripts.check_readiness.sqlite3.connect",
+        ) as connect:
+            with self.assertRaises(CompanyIdentityError):
+                read_company_identity(Path(r"C:\remote-state"))
+            lstat.assert_not_called()
+            connect.assert_not_called()
+
+    def test_readiness_default_home_failure_is_sanitized_json(self):
+        stdout = io.StringIO()
+        with patch(
+            "scripts.check_readiness.default_company_home",
+            side_effect=RuntimeError(r"SENTINEL C:\private"),
+        ), patch(
+            "scripts.check_readiness.check_project", return_value=_disk(),
+        ), contextlib.redirect_stdout(stdout):
+            exit_code = main([])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(payload["blockers"], ["internal_error"])
+        self.assertNotIn("SENTINEL", stdout.getvalue())
 
     def test_known_build_work_runtime_and_model_blockers_return_action_required(self):
         cases = (
@@ -283,6 +510,8 @@ class ReadinessTests(unittest.TestCase):
         self.assertNotIn("SENTINEL", json.dumps(payload))
 
         with patch("scripts.check_readiness.check_project", return_value=_disk()), patch(
+            "scripts.check_readiness.read_company_identity", return_value=_identity(),
+        ), patch(
             "scripts.check_readiness.fetch_health",
             side_effect=LiveBuildError("SENTINEL live failure"),
         ):

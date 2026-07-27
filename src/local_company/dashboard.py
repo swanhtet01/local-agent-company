@@ -163,6 +163,7 @@ def build_status_snapshot(
     worker: LocalQueueWorker | None,
     build_identity: dict[str, object],
     runtime_identity: dict[str, object] | None = None,
+    company_identity: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Return the bounded state required to decide whether restart is safe."""
     work_state = company.work_state_snapshot()
@@ -174,6 +175,10 @@ def build_status_snapshot(
         "runtime": dict(
             runtime_model_identity(company)
             if runtime_identity is None else runtime_identity
+        ),
+        "company": dict(
+            company.company_identity()
+            if company_identity is None else company_identity
         ),
         "health": work_state,
         "worker": {"status": worker_state.get("status")},
@@ -518,6 +523,7 @@ def create_dashboard_server(
     worker = LocalQueueWorker(company) if service_token else None
     build_identity = runtime_build_identity()
     runtime_identity = runtime_model_identity(company)
+    company_identity = company.company_identity()
 
     class Handler(BaseHTTPRequestHandler):
         def _local_authorities(self) -> set[str]:
@@ -598,7 +604,7 @@ def create_dashboard_server(
             ):
                 body = json.dumps(
                     build_status_snapshot(
-                        company, worker, build_identity, runtime_identity,
+                        company, worker, build_identity, runtime_identity, company_identity,
                     )
                 ).encode("utf-8")
                 self.send_response(200)
@@ -608,6 +614,7 @@ def create_dashboard_server(
                     {
                         "status": "ready", "pid": os.getpid(),
                         "build": dict(build_identity),
+                        "company": dict(company_identity),
                         **dashboard_snapshot(company, worker),
                     }
                 ).encode("utf-8")

@@ -21,6 +21,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
+from .config import (
+    COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA,
+    read_validated_company_instance_id, valid_company_instance_id,
+)
+
 
 ROLES = {
     "chief-of-staff": "Turn the objective into a small practical plan and integrate the team's work.",
@@ -1296,10 +1301,28 @@ class Company:
         self.model = model
         self.db_path = home / "company.db"
         self.output_dir = home / "outputs"
+        self._company_instance_id: str | None = None
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(
+        self, *, validate_identity: bool = True, immediate: bool = False,
+    ) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path)
         db.execute("PRAGMA foreign_keys=ON")
+        if validate_identity:
+            try:
+                if not valid_company_instance_id(self._company_instance_id):
+                    raise RuntimeError("Local company store identity is not initialized")
+                if not immediate:
+                    db.execute("PRAGMA query_only=ON")
+                db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                instance_id = self._read_company_identity_row(db)
+                if instance_id != self._company_instance_id:
+                    raise RuntimeError(
+                        "Local company store identity changed during this process"
+                    )
+            except Exception:
+                db.close()
+                raise
         return db
 
     def _read_local_report_bytes(self, output_path: str | None) -> bytes:
@@ -1314,8 +1337,9 @@ class Company:
         return report_path.read_bytes()
 
     def initialize(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as db, db:
+        self.home.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect(validate_identity=False)) as db, db:
+            self._initialize_company_identity(db)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL,
@@ -1415,6 +1439,70 @@ class Company:
             self._ensure_column(db, "assignments", "deliverable", "TEXT")
             self._ensure_column(db, "assignments", "sequence", "INTEGER")
             self._ensure_column(db, "evaluation_history", "manifest_sha256", "TEXT")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _company_metadata_table_exists(db: sqlite3.Connection) -> bool:
+        return db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_metadata'"
+        ).fetchone() is not None
+
+    @staticmethod
+    def _read_company_identity_row(db: sqlite3.Connection) -> str:
+        try:
+            return read_validated_company_instance_id(db)
+        except (ValueError, sqlite3.Error) as exc:
+            raise RuntimeError(
+                "Local company store identity is missing or malformed"
+            ) from exc
+
+    def _initialize_company_identity(self, db: sqlite3.Connection) -> None:
+        db.execute("BEGIN")
+        version = int(db.execute("PRAGMA user_version").fetchone()[0])
+        table_exists = self._company_metadata_table_exists(db)
+        if version == COMPANY_DB_SCHEMA_VERSION and table_exists:
+            instance_id = self._read_company_identity_row(db)
+            db.commit()
+        elif version == 0 and not table_exists:
+            db.commit()
+            db.execute("BEGIN IMMEDIATE")
+            version = int(db.execute("PRAGMA user_version").fetchone()[0])
+            table_exists = self._company_metadata_table_exists(db)
+            if version == 0 and not table_exists:
+                instance_id = uuid.uuid4().hex
+                db.execute(
+                    "CREATE TABLE company_metadata ("
+                    "key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+                )
+                db.executemany(
+                    "INSERT INTO company_metadata(key, value) VALUES(?, ?)",
+                    (
+                        ("instance_schema", COMPANY_STORE_SCHEMA),
+                        ("instance_id", instance_id),
+                    ),
+                )
+                db.execute(f"PRAGMA user_version={COMPANY_DB_SCHEMA_VERSION}")
+            elif version != COMPANY_DB_SCHEMA_VERSION or not table_exists:
+                raise RuntimeError("Local company store identity is missing or malformed")
+            instance_id = self._read_company_identity_row(db)
+            db.commit()
+        else:
+            raise RuntimeError("Local company store identity is missing or malformed")
+        if (
+            self._company_instance_id is not None
+            and instance_id != self._company_instance_id
+        ):
+            raise RuntimeError("Local company store identity changed during this process")
+        self._company_instance_id = instance_id
+
+    def company_identity(self) -> dict[str, str]:
+        self.initialize()
+        if not valid_company_instance_id(self._company_instance_id):
+            raise RuntimeError("Local company store identity is missing or malformed")
+        return {
+            "schema": COMPANY_STORE_SCHEMA,
+            "instance_id": self._company_instance_id,
+        }
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, name: str, declaration: str) -> None:
@@ -1648,8 +1736,7 @@ class Company:
                 observed = observed.replace(tzinfo=timezone.utc)
             return observed <= cutoff
 
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             rows = db.execute(
                 "SELECT id, COALESCE(heartbeat_at, created_at), run_token "
                 "FROM jobs WHERE status='running'"
@@ -1744,7 +1831,7 @@ class Company:
             try:
                 self.evaluate_job(job_id)
             except Exception as exc:
-                with closing(self._connect()) as db, db:
+                with closing(self._connect(immediate=True)) as db, db:
                     self._event(
                         db, job_id, "recovered_report_evaluation_failed",
                         f"{type(exc).__name__}: {exc}",
@@ -1756,14 +1843,13 @@ class Company:
             except ExecutionLeaseLost:
                 continue
             except Exception as exc:
-                with closing(self._connect()) as db, db:
+                with closing(self._connect(immediate=True)) as db, db:
                     self._event(
                         db, job_id, "recovered_report_evaluation_failed",
                         f"{type(exc).__name__}: {exc}",
                     )
 
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             live_jobs = db.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status='running'"
             ).fetchone()[0]
@@ -1925,7 +2011,7 @@ class Company:
             raise ValueError("Project description must be at most 500 characters")
         project_id = uuid.uuid4().hex[:12]
         try:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 db.execute("INSERT INTO projects VALUES (?, ?, ?, ?)",
                            (project_id, name, description, utc_now()))
         except sqlite3.IntegrityError as exc:
@@ -1978,7 +2064,7 @@ class Company:
             raise ValueError(f"Knowledge source exceeds {MAX_KNOWLEDGE_BYTES} bytes")
         content = source.read_text(encoding="utf-8", errors="replace")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             existing = db.execute("SELECT id, sha256 FROM knowledge WHERE path=?", (str(source),)).fetchone()
             item_id = existing[0] if existing else hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
             changed = existing is None or existing[1] != digest
@@ -2380,7 +2466,7 @@ class Company:
             "This brief contains statistics only. It does not copy source rows and does not modify the source file.",
         ])
         brief_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             db.execute(
                 "INSERT INTO datasets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(project_id, path) DO UPDATE SET format=excluded.format, sha256=excluded.sha256, "
@@ -2437,7 +2523,7 @@ class Company:
         categories = self.sensitive_categories(description)
         category = ",".join(categories) if categories else "manual_review"
         request_id = uuid.uuid4().hex[:12]
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             if job_id and not db.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone():
                 raise ValueError(f"Unknown job: {job_id}")
             db.execute("INSERT INTO action_requests VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL)",
@@ -2449,7 +2535,7 @@ class Company:
         if decision not in {"approved", "rejected"}:
             raise ValueError("Decision must be approved or rejected")
         self.initialize()
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             row = db.execute("SELECT job_id, status FROM action_requests WHERE id=?", (request_id,)).fetchone()
             if not row:
                 raise ValueError(f"Unknown action request: {request_id}")
@@ -2507,7 +2593,7 @@ class Company:
         else:
             scheduled_text = utc_now()
         queue_id = uuid.uuid4().hex[:12]
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             db.execute(
                 "INSERT INTO mission_queue("
                 "id, objective, project_id, roles_json, playbook, priority, status, scheduled_at, created_at"
@@ -2563,7 +2649,7 @@ class Company:
         source = " ".join(source.split())
         if not source or len(source) > 40:
             raise ValueError("Queue source must contain 1 to 40 characters")
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             row = db.execute("SELECT status FROM mission_queue WHERE id=?", (queue_id,)).fetchone()
             if not row:
                 raise ValueError(f"Unknown queue item: {queue_id}")
@@ -2584,7 +2670,7 @@ class Company:
         source = " ".join(source.split())
         if not source or len(source) > 40:
             raise ValueError("Queue source must contain 1 to 40 characters")
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             changed = db.execute(
                 "UPDATE mission_queue SET status='cancelled', completed_at=? WHERE id=? AND status='queued'",
                 (utc_now(), queue_id),
@@ -2599,8 +2685,7 @@ class Company:
     def claim_next_queue_item(self, expected_queue_id: str | None = None) -> QueueClaim:
         self.initialize()
         queue_run_token = uuid.uuid4().hex
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db)
             self._ensure_no_active_queue_claim(db)
             row = db.execute(
@@ -2635,7 +2720,7 @@ class Company:
     def abandon_queue_claim(self, claim: QueueClaim, reason: str) -> None:
         self.initialize()
         error = " ".join(reason.split()) or "local worker could not start"
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             changed = db.execute(
                 "UPDATE mission_queue SET status='failed', completed_at=?, error=?, run_token=NULL "
                 "WHERE id=? AND status='running' AND run_token=?",
@@ -2671,7 +2756,7 @@ class Company:
         except ExecutionLeaseLost:
             raise
         except ReportFinalizationPending as exc:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 linked = db.execute(
                     "SELECT job_id FROM mission_queue WHERE id=? AND status='running' "
                     "AND run_token=?",
@@ -2685,7 +2770,7 @@ class Company:
                 )
             raise
         except PermissionError as exc:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 changed = db.execute(
                     "UPDATE mission_queue SET status='needs_approval', completed_at=?, error=?, "
                     "run_token=NULL WHERE id=? AND status='running' AND run_token=?",
@@ -2699,7 +2784,7 @@ class Company:
             raise
 
         except Exception as exc:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 changed = db.execute(
                     "UPDATE mission_queue SET status='failed', completed_at=?, error=?, run_token=NULL "
                     "WHERE id=? AND status='running' AND run_token=?",
@@ -2759,7 +2844,7 @@ class Company:
             next_run = next_run.replace(tzinfo=timezone.utc)
         schedule_id = uuid.uuid4().hex[:12]
         try:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 db.execute(
                     "INSERT INTO schedules VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)",
                     (schedule_id, name, objective, project_id, json.dumps(roles) if roles else None,
@@ -2780,7 +2865,7 @@ class Company:
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> None:
         self.initialize()
-        with closing(self._connect()) as db, db:
+        with closing(self._connect(immediate=True)) as db, db:
             changed = db.execute(
                 "UPDATE schedules SET enabled=? WHERE id=?", (int(enabled), schedule_id)
             ).rowcount
@@ -2794,8 +2879,7 @@ class Company:
             observed = observed.replace(tzinfo=timezone.utc)
         observed = observed.astimezone(timezone.utc)
         created: list[tuple[str, str]] = []
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             rows = list(db.execute(
                 "SELECT id, objective, project_id, roles_json, playbook, priority, cadence_days, next_run_at "
                 "FROM schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at, name",
@@ -3258,8 +3342,7 @@ class Company:
         score = round(passed_count * 100 / len(checks))
         passed = all(checks.values())
         evaluated_at = utc_now()
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             if _queue_claim:
                 linked = db.execute(
                     "SELECT job_id FROM mission_queue WHERE id=? AND status='running' "
@@ -3444,8 +3527,7 @@ class Company:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")).hexdigest()
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db)
             self._ensure_no_active_queue_claim(db, _queue_id)
             if parent_job_id is None and runtime_identity is not None:
@@ -3640,7 +3722,7 @@ class Company:
                     for item, original, normalized, _ in resumed_isolations
                     if normalized != original
                 ]
-                with closing(self._connect()) as db, db:
+                with closing(self._connect(immediate=True)) as db, db:
                     lease_active = self._renew_execution_lease(
                         db, job_id, run_token, "resume:drafts-isolated",
                     )
@@ -3683,7 +3765,7 @@ class Company:
                     if strict_evidence_pairs_required and isinstance(self.model, OllamaModel)
                     else None
                 )
-                with closing(self._connect()) as db, db:
+                with closing(self._connect(immediate=True)) as db, db:
                     lease_active = self._renew_execution_lease(
                         db, job_id, run_token, f"{item.role}:start",
                     )
@@ -3765,7 +3847,7 @@ class Company:
                     result_trimmed = original_word_count > quarantine_limit
                 elif specialist_word_limit:
                     result, result_trimmed = truncate_words(result, specialist_word_limit)
-                with closing(self._connect()) as db, db:
+                with closing(self._connect(immediate=True)) as db, db:
                     lease_active = self._renew_execution_lease(
                         db, job_id, run_token, f"{item.role}:result",
                     )
@@ -3798,7 +3880,7 @@ class Company:
                 results.append((item, result))
 
             current_role = "executive-synthesis"
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 lease_active = self._renew_execution_lease(
                     db, job_id, run_token, "executive-synthesis:start",
                 )
@@ -3878,7 +3960,7 @@ class Company:
                         raise RuntimeError(
                             "Local model does not support required structured synthesis"
                         )
-                    with closing(self._connect()) as db, db:
+                    with closing(self._connect(immediate=True)) as db, db:
                         lease_active = self._renew_execution_lease(
                             db, job_id, run_token, "executive-synthesis:structured",
                         )
@@ -3983,7 +4065,7 @@ class Company:
                         except (TypeError, ValueError) as validation_error:
                             if structured_attempt == 2:
                                 raise
-                            with closing(self._connect()) as db, db:
+                            with closing(self._connect(immediate=True)) as db, db:
                                 lease_active = self._renew_execution_lease(
                                     db, job_id, run_token,
                                     "executive-synthesis:structured-retry",
@@ -4025,7 +4107,7 @@ class Company:
                     )
                     if required_ending:
                         constraint_notes.append("required ending appended verbatim")
-                    with closing(self._connect()) as db, db:
+                    with closing(self._connect(immediate=True)) as db, db:
                         lease_active = self._renew_execution_lease(
                             db, job_id, run_token, "executive-synthesis:structured-validated",
                         )
@@ -4048,7 +4130,7 @@ class Company:
                 except ExecutionLeaseLost:
                     raise
                 except Exception as exc:
-                    with closing(self._connect()) as db, db:
+                    with closing(self._connect(immediate=True)) as db, db:
                         lease_active = self._renew_execution_lease(
                             db, job_id, run_token,
                             "executive-synthesis:structured-rejected",
@@ -4128,7 +4210,7 @@ class Company:
                     )
                 )
                 if needs_revision:
-                    with closing(self._connect()) as db, db:
+                    with closing(self._connect(immediate=True)) as db, db:
                         lease_active = self._renew_execution_lease(
                             db, job_id, run_token, "executive-synthesis:draft",
                         )
@@ -4205,7 +4287,7 @@ class Company:
                 constraint_notes.append(
                     f"executive-synthesis word limit: {original_words}->{synthesis_word_limit}"
                 )
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 lease_active = self._renew_execution_lease(
                     db, job_id, run_token, "executive-synthesis:result",
                 )
@@ -4232,7 +4314,7 @@ class Company:
         except ExecutionLeaseLost:
             raise
         except Exception as exc:
-            with closing(self._connect()) as db, db:
+            with closing(self._connect(immediate=True)) as db, db:
                 failed = db.execute(
                     "UPDATE jobs SET status='failed', heartbeat_at=?, run_token=NULL "
                     "WHERE id=? AND status='running' AND run_token=?",
@@ -4264,8 +4346,7 @@ class Company:
         report_sha256 = hashlib.sha256(report_bytes).hexdigest()
         temporary_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
         prepared_at = utc_now()
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             lease_active = self._renew_execution_lease(
                 db, job_id, run_token, "report-finalization:prepare",
             )
@@ -4293,8 +4374,7 @@ class Company:
             raise ExecutionLeaseLost(
                 f"Execution lease for job {job_id} was recovered or superseded"
             )
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             sealed = self._seal_report_finalization(
                 db, job_id, run_token, utc_now(), recovered=False,
             )
@@ -4345,8 +4425,7 @@ class Company:
             )
         )
         run_token = uuid.uuid4().hex
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db, job_id)
             self._ensure_no_active_queue_claim(db)
             resumed = db.execute(

@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 
 
@@ -26,7 +27,7 @@ def find_ollama_executable() -> str | None:
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="local-company", description="Run a local, owner-gated AI team")
-    p.add_argument("--home", type=Path, default=Path.cwd() / ".local-company")
+    p.add_argument("--home", type=Path)
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
@@ -186,9 +187,10 @@ def selected_model(args: argparse.Namespace):
 
 
 def main() -> int:
-    args = parser().parse_args()
-    company = Company(args.home.resolve(), selected_model(args))
     try:
+        args = parser().parse_args()
+        company_home = args.home if args.home is not None else default_company_home()
+        company = Company(company_home.resolve(), selected_model(args))
         if args.command == "init":
             company.initialize()
             print(f"Initialized local company at {company.home}")

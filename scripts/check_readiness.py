@@ -7,10 +7,23 @@ import http.client
 import json
 import os
 import re
+import sqlite3
+import stat
 import sys
 import urllib.error
 import urllib.request
+from contextlib import closing
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = PROJECT_ROOT / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from local_company.config import (  # noqa: E402
+    COMPANY_STORE_SCHEMA, default_company_home,
+    read_validated_company_instance_id, valid_company_instance_id,
+)
 
 if __package__:
     from .check_live_build import (
@@ -44,6 +57,10 @@ class ReadinessUsageError(ValueError):
     pass
 
 
+class CompanyIdentityError(RuntimeError):
+    pass
+
+
 class _SanitizedArgumentParser(argparse.ArgumentParser):
     def error(self, _: str) -> None:
         raise ReadinessUsageError("invalid arguments")
@@ -67,6 +84,88 @@ def _valid_model_name(model: object) -> bool:
         and not final_segment.startswith(":")
         and not final_segment.endswith(":")
     )
+
+
+def _is_link_or_reparse_metadata(metadata: os.stat_result) -> bool:
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x400
+        or getattr(metadata, "st_reparse_tag", 0)
+    )
+
+
+def _windows_drive_type(root: str) -> int:
+    try:
+        import ctypes
+
+        function = ctypes.windll.kernel32.GetDriveTypeW
+        function.argtypes = [ctypes.c_wchar_p]
+        function.restype = ctypes.c_uint
+        return int(function(root))
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise CompanyIdentityError("drive_check_unavailable") from exc
+
+
+def _validated_company_database(home: Path) -> Path:
+    candidate = Path(home).expanduser()
+    raw = str(candidate)
+    if os.name == "nt":
+        windows_raw = raw.replace("/", "\\")
+        if windows_raw.startswith(("\\\\", "\\?\\", "\\.\\", "\\??\\")):
+            raise CompanyIdentityError("nonlocal_home")
+        if candidate.drive and not candidate.root:
+            raise CompanyIdentityError("unsafe_home")
+        if candidate.root and not candidate.drive:
+            raise CompanyIdentityError("unsafe_home")
+    if not candidate.is_absolute():
+        candidate = Path(os.path.abspath(os.fspath(candidate)))
+    if os.name == "nt":
+        normalized = str(candidate).replace("/", "\\")
+        if re.fullmatch(r"[A-Za-z]:\\.*", normalized) is None:
+            raise CompanyIdentityError("nonlocal_home")
+        if _windows_drive_type(candidate.anchor) not in {2, 3, 6}:
+            raise CompanyIdentityError("nonlocal_home")
+
+    parts = candidate.parts
+    if not parts:
+        raise CompanyIdentityError("invalid_home")
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if _is_link_or_reparse_metadata(metadata):
+            raise CompanyIdentityError("unsafe_home")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise CompanyIdentityError("invalid_home")
+
+    database = candidate / "company.db"
+    database_metadata = os.lstat(database)
+    if _is_link_or_reparse_metadata(database_metadata):
+        raise CompanyIdentityError("unsafe_database")
+    if not stat.S_ISREG(database_metadata.st_mode):
+        raise CompanyIdentityError("invalid_database")
+    return database
+
+
+def read_company_identity(home: Path) -> dict[str, str]:
+    """Read one initialized local store identity without creating or migrating it."""
+    try:
+        database = _validated_company_database(home)
+        uri = database.as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            try:
+                instance_id = read_validated_company_instance_id(db)
+            except ValueError as exc:
+                raise CompanyIdentityError("invalid_identity") from exc
+        return {"schema": COMPANY_STORE_SCHEMA, "instance_id": instance_id}
+    except CompanyIdentityError:
+        raise
+    except (
+        AttributeError, OSError, OverflowError, RuntimeError, TypeError, UnicodeError,
+        ValueError, sqlite3.Error,
+    ) as exc:
+        raise CompanyIdentityError("identity_unavailable") from exc
 
 
 def ollama_model_installed(required_model: str) -> bool:
@@ -144,6 +243,7 @@ def _empty_components() -> dict[str, str]:
         "live_build": "unknown",
         "work_state": "unknown",
         "worker": "unknown",
+        "company_store": "unknown",
         "service_runtime": "unknown",
         "ollama_service": "unknown",
         "model_installed": "unknown",
@@ -196,7 +296,26 @@ def _runtime_status(health: dict[str, object], required_model: str) -> str:
     return "match"
 
 
-def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object], int]:
+def _company_store_status(
+    health: dict[str, object], local_identity: dict[str, str],
+) -> str:
+    live_identity = health.get("company")
+    if live_identity is None:
+        return "unverified"
+    if type(live_identity) is not dict or set(live_identity) != {
+        "schema", "instance_id",
+    }:
+        return "invalid"
+    schema = live_identity.get("schema")
+    instance_id = live_identity.get("instance_id")
+    if schema != COMPANY_STORE_SCHEMA or not valid_company_instance_id(instance_id):
+        return "invalid"
+    return "match" if live_identity == local_identity else "mismatch"
+
+
+def run_readiness(
+    required_model: str = DEFAULT_MODEL, company_home: Path | None = None,
+) -> tuple[dict[str, object], int]:
     components = _empty_components()
     if not _valid_model_name(required_model):
         components["model_installed"] = "invalid"
@@ -204,9 +323,8 @@ def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object
             "indeterminate", components, ["invalid_model_name"], "fix_model_name",
         ), 2
 
-    project_root = Path(__file__).resolve().parents[1]
     try:
-        disk = check_project(project_root)
+        disk = check_project(PROJECT_ROOT)
     except (ManifestError, OSError):
         components["disk_manifest"] = "invalid"
         return _payload(
@@ -214,6 +332,17 @@ def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object
             "inspect_disk_manifest", required_model,
         ), 3
     components["disk_manifest"] = "valid"
+
+    selected_home = default_company_home() if company_home is None else company_home
+    try:
+        local_identity = read_company_identity(selected_home)
+    except CompanyIdentityError:
+        components["company_store"] = "invalid_or_unavailable"
+        return _payload(
+            "indeterminate", components, ["company_store_indeterminate"],
+            "inspect_company_home_selection", required_model,
+        ), 2
+    components["company_store"] = "local_valid"
 
     try:
         health = fetch_health()
@@ -265,6 +394,25 @@ def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object
             "inspect_local_service", required_model,
         ), 2
     components["worker"] = "disabled" if worker_status == "disabled" else "enabled"
+    company_status = _company_store_status(health, local_identity)
+    components["company_store"] = company_status
+    if company_status == "invalid":
+        return _payload(
+            "indeterminate", components, ["company_store_indeterminate"],
+            "inspect_local_service", required_model,
+        ), 2
+    if company_status == "mismatch":
+        return _payload(
+            "action_required", components, ["company_store_mismatch"],
+            "align_company_home", required_model,
+        ), 1
+    if company_status == "unverified" and not (
+        live_status == "restart_required" and restart_safe
+    ):
+        return _payload(
+            "indeterminate", components, ["company_store_unverified"],
+            "inspect_local_service", required_model,
+        ), 2
     components["service_runtime"] = _runtime_status(health, required_model)
     if components["service_runtime"] == "invalid":
         return _payload(
@@ -319,6 +467,9 @@ def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object
         if action == "none":
             action = "start_worker_enabled_service"
 
+    if components["company_store"] == "unverified":
+        blockers.append("company_store_unverified")
+
     runtime_status = components["service_runtime"]
     if runtime_status != "match":
         blockers.append("service_runtime_" + runtime_status)
@@ -336,15 +487,30 @@ def run_readiness(required_model: str = DEFAULT_MODEL) -> tuple[dict[str, object
         return _payload(
             "action_required", components, blockers, action, required_model,
         ), 1
+    try:
+        final_identity = read_company_identity(selected_home)
+    except CompanyIdentityError:
+        components["company_store"] = "invalid_or_unavailable"
+        return _payload(
+            "indeterminate", components, ["company_store_indeterminate"],
+            "inspect_company_home_selection", required_model,
+        ), 2
+    if final_identity != local_identity:
+        components["company_store"] = "changed_during_check"
+        return _payload(
+            "indeterminate", components, ["company_store_changed_during_check"],
+            "retry_readiness", required_model,
+        ), 2
     return _payload("ready", components, [], "none", required_model), 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _SanitizedArgumentParser(description=__doc__)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--home", type=Path)
     try:
         args = parser.parse_args(argv)
-        payload, exit_code = run_readiness(args.model)
+        payload, exit_code = run_readiness(args.model, args.home)
     except ReadinessUsageError:
         payload, exit_code = _payload(
             "indeterminate", _empty_components(), ["invalid_arguments"],

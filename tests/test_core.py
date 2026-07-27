@@ -12,6 +12,8 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,10 @@ from local_company.build_info import (
     BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256,
 )
 from local_company.cli import main as cli_main, parser
+from local_company.config import (
+    COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA, default_company_home,
+    valid_company_instance_id,
+)
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
     ReportFinalizationPending, SourceHit,
@@ -398,6 +404,7 @@ class CompanyTests(unittest.TestCase):
     def test_default_local_runtime_releases_idle_model_memory(self):
         with patch.dict(os.environ, {}, clear=True):
             service_args = parser().parse_args(["service", "start"])
+        self.assertIsNone(service_args.home)
         self.assertEqual(service_args.num_ctx, 4096)
         self.assertEqual(service_args.num_predict, 2048)
         self.assertEqual(service_args.keep_alive, "30s")
@@ -408,6 +415,233 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.keep_alive, "30s")
         self.assertEqual(model.temperature, 0.0)
         self.assertEqual(model.seed, 42)
+
+    def test_default_company_home_is_stable_and_environment_is_user_anchored(self):
+        fixed_home = Path("C:/Users/tester")
+        with patch("local_company.config.Path.home", return_value=fixed_home):
+            with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": ""}):
+                self.assertEqual(default_company_home(), fixed_home / ".local-company")
+                self.assertIsNone(parser().parse_args(["doctor"]).home)
+            with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": "company-state"}):
+                self.assertEqual(default_company_home(), fixed_home / "company-state")
+            absolute = fixed_home / "explicit-state"
+            with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": str(absolute)}):
+                self.assertEqual(default_company_home(), absolute)
+                self.assertEqual(
+                    parser().parse_args(["--home", "relative-state", "doctor"]).home,
+                    Path("relative-state"),
+                )
+            with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": "../escape"}):
+                with self.assertRaisesRegex(ValueError, "user-home relative"):
+                    default_company_home()
+            if os.name == "nt":
+                with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": "\\rooted"}):
+                    with self.assertRaisesRegex(ValueError, "user-home relative"):
+                        default_company_home()
+
+    def test_company_identity_migrates_atomically_persists_and_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            with closing(sqlite3.connect(legacy / "company.db")) as db, db:
+                db.execute("CREATE TABLE legacy_record(value TEXT NOT NULL)")
+                db.execute("INSERT INTO legacy_record(value) VALUES('preserved')")
+
+            company = Company(legacy, MockModel())
+            identity = company.company_identity()
+            self.assertEqual(identity["schema"], COMPANY_STORE_SCHEMA)
+            self.assertTrue(valid_company_instance_id(identity["instance_id"]))
+            self.assertEqual(Company(legacy, MockModel()).company_identity(), identity)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                self.assertEqual(
+                    db.execute("SELECT value FROM legacy_record").fetchone()[0],
+                    "preserved",
+                )
+                self.assertEqual(
+                    db.execute("PRAGMA user_version").fetchone()[0],
+                    COMPANY_DB_SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT key, value FROM company_metadata ORDER BY key"
+                    ).fetchall(),
+                    [
+                        ("instance_id", identity["instance_id"]),
+                        ("instance_schema", COMPANY_STORE_SCHEMA),
+                    ],
+                )
+
+            other = Company(root / "other", MockModel()).company_identity()
+            self.assertNotEqual(other["instance_id"], identity["instance_id"])
+
+            changed = uuid.uuid4().hex
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE company_metadata SET value=? WHERE key='instance_id'",
+                    (changed,),
+                )
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                company.initialize()
+
+            store_a = root / "store-a"
+            store_b = root / "store-b"
+            company_a = Company(store_a, MockModel())
+            identity_a = company_a.company_identity()
+            identity_b = Company(store_b, MockModel()).company_identity()
+            self.assertNotEqual(identity_a, identity_b)
+            replacement = store_a / "company.db.replacement"
+            replacement.write_bytes((store_b / "company.db").read_bytes())
+            os.replace(replacement, store_a / "company.db")
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                company_a._connect()
+
+    def test_company_identity_converges_and_corruption_never_rekeys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def initialize_once(_: int) -> str:
+                return Company(root, MockModel()).company_identity()["instance_id"]
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                identities = list(pool.map(initialize_once, range(8)))
+            self.assertEqual(len(set(identities)), 1)
+
+            with closing(sqlite3.connect(root / "company.db")) as db, db:
+                db.execute("DELETE FROM company_metadata WHERE key='instance_id'")
+            with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                Company(root, MockModel()).initialize()
+            with closing(sqlite3.connect(root / "company.db")) as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM company_metadata WHERE key='instance_id'"
+                    ).fetchone()[0],
+                    0,
+                )
+
+            failed = Path(tmp) / "failed"
+            failed.mkdir()
+            with patch(
+                "local_company.core.uuid.uuid4", side_effect=RuntimeError("SENTINEL"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "SENTINEL"):
+                    Company(failed, MockModel()).initialize()
+            with closing(sqlite3.connect(failed / "company.db")) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
+                self.assertIsNone(db.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='company_metadata'"
+                ).fetchone())
+            self.assertFalse((failed / "outputs").exists())
+
+    def test_company_connections_keep_identity_and_operation_in_one_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            identity = company.company_identity()
+            with closing(sqlite3.connect(company.db_path)) as db:
+                self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+
+            with closing(company._connect(immediate=True)) as write_db:
+                self.assertTrue(write_db.in_transaction)
+                self.assertEqual(write_db.execute("PRAGMA query_only").fetchone()[0], 0)
+                write_db.rollback()
+
+            read_db = company._connect()
+            try:
+                self.assertTrue(read_db.in_transaction)
+                self.assertEqual(read_db.execute("PRAGMA query_only").fetchone()[0], 1)
+                length_limit = read_db.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
+                self.assertEqual(
+                    company._read_company_identity_row(read_db), identity["instance_id"],
+                )
+                self.assertEqual(
+                    read_db.getlimit(sqlite3.SQLITE_LIMIT_LENGTH), length_limit,
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    read_db.execute(
+                        "INSERT INTO projects VALUES ('blocked', 'blocked', '', 'now')"
+                    )
+                changed = uuid.uuid4().hex
+                with closing(sqlite3.connect(company.db_path)) as writer, writer:
+                    writer.execute(
+                        "UPDATE company_metadata SET value=? WHERE key='instance_id'",
+                        (changed,),
+                    )
+                self.assertEqual(
+                    company._read_company_identity_row(read_db), identity["instance_id"],
+                )
+            finally:
+                read_db.close()
+
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                company.projects()
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                company._connect(immediate=True)
+
+    def test_immediate_company_writers_serialize_without_upgrade_deadlock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            company.initialize()
+            barrier = threading.Barrier(2)
+
+            def write_project(index: int) -> None:
+                barrier.wait(timeout=3)
+                with closing(company._connect(immediate=True)) as db, db:
+                    db.execute(
+                        "INSERT INTO projects VALUES (?, ?, ?, ?)",
+                        (
+                            f"project-{index}", f"Project {index}", "",
+                            "2026-01-01T00:00:00+00:00",
+                        ),
+                    )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(write_project, range(2)))
+            self.assertEqual(len(company.projects()), 2)
+
+    def test_company_identity_reader_rejects_extra_or_oversized_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            valid_id = uuid.uuid4().hex
+            variants = (
+                (
+                    "extra-row", COMPANY_STORE_SCHEMA, valid_id,
+                    [("extra", sqlite3.Binary(b"SENTINEL" * 131072))],
+                ),
+                (
+                    "schema-nul-suffix", COMPANY_STORE_SCHEMA + "\x00SENTINEL",
+                    valid_id, [],
+                ),
+                (
+                    "id-nul-suffix", COMPANY_STORE_SCHEMA,
+                    valid_id + "\x00SENTINEL", [],
+                ),
+                (
+                    "huge-value", COMPANY_STORE_SCHEMA + "SENTINEL" * 131072,
+                    valid_id, [],
+                ),
+            )
+            for name, schema, instance_id, extras in variants:
+                with self.subTest(name=name):
+                    home = Path(tmp) / name
+                    home.mkdir()
+                    database = home / "company.db"
+                    with closing(sqlite3.connect(database)) as db, db:
+                        db.execute(
+                            "CREATE TABLE company_metadata ("
+                            "key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+                        )
+                        db.executemany(
+                            "INSERT INTO company_metadata(key, value) VALUES(?, ?)",
+                            [
+                                ("instance_schema", schema),
+                                ("instance_id", instance_id),
+                                *extras,
+                            ],
+                        )
+                        db.execute(f"PRAGMA user_version={COMPANY_DB_SCHEMA_VERSION}")
+                    with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                        Company(home, MockModel()).initialize()
+                    self.assertFalse((home / "outputs").exists())
 
     def test_doctor_exit_codes_distinguish_unavailable_missing_and_ready(self):
         cases = (
@@ -2064,12 +2298,22 @@ class CompanyTests(unittest.TestCase):
                 "provider": "ollama", "model": "qwen3.5:0.8b",
                 "endpoint": "loopback_default",
             },
+            {
+                "schema": COMPANY_STORE_SCHEMA,
+                "instance_id": "123e4567e89b42d3a456426614174000",
+            },
         )
         self.assertEqual(snapshot["worker"], {"status": "running"})
         self.assertEqual(
             snapshot["runtime"], {
                 "provider": "ollama", "model": "qwen3.5:0.8b",
                 "endpoint": "loopback_default",
+            },
+        )
+        self.assertEqual(
+            snapshot["company"], {
+                "schema": COMPANY_STORE_SCHEMA,
+                "instance_id": "123e4567e89b42d3a456426614174000",
             },
         )
         self.assertLess(len(json.dumps(snapshot).encode("utf-8")), 2048)
@@ -2105,6 +2349,7 @@ class CompanyTests(unittest.TestCase):
                 "provider": "ollama", "model": "qwen3.5:0.8b",
                 "endpoint": "loopback_default",
             }
+            company_identity = company.company_identity()
             with patch(
                 "local_company.dashboard.runtime_build_identity",
                 return_value=build_identity,
@@ -2112,7 +2357,10 @@ class CompanyTests(unittest.TestCase):
                 "local_company.dashboard.runtime_model_identity",
                 return_value=runtime_identity,
             ) as runtime_snapshot:
-                server = create_dashboard_server(company, 0)
+                with patch.object(
+                    company, "company_identity", return_value=company_identity,
+                ) as company_snapshot:
+                    server = create_dashboard_server(company, 0)
             self.assertEqual(server.server_address[0], "127.0.0.1")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -2123,6 +2371,7 @@ class CompanyTests(unittest.TestCase):
                     health = json.load(response)
                 self.assertEqual(health["status"], "ready")
                 self.assertEqual(health["build"], build_identity)
+                self.assertEqual(health["company"], company_identity)
                 with opener.open(
                     base + "/health.json?view=build-status", timeout=3,
                 ) as response:
@@ -2130,10 +2379,15 @@ class CompanyTests(unittest.TestCase):
                     self.assertLess(int(response.headers["Content-Length"]), 4096)
                 self.assertEqual(
                     set(build_status),
-                    {"status", "pid", "build", "runtime", "health", "worker"},
+                    {
+                        "status", "pid", "build", "runtime", "company", "health",
+                        "worker",
+                    },
                 )
                 self.assertEqual(build_status["build"], build_identity)
                 self.assertEqual(build_status["runtime"], runtime_identity)
+                self.assertEqual(build_status["company"], company_identity)
+                self.assertNotIn(str(company.home), json.dumps(build_status))
                 self.assertEqual(build_status["worker"], {"status": "disabled"})
                 with opener.open(base + "/build-status.json", timeout=3) as response:
                     self.assertEqual(json.load(response), build_status)
@@ -2146,6 +2400,7 @@ class CompanyTests(unittest.TestCase):
                 self.assertIn("/build-status.json", page)
                 build_snapshot.assert_called_once_with()
                 runtime_snapshot.assert_called_once_with(company)
+                company_snapshot.assert_called_once_with()
                 request = urllib.request.Request(base + "/", data=b"", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as raised:
                     opener.open(request, timeout=3)
@@ -2169,7 +2424,10 @@ class CompanyTests(unittest.TestCase):
         )
         self.assertEqual(
             {path.relative_to(source_root).as_posix() for path in source_files},
-            {"__init__.py", "cli.py", "core.py", "dashboard.py", "service.py"},
+            {
+                "__init__.py", "cli.py", "config.py", "core.py", "dashboard.py",
+                "service.py",
+            },
         )
         expected = hashlib.sha256()
         for path in source_files:
