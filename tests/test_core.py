@@ -47,7 +47,7 @@ from local_company.core import (
 from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
     health_endpoint_snapshot, render_dashboard, render_dataset_quality_detail,
-    render_mission_detail,
+    render_mission_detail, render_quality_failure_overview,
     runtime_build_identity, runtime_model_identity,
 )
 from local_company.service import (
@@ -4974,6 +4974,95 @@ class CompanyTests(unittest.TestCase):
                 self.assertEqual(cli_main(), 2)
             self.assertIn("--failed cannot be combined", error.getvalue())
             self.assertEqual(cli_model.calls, 0)
+
+    def test_quality_failure_dashboard_is_pathless_read_only_and_http_exact(self):
+        objective = (
+            "Private dashboard objective <script>never-render</script>: define three task "
+            "templates, a daily review cadence, success checks, failure modes, and owner gates. "
+            "Separate verified facts from assumptions. Each specialist must use at most 100 "
+            "words. The executive synthesis must use at most 180 words and end with: "
+            "Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", ConstraintModel(False))
+            queue_id = company.enqueue(
+                objective + f" Local private root: {root}",
+                playbook="operations-improvement", priority=88,
+            )
+            _, job_id, _, passed = company.run_next_queue_item()
+            self.assertFalse(passed)
+            no_model = CountingMockModel()
+            company.model = no_model
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_before = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history"
+                ).fetchone()[0]
+            database_before = company.db_path.read_bytes()
+
+            page = render_quality_failure_overview(company)
+            self.assertIn("Quality failure recovery", page)
+            self.assertIn(queue_id, page)
+            self.assertIn(f'href="/missions/{job_id}"', page)
+            self.assertIn("facts_assumptions_separated", page)
+            self.assertIn(
+                "label_assumptions_and_remove_unperformed_or_placeholder_claims", page,
+            )
+            self.assertNotIn("never-render", page)
+            self.assertNotIn(str(root), page)
+            self.assertNotIn("Private dashboard objective", page)
+            self.assertLess(len(page.encode("utf-8")), 32_768)
+            main_page = render_dashboard(company)
+            self.assertIn('href="/quality-failures"', main_page)
+            self.assertIn("Failed mission recovery", main_page)
+            malformed = company.quality_failure_summaries()
+            malformed["items"] = [None]
+            malformed["quality_failed_count"] = 1
+            with patch.object(
+                company, "quality_failure_summaries", return_value=malformed,
+            ), self.assertRaisesRegex(ValueError, "overview is malformed"):
+                render_quality_failure_overview(company)
+
+            server = create_dashboard_server(company, 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(base + "/quality-failures", timeout=3) as response:
+                    http_page = response.read().decode("utf-8")
+                    self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
+                self.assertEqual(http_page, page)
+                self.assertNotIn("never-render", http_page)
+                self.assertNotIn(str(root), http_page)
+
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    opener.open(base + "/quality-failures/extra", timeout=3)
+                self.assertEqual(missing.exception.code, 404)
+                missing.exception.close()
+
+                with patch.object(
+                    company, "quality_failure_summaries",
+                    side_effect=RuntimeError("private-race-detail"),
+                ), self.assertRaises(urllib.error.HTTPError) as unstable:
+                    opener.open(base + "/quality-failures", timeout=3)
+                self.assertEqual(unstable.exception.code, 409)
+                unstable_body = unstable.exception.read().decode("utf-8")
+                unstable.exception.close()
+                self.assertIn("retry after local state is stable", unstable_body)
+                self.assertNotIn("private-race-detail", unstable_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+            with closing(sqlite3.connect(company.db_path)) as db:
+                history_after = db.execute(
+                    "SELECT COUNT(*) FROM evaluation_history"
+                ).fetchone()[0]
+            self.assertEqual(history_after, history_before)
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(no_model.calls, 0)
 
     def test_bounded_editor_repairs_structure_and_audits_word_caps(self):
         objective = (

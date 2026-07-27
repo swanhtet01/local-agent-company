@@ -370,6 +370,9 @@ def render_dashboard(
         f"<td>{mission_link(row[7])}</td><td>{cell(row[8] or '-')}</td><td>{queue_action(row)}</td></tr>"
         for row in snapshot["queue"][:30]
     ) or '<tr><td colspan="9" class="empty">Queue is empty</td></tr>'
+    quality_failed_count = sum(
+        1 for row in snapshot["queue"] if row[1] == "quality_failed"
+    )
     schedule_rows = "".join(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[1])}</td>"
         f"<td>{'enabled' if row[2] else 'disabled'}</td><td>{cell(row[3])}d</td><td>{cell(row[4])}</td></tr>"
@@ -571,14 +574,96 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{snapshot['health']['disk_free_bytes'] / (1024 ** 3):.1f}</div><div class="label">Free disk GiB</div></div>
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
+<div class="card"><div class="metric gate">{quality_failed_count}</div><div class="label"><a href="/quality-failures">Failed mission recovery</a></div></div>
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>
 </div>
-<section><h2>Mission queue</h2><table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
+<section><h2>Mission queue</h2><p class="hint"><a href="/quality-failures">Review bounded recovery guidance for all quality-failed missions</a>.</p><table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
 <section><h2>Recurring schedules</h2><table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Cadence</th><th>Next UTC</th></tr></thead><tbody>{schedule_rows}</tbody></table></section>
 <section><h2>Dataset quality</h2><p class="hint">Stored aggregate profiles only; source paths and row values are withheld. Only explicitly declared contract rules are treated as business checks.</p><table><thead><tr><th>ID</th><th>Project</th><th>Format</th><th>Rows</th><th>Columns</th><th>Quality</th><th>Declared key</th><th>Contract</th><th>Profiled UTC</th></tr></thead><tbody>{dataset_rows}</tbody></table></section>
 <section><h2>Recent missions</h2><table><thead><tr><th>ID</th><th>Report state</th><th>Automated checks</th><th>Objective</th><th>Created UTC</th><th>Action</th></tr></thead><tbody>{job_rows}</tbody></table></section>
 <section><h2>Projects</h2><table><thead><tr><th>ID</th><th>Name</th><th>Missions</th></tr></thead><tbody>{project_rows}</tbody></table></section>
 <section><h2>Approval inbox</h2><table><thead><tr><th>ID</th><th>Category</th><th>Proposed action</th></tr></thead><tbody>{approval_rows}</tbody></table></section>
+</body></html>"""
+
+
+def render_quality_failure_overview(company: Company) -> str:
+    """Render bounded recovery metadata without objectives, reports, or paths."""
+    overview = company.quality_failure_summaries()
+    effects = overview.get("effects")
+    items = overview.get("items")
+    count = overview.get("quality_failed_count")
+    common_checks = overview.get("common_failed_checks")
+    common_actions = overview.get("common_repair_actions")
+    if (
+        not isinstance(effects, dict)
+        or set(effects) != {
+            "evaluation_appended", "model_called", "queue_changed", "work_started",
+        }
+        or any(value is not False for value in effects.values())
+        or not isinstance(items, list)
+        or any(not isinstance(item, dict) for item in items)
+        or type(count) is not int or count != len(items)
+        or not isinstance(common_checks, list)
+        or any(not isinstance(item, dict) for item in common_checks)
+        or not isinstance(common_actions, list)
+        or any(not isinstance(item, dict) for item in common_actions)
+    ):
+        raise ValueError("Quality recovery overview is malformed")
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    def token_list(values: object, empty: str = "none") -> str:
+        if not isinstance(values, list) or not values:
+            return f'<span class="muted">{cell(empty)}</span>'
+        return "<ul>" + "".join(
+            f"<li><code>{cell(value)}</code></li>" for value in values
+        ) + "</ul>"
+
+    rows = "".join(
+        "<tr>"
+        f"<td>{cell(item['priority'])}</td>"
+        f"<td><code>{cell(item['queue_id'])}</code></td>"
+        f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a></td>'
+        f"<td>{cell(item['score'])}/100<br><span class=\"meta\"><code>{cell(item['evaluator_version'])}</code><br>{cell(item['evaluated_at'])}</span></td>"
+        f"<td>{token_list(item['failed_checks'])}</td>"
+        f"<td>{cell(item['source_conflict_count'])}</td>"
+        f"<td>{token_list(item['incomplete_specialist_roles'])}</td>"
+        f"<td>{token_list(item['repair_actions'])}</td>"
+        f"<td><code>{cell(item['next_action'])}</code></td>"
+        "</tr>"
+        for item in items
+    ) or '<tr><td colspan="9" class="empty">No quality-failed missions.</td></tr>'
+    common_check_rows = "".join(
+        f"<tr><td><code>{cell(item['check'])}</code></td><td>{cell(item['count'])}</td></tr>"
+        for item in common_checks
+    ) or '<tr><td colspan="2" class="empty">No shared failed gates.</td></tr>'
+    common_action_rows = "".join(
+        f"<tr><td><code>{cell(item['action'])}</code></td><td>{cell(item['count'])}</td></tr>"
+        for item in common_actions
+    ) or '<tr><td colspan="2" class="empty">No shared repair actions.</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quality failure recovery</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:1280px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
+.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
+.empty {{ color:#6f7d95; text-align:center; }} .table-wrap {{ overflow-x:auto; border-radius:10px; }}
+@media(max-width:800px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
+</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<h1>Quality failure recovery</h1>
+<p class="metric">{count}</p><p class="meta">quality-failed missions, ordered by queue priority</p>
+<p class="boundary">Stored deterministic findings only. Objectives, projects, reports, source paths, evidence text, claims, and model output are withheld. This view appends no evaluation, calls no model, changes no queue item, and starts no work.</p>
+<section><h2>Recovery queue</h2><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Queue</th><th>Mission</th><th>Score / evaluation</th><th>Failed gates</th><th>Conflicts</th><th>Incomplete roles</th><th>Repair actions</th><th>Next action</th></tr></thead><tbody>{rows}</tbody></table></div></section>
+<div class="grid"><section><h2>Common failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{common_check_rows}</tbody></table></section>
+<section><h2>Common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{common_action_rows}</tbody></table></section></div>
+<p class="meta">Next action: <code>{cell(overview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(overview.get('schema', 'unknown'))}</code></p>
 </body></html>"""
 
 
@@ -1035,6 +1120,15 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+            elif parsed.path == "/quality-failures":
+                try:
+                    body = render_quality_failure_overview(company).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                except (KeyError, RuntimeError, TypeError, ValueError):
+                    body = b"Quality failure recovery unavailable; retry after local state is stable."
+                    self.send_response(409)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif match := re.fullmatch(r"/datasets/([0-9a-f]{12})", parsed.path):
                 try:
                     body = render_dataset_quality_detail(
