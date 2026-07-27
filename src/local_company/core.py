@@ -214,8 +214,8 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.14"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.13"
+EVALUATOR_VERSION = "local-quality-2026-07-27.15"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.14"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 512
@@ -943,6 +943,19 @@ def _structured_validation_code(error: BaseException) -> str:
     if isinstance(error, ValueError):
         return "value_error"
     return "runtime_error"
+
+
+def _requires_strict_grounded_synthesis(objective: str) -> bool:
+    objective_lower = objective.casefold()
+    return bool(
+        "matching supplied evidence id" in objective_lower
+        or (
+            "facts from assumptions" in objective_lower
+            and "using" in objective_lower
+            and "imported" in objective_lower
+            and "7-day" in objective_lower
+        )
+    )
 
 
 def _safe_model_metrics(metrics: object) -> dict[str, bool | float | int | str]:
@@ -5581,7 +5594,7 @@ class Company:
             and evidence_id.lower() in valid_evidence_ids
             for evidence_id in mentioned_evidence_ids
         )
-        if "matching supplied evidence id" in objective_lower:
+        if _requires_strict_grounded_synthesis(objective):
             checks["evidence_filename_pairs_valid"] = evidence_filename_pairs_valid(
                 model_output, evidence_source_names,
             )
@@ -6824,9 +6837,7 @@ class Company:
             flags=re.IGNORECASE,
         )
         specialist_word_limit = int(specialist_limit_match.group(1)) if specialist_limit_match else None
-        strict_evidence_pairs_required = (
-            "matching supplied evidence id" in objective.lower()
-        )
+        strict_evidence_pairs_required = _requires_strict_grounded_synthesis(objective)
         current_role: str | None = None
         try:
             if strict_evidence_pairs_required and results:

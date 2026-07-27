@@ -4586,10 +4586,10 @@ class CompanyTests(unittest.TestCase):
                 }
 
         objective = (
-            "Using imported alpha.md, separate verified facts from assumptions. Define three "
+            "Using imported alpha.md, prepare a plan for the next 7-day period and separate "
+            "verified facts from assumptions. Define three "
             "reusable task templates, a daily review cadence, success checks, failure modes, and "
-            "owner gates. Every verified claim must name its exact source filename and matching "
-            "supplied evidence ID. Each specialist must use at most 90 words. Executive synthesis "
+            "owner gates. Each specialist must use at most 90 words. Executive synthesis "
             "at most 180 words and end with: Owner review required."
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -4609,6 +4609,7 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(evaluation["passed"], {
                 key: value for key, value in evaluation["checks"].items() if not value
             })
+            self.assertTrue(evaluation["checks"]["evidence_filename_pairs_valid"])
             self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
             self.assertEqual(evaluation["incomplete_specialist_roles"], ["operations"])
             self.assertEqual(model.bounded_caps, [512])
