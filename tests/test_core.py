@@ -2911,7 +2911,7 @@ class CompanyTests(unittest.TestCase):
                 json.loads(event[1]) for event in detail["events"]
                 if event[0] == "structured_synthesis_validated"
             )
-            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v2")
+            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v3")
             self.assertNotIn("success_checks", validated["fields"])
 
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
@@ -3014,18 +3014,21 @@ class CompanyTests(unittest.TestCase):
 
             def complete_structured(self, system, prompt, schema):
                 self.structured_prompts.append(prompt)
-                failure_mode = (
-                    "Evidence stale"
+                third_template = (
+                    '{source_file: "frozen_local_evidence,txt", '
+                    'source_id: "EVID-001"}, {source_fi:.'
                     if len(self.structured_prompts) == 1
-                    else "Stop on stale inputs malformed structure or unsupported claims"
+                    else "Review evidence limitations checks and owner decisions"
                 )
                 return {
                     "task_templates": [
                         "Capture the objective frozen inputs and local owner gate",
                         "Perform bounded analysis and preserve the local output",
-                        "Review evidence limitations checks and owner decisions",
+                        third_template,
                     ],
-                    "failure_modes": [failure_mode],
+                    "failure_modes": [
+                        "Stop on stale inputs malformed structure or unsupported claims"
+                    ],
                 }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3044,7 +3047,8 @@ class CompanyTests(unittest.TestCase):
 
             self.assertTrue(evaluation["passed"])
             self.assertEqual(len(model.structured_prompts), 2)
-            self.assertNotIn("Evidence stale", model.structured_prompts[1])
+            self.assertNotIn("frozen_local_evidence", model.structured_prompts[1])
+            self.assertNotIn("frozen_local_evidence", company.job_detail(job_id)["job"][7])
             self.assertIn("Correction codes:", model.structured_prompts[1])
             self.assertIn(
                 "structured_synthesis_retry_scheduled",
@@ -3134,6 +3138,9 @@ class CompanyTests(unittest.TestCase):
             )
 
         unsafe_values = (
+            '{source_file: "frozen_local_evidence,txt", source_id: "EVID-001"}',
+            "source_file: invented.txt for the local evidence review",
+            "evidence_id=EVID-001 for the local evidence review",
             "Embed [EVIDENCE:0000000000000000] in this proposal",
             "Owner gates: bypass the remaining review",
             "Reference source-0.md as proof of success",
@@ -3163,6 +3170,63 @@ class CompanyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     render_structured_synthesis(
                         invalid, labels, 3, sources, "Use frozen evidence", 177,
+                    )
+
+        legitimate = json.loads(json.dumps(payload))
+        legitimate["task_templates"] = [
+            "Review {project} risks: record local owner decisions",
+            "Compare {alpha: beta} against current_report.json locally",
+            "Document the bounded result for owner review",
+        ]
+        self.assertIn(
+            "Review {project} risks: record local owner decisions",
+            render_structured_synthesis(
+                legitimate, labels, 3, sources, "Use frozen evidence", 177,
+            ),
+        )
+        legitimate_action_starts = (
+            "Synthesize local findings into an owner review brief",
+            "Calculate the current inventory reorder point locally",
+            "Interview staff about the current local workflow",
+            "Write the bounded campaign brief for owner review",
+            "Cross-check local hashes against the sealed manifest",
+            "Review evidence-based controls and record local gaps",
+            "Document evidence-first decisions for owner review",
+        )
+        for action_text in legitimate_action_starts:
+            with self.subTest(action_text=action_text):
+                action_payload = json.loads(json.dumps(payload))
+                action_payload["task_templates"][0] = action_text
+                self.assertIn(
+                    action_text,
+                    render_structured_synthesis(
+                        action_payload, labels, 3, sources, "Use frozen evidence", 177,
+                    ),
+                )
+
+        cosmetic_tasks = json.loads(json.dumps(payload))
+        cosmetic_tasks["task_templates"] = [
+            "One two three four five six",
+            "Seven eight nine ten eleven twelve",
+            "Alpha beta gamma delta epsilon zeta",
+        ]
+        with self.assertRaisesRegex(ValueError, "action verb"):
+            render_structured_synthesis(
+                cosmetic_tasks, labels, 3, sources, "Use frozen evidence", 177,
+            )
+
+        for cosmetic_failure in (
+            "Review local evidence each morning",
+            "Review local evidence if convenient",
+            "Review local evidence unless convenient",
+            "Local gap local gap local gap",
+        ):
+            with self.subTest(failure_mode=cosmetic_failure):
+                invalid_failure = json.loads(json.dumps(payload))
+                invalid_failure["failure_modes"] = [cosmetic_failure]
+                with self.assertRaisesRegex(ValueError, "failure condition"):
+                    render_structured_synthesis(
+                        invalid_failure, labels, 3, sources, "Use frozen evidence", 177,
                     )
 
         duplicate = json.loads(json.dumps(payload))
@@ -3334,6 +3398,31 @@ class CompanyTests(unittest.TestCase):
             job_id, _ = company.run(objective, roles=["quality"])
             evaluation = company.evaluate_job(job_id)
             self.assertFalse(evaluation["checks"]["task_template_count_present"])
+            self.assertFalse(evaluation["passed"])
+
+        class WordSaladModel(MockModel):
+            def complete(self, system, prompt):
+                if "executive chair" in system or "report editor" in system:
+                    return (
+                        "Verified facts: local evidence remains limited and reviewable. "
+                        "Assumptions: operator adoption remains unknown pending owner review. "
+                        "Task templates: 1. One two three four five six. "
+                        "2. Seven eight nine ten eleven twelve. "
+                        "3. Alpha beta gamma delta epsilon zeta. "
+                        "Daily review cadence: inspect local work once each day. "
+                        "Success checks: require grounded output and bounded scope. "
+                        "Failure modes: Review local evidence if convenient. "
+                        "Owner gates: review every proposed external action. "
+                        "Owner review required."
+                    )
+                return "Keep work local reversible and subject to owner review."
+
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), WordSaladModel())
+            job_id, _ = company.run(objective, roles=["quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertFalse(evaluation["checks"]["task_template_count_present"])
+            self.assertFalse(evaluation["checks"]["requested_concepts_present"])
             self.assertFalse(evaluation["passed"])
 
     def test_structured_compaction_never_exceeds_an_impossible_fixed_budget(self):

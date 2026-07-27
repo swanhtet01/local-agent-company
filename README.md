@@ -115,6 +115,10 @@ After every completed mission, deterministic gates verify that all assignments c
 
 The deterministic renderer also owns the success criterion, so model-generated past-tense
 completion wording cannot define acceptance.
+Strict proposal fields reject serialized-object fragments and source/evidence metadata keys;
+malformed task text receives the same single local retry and then fails closed.
+Task templates must begin with an action verb, failure modes must state an explicit failure
+condition, and the evaluator reapplies both semantic checks to sealed reports.
 
 ```powershell
 .\local-company.cmd quality JOB_ID
