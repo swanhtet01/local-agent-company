@@ -15,7 +15,7 @@ from local_company.core import (
     KNOWLEDGE_FRESHNESS_SCHEMA,
     KNOWLEDGE_REFRESH_SCHEMA,
     MISSION_PREFLIGHT_SCHEMA,
-    QUEUE_PREFLIGHT_SCHEMA,
+    QUEUE_PREFLIGHT_SCHEMA, QUEUE_RETRY_PREFLIGHT_SCHEMA,
     Company,
     MockModel,
 )
@@ -873,6 +873,86 @@ class KnowledgeFreshnessTests(unittest.TestCase):
             self.assertNotIn(str(source.resolve()), output.getvalue())
             self.assertNotIn("CLI private source datum", output.getvalue())
             self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(cli_model.calls, 0)
+
+    def test_retry_preflight_proves_current_evidence_without_reset_or_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            source = root / "retry-private.md"
+            source.write_text("private retry baseline", encoding="utf-8")
+            model = CountingModel()
+            company = Company(state, model)
+            project = company.create_project("Retry Preflight")
+            company.add_knowledge(source, project)
+            objective = "Review local inventory evidence"
+            queue_id = company.enqueue(objective, project=project)
+            observed, _, _, passed = company.run_next_queue_item(queue_id)
+            self.assertEqual(observed, queue_id)
+            self.assertTrue(passed)
+            with closing(company._connect(immediate=True)) as db, db:
+                db.execute(
+                    "UPDATE mission_queue SET status='quality_failed' WHERE id=?",
+                    (queue_id,),
+                )
+            calls_before = model.calls
+            database_before = file_sha256(company.db_path)
+
+            ready = company.queue_retry_preflight(queue_id)
+
+            self.assertEqual(ready["schema"], QUEUE_RETRY_PREFLIGHT_SCHEMA)
+            self.assertEqual(ready["status"], "ready")
+            self.assertEqual(ready["queue_status"], "quality_failed")
+            self.assertTrue(ready["reset_eligible"])
+            self.assertTrue(ready["retry_execution_ready"])
+            self.assertEqual(ready["retry_policy"], "standard")
+            self.assertEqual(ready["blockers"], [])
+            self.assertEqual(
+                ready["next_action"],
+                "review_then_reset_for_current_evidence_retry",
+            )
+            self.assertEqual(ready["knowledge"]["status"], "ready")
+            self.assertEqual(ready["effects"], {
+                "queue_claimed": False,
+                "job_created": False,
+                "model_called": False,
+                "state_mutated": False,
+                "work_started": False,
+                "queue_reset": False,
+            })
+            rendered = json.dumps(ready, sort_keys=True)
+            for private_value in (
+                objective, str(source.resolve()), "private retry baseline", "sha256",
+            ):
+                self.assertNotIn(private_value, rendered)
+            self.assertEqual(file_sha256(company.db_path), database_before)
+            self.assertEqual(model.calls, calls_before)
+            self.assertEqual(company.queue_items("quality_failed")[0][0], queue_id)
+
+            source.write_text("private retry baseline changed", encoding="utf-8")
+            drift = company.queue_retry_preflight(queue_id)
+            self.assertEqual(drift["status"], "blocked")
+            self.assertFalse(drift["retry_execution_ready"])
+            self.assertEqual(drift["blockers"], ["knowledge_changed"])
+            self.assertEqual(drift["next_action"], "repair_retry_preflight_blockers")
+            self.assertEqual(file_sha256(company.db_path), database_before)
+            self.assertEqual(model.calls, calls_before)
+
+            cli_model = CountingModel()
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "queue",
+                    "retry-preflight", queue_id,
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            cli_result = json.loads(output.getvalue())
+            self.assertEqual(cli_result["schema"], QUEUE_RETRY_PREFLIGHT_SCHEMA)
+            self.assertEqual(cli_result["blockers"], ["knowledge_changed"])
+            self.assertNotIn("private retry baseline", output.getvalue())
             self.assertEqual(cli_model.calls, 0)
 
     def test_dashboard_disables_drift_but_allows_ready_and_owner_gate_submission(self) -> None:

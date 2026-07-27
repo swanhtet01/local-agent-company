@@ -82,6 +82,11 @@ def parser() -> argparse.ArgumentParser:
     queue_preflight.add_argument(
         "--queue-id", help="Compare with this exact reviewed mission ID"
     )
+    queue_retry_preflight = queue_sub.add_parser(
+        "retry-preflight",
+        help="Preview one failed item's current-evidence retry gates without resetting it",
+    )
+    queue_retry_preflight.add_argument("queue_id")
     queue_run = queue_sub.add_parser(
         "run-next", help="Run the highest-priority due mission, optionally by reviewed ID"
     )
@@ -358,6 +363,10 @@ def main() -> int:
                     )
             elif args.queue_command == "preflight":
                 print(json.dumps(company.queue_preflight(args.queue_id), indent=2))
+            elif args.queue_command == "retry-preflight":
+                print(json.dumps(
+                    company.queue_retry_preflight(args.queue_id), indent=2,
+                ))
             elif args.queue_command == "run-next":
                 queue_id, job_id, output, passed = company.run_next_queue_item(args.queue_id)
                 print(

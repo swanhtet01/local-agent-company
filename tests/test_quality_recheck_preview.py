@@ -16,7 +16,7 @@ from local_company.core import (
 )
 from local_company.dashboard import (
     create_dashboard_server, render_dashboard, render_quality_failure_overview,
-    render_quality_recheck_preview,
+    render_quality_recheck_preview, render_queue_retry_preflight,
 )
 
 
@@ -196,7 +196,18 @@ class QualityRecheckPreviewTests(unittest.TestCase):
             self.assertLess(len(page.encode("utf-8")), 24_576)
             failure_page = render_quality_failure_overview(company)
             self.assertIn(f'href="/quality-preview/{job_id}"', failure_page)
+            self.assertIn(
+                f'href="/queue-retry-preflight/{queue_id}"', failure_page,
+            )
             self.assertIn(queue_id, failure_page)
+            retry_page = render_queue_retry_preflight(company, queue_id)
+            self.assertIn("Queue retry preflight", retry_page)
+            self.assertIn("local-company.queue-retry-preflight.v1", retry_page)
+            self.assertIn("review_then_reset_for_current_evidence_retry", retry_page)
+            self.assertIn("did not reset or claim the queue", retry_page)
+            self.assertNotIn(objective, retry_page)
+            self.assertNotIn(str(root), retry_page)
+            self.assertLess(len(retry_page.encode("utf-8")), 16_384)
             mission_page = render_dashboard(company)
             self.assertNotIn(objective, page)
             self.assertIn("Failed mission recovery", mission_page)
@@ -213,6 +224,17 @@ class QualityRecheckPreviewTests(unittest.TestCase):
                     self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
                 self.assertEqual(http_page, page)
 
+                with opener.open(
+                    base + f"/queue-retry-preflight/{queue_id}", timeout=3,
+                ) as response:
+                    http_retry_page = response.read().decode("utf-8")
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(
+                        response.headers["Content-Type"],
+                        "text/html; charset=utf-8",
+                    )
+                self.assertEqual(http_retry_page, retry_page)
+
                 with self.assertRaises(urllib.error.HTTPError) as missing:
                     opener.open(base + "/quality-preview/aaaaaaaaaaaa", timeout=3)
                 self.assertEqual(missing.exception.code, 404)
@@ -222,6 +244,13 @@ class QualityRecheckPreviewTests(unittest.TestCase):
                     opener.open(base + f"/quality-preview/{job_id}?extra=1", timeout=3)
                 self.assertEqual(unexpected_query.exception.code, 404)
                 unexpected_query.exception.close()
+
+                with self.assertRaises(urllib.error.HTTPError) as missing_retry:
+                    opener.open(
+                        base + "/queue-retry-preflight/aaaaaaaaaaaa", timeout=3,
+                    )
+                self.assertEqual(missing_retry.exception.code, 404)
+                missing_retry.exception.close()
 
                 with patch.object(
                     company, "quality_recheck_preview",

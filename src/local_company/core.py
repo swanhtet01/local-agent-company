@@ -198,6 +198,7 @@ KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 KNOWLEDGE_AUTHORITY_SCHEMA = "local-company.knowledge-authority.v1"
 MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
+QUEUE_RETRY_PREFLIGHT_SCHEMA = "local-company.queue-retry-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
@@ -4559,6 +4560,100 @@ class Company:
             "team": {"selection": None, "playbook": None, "roles": []},
             "knowledge": self._unchecked_preflight_knowledge(),
             "effects": self._queue_preflight_effects(),
+        }
+
+    def queue_retry_preflight(self, queue_id: str) -> dict[str, object]:
+        """Prove whether one failed queue item is ready for a current-evidence retry."""
+        self.initialize()
+        if (
+            not isinstance(queue_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", queue_id) is None
+        ):
+            raise ValueError(
+                "Retry queue ID must be 12 lowercase hexadecimal characters"
+            )
+        with closing(self._connect()) as db:
+            active = db.execute(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE status='running'), "
+                "EXISTS(SELECT 1 FROM mission_queue WHERE status='running')"
+            ).fetchone()
+            execution_slot_busy = bool(active and (active[0] or active[1]))
+            row = db.execute(
+                "SELECT id, objective, project_id, roles_json, playbook, status, job_id "
+                "FROM mission_queue WHERE id=?",
+                (queue_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown queue item: {queue_id}")
+            base = self._queue_preflight_from_row(
+                db, row[:5], expected_queue_id=queue_id,
+                execution_slot_busy=execution_slot_busy,
+            )
+            queue_status = row[5] if isinstance(row[5], str) else None
+            reset_eligible = queue_status in {
+                "failed", "quality_failed", "superseded",
+            }
+            history_bound = True
+            if queue_status in {"quality_failed", "superseded"}:
+                job_id = row[6]
+                history_bound = bool(
+                    isinstance(job_id, str)
+                    and re.fullmatch(r"[0-9a-f]{12}", job_id) is not None
+                    and db.execute(
+                        "SELECT 1 FROM jobs WHERE id=?", (job_id,),
+                    ).fetchone() is not None
+                )
+
+        blockers = list(base["blockers"])
+        if not reset_eligible:
+            blockers.append("queue_not_retryable")
+        if not history_bound:
+            blockers.append("retry_history_invalid")
+        blockers = list(dict.fromkeys(blockers))
+        owner_gate_categories = list(base["owner_gate_categories"])
+        retry_execution_ready = bool(
+            reset_eligible
+            and history_bound
+            and base["model_execution_ready"] is True
+            and not blockers
+        )
+        if not reset_eligible or not history_bound:
+            status = "ineligible"
+            next_action = "keep_current_queue_state"
+        elif blockers:
+            status = "blocked"
+            next_action = "repair_retry_preflight_blockers"
+        elif owner_gate_categories:
+            status = "owner_gate_required"
+            next_action = "review_owner_gate_before_reset"
+        else:
+            status = "ready"
+            next_action = "review_then_reset_for_current_evidence_retry"
+        objective = row[1]
+        retry_policy = (
+            "strict_grounded"
+            if isinstance(objective, str)
+            and _requires_strict_grounded_synthesis(objective)
+            else "standard"
+        )
+        return {
+            "schema": QUEUE_RETRY_PREFLIGHT_SCHEMA,
+            "status": status,
+            "queue_id": queue_id,
+            "queue_status": queue_status,
+            "project_id": base["project_id"],
+            "reset_eligible": reset_eligible and history_bound,
+            "retry_execution_ready": retry_execution_ready,
+            "retry_policy": retry_policy,
+            "blockers": blockers,
+            "owner_gate_categories": owner_gate_categories,
+            "team": base["team"],
+            "knowledge": base["knowledge"],
+            "next_action": next_action,
+            "effects": {
+                **self._queue_preflight_effects(),
+                "queue_reset": False,
+            },
         }
 
     def reset_queue_item(self, queue_id: str, source: str = "cli") -> None:

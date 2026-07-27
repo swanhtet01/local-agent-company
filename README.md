@@ -164,10 +164,13 @@ Queue work without executing it, then manually run the highest-priority mission 
 .\local-company.cmd queue add "Improve our daily stock process" --project "Yangon Tyre" --playbook operations-improvement --priority 80
 .\local-company.cmd queue list --status queued
 .\local-company.cmd queue preflight --queue-id REVIEWED_QUEUE_ID
+.\local-company.cmd queue retry-preflight FAILED_QUEUE_ID
 .\local-company.cmd queue run-next --queue-id REVIEWED_QUEUE_ID --num-predict 128
 ```
 
 Priorities range from 0 to 100. `--scheduled-at` accepts an ISO-8601 timestamp; values without a timezone are treated as UTC. There is no autonomous daemon: queue execution is an explicit local operator command. Before running, `queue preflight` returns the pathless `local-company.queue-preflight.v1` contract for the canonical next-due mission. It confirms the exact reviewed ID, selected team, current knowledge counts, owner-gate categories, and whether submission and model execution are ready without exposing the objective, source paths, source contents, or digests. It starts no model, job, or queue claim and does not mutate state. A `blocked` result must be corrected and reviewed again; `owner_gate_required` remains eligible only to create a local approval request and never starts model work.
+
+Before resetting a `failed`, `quality_failed`, or `superseded` item, `queue retry-preflight QUEUE_ID` returns `local-company.queue-retry-preflight.v1` over the still-failed record. It proves reset eligibility, current knowledge status, routed team, retry policy, owner gates, execution-slot readiness, and exactly one next action without exposing the objective or evidence. The CLI and dashboard retry-preflight page never reset or claim the queue, create a job, call a model, mutate state, or start work. Only after reviewing a `ready` result should an operator use `queue reset QUEUE_ID`; the ordinary next-due preflight still runs again before execution.
 
 `--queue-id` is optional in the CLI for compatibility, but when supplied it fails without mutation unless that exact reviewed ID is still the canonical highest-priority due mission. The dashboard displays the same preflight, disables model submission on blockers, and leaves the owner-review request available for gated work. It always supplies the displayed ID and claims it synchronously before acknowledging the POST. A changed queue order returns a conflict and runs nothing. Sensitive objectives become `needs_approval` and are not executed. When execution begins, the queue claim and job ID are linked in the same database transaction before the first model response and share a revocable execution lease, so interrupted work remains attributable and a superseded worker cannot persist a late result.
 

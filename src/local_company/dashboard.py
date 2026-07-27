@@ -15,9 +15,10 @@ from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
     Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
+    QUEUE_RETRY_PREFLIGHT_SCHEMA,
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECHECK_PREVIEW_SCHEMA,
     QUALITY_SUPERSESSION_LIST_SCHEMA,
-    QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending,
+    QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending, ROLES,
 )
 
 
@@ -789,6 +790,7 @@ def render_quality_failure_overview(company: Company) -> str:
             f"<td><code>{cell(item['queue_id'])}</code></td>"
             f'<td><a href="/missions/{cell(item["job_id"])}"><code>{cell(item["job_id"])}</code></a>'
             f'<br><a href="/quality-preview/{cell(item["job_id"])}">Current preview detail</a>'
+            f'<br><a href="/queue-retry-preflight/{cell(item["queue_id"])}">Retry preflight</a>'
             f'<br><a href="/quality-supersession/{cell(item["queue_id"])}">Supersession proof</a></td>'
             f"<td>{cell(stored['score'])}/100<br><code>{cell(stored['evaluator_version'])}</code>"
             f"<br><span class=\"meta\">{cell(stored['evaluated_at'])}</span>"
@@ -844,6 +846,117 @@ th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0
 <section><h2>Current common repair actions</h2><table><thead><tr><th>Action</th><th>Missions</th></tr></thead><tbody>{current_action_rows}</tbody></table></section>
 <section><h2>Stored historical failed gates</h2><table><thead><tr><th>Gate</th><th>Missions</th></tr></thead><tbody>{stored_check_rows}</tbody></table></section></div>
 <p class="meta">Next action: <code>{cell(overview.get('next_action', 'none'))}</code> &middot; schema <code>{cell(overview.get('schema', 'unknown'))}</code></p>
+</body></html>"""
+
+
+def render_queue_retry_preflight(company: Company, queue_id: str) -> str:
+    """Render one pathless, mutation-free current-evidence retry readiness proof."""
+    preflight = company.queue_retry_preflight(queue_id)
+    effects = preflight.get("effects")
+    team = preflight.get("team")
+    knowledge = preflight.get("knowledge")
+    blockers = preflight.get("blockers")
+    owner_gates = preflight.get("owner_gate_categories")
+    expected_keys = {
+        "schema", "status", "queue_id", "queue_status", "project_id",
+        "reset_eligible", "retry_execution_ready", "retry_policy", "blockers",
+        "owner_gate_categories", "team", "knowledge", "next_action", "effects",
+    }
+    if (
+        set(preflight) != expected_keys
+        or preflight.get("schema") != QUEUE_RETRY_PREFLIGHT_SCHEMA
+        or preflight.get("queue_id") != queue_id
+        or preflight.get("status") not in {
+            "ready", "blocked", "owner_gate_required", "ineligible",
+        }
+        or preflight.get("queue_status") not in {
+            "queued", "running", "complete", "failed", "quality_failed",
+            "superseded", "cancelled", "needs_approval",
+        }
+        or type(preflight.get("reset_eligible")) is not bool
+        or type(preflight.get("retry_execution_ready")) is not bool
+        or preflight.get("retry_policy") not in {"strict_grounded", "standard"}
+        or not isinstance(blockers, list)
+        or len(blockers) > 16
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[a-z0-9_]{1,80}", value) is None
+            for value in blockers
+        )
+        or not isinstance(owner_gates, list)
+        or len(owner_gates) > 16
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[a-z0-9_]{1,80}", value) is None
+            for value in owner_gates
+        )
+        or not isinstance(team, dict)
+        or set(team) != {"selection", "playbook", "roles"}
+        or team.get("selection") not in {None, "automatic", "explicit", "playbook"}
+        or (
+            team.get("playbook") is not None
+            and team.get("playbook") not in PLAYBOOKS
+        )
+        or not isinstance(team.get("roles"), list)
+        or len(team["roles"]) > 64
+        or any(
+            not isinstance(role, str) or role not in ROLES
+            for role in team["roles"]
+        )
+        or not isinstance(knowledge, dict)
+        or set(knowledge) != {"status", "source_count", "status_counts"}
+        or knowledge.get("status") not in {"ready", "drift", "over_limit", "not_checked"}
+        or not isinstance(preflight.get("next_action"), str)
+        or re.fullmatch(r"[a-z0-9_]{1,120}", preflight["next_action"]) is None
+        or not isinstance(effects, dict)
+        or set(effects) != {
+            "queue_claimed", "job_created", "model_called", "state_mutated",
+            "work_started", "queue_reset",
+        }
+        or any(value is not False for value in effects.values())
+    ):
+        raise ValueError("Queue retry preflight is malformed")
+    source_count = knowledge.get("source_count")
+    if source_count is not None and (type(source_count) is not int or source_count < 0):
+        raise ValueError("Queue retry preflight is malformed")
+    roles = team["roles"]
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    def tokens(values: list[str], empty: str = "none") -> str:
+        if not values:
+            return f'<span class="muted">{cell(empty)}</span>'
+        return "<ul>" + "".join(
+            f"<li><code>{cell(value)}</code></li>" for value in values
+        ) + "</ul>"
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Queue retry preflight</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:920px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.muted,.meta {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
+.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
+th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
+th {{ color:#9aa7bd; width:34%; }} ul {{ margin:0; padding-left:18px; }}
+</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
+<h1>Queue retry preflight</h1>
+<p class="metric">{cell(preflight['status'])}</p>
+<p class="boundary">This is a read-only proof over the still-{cell(preflight['queue_status'])} queue item. It did not reset or claim the queue, create a job, call a model, mutate state, or start work. Objectives, source paths, source text, and prior report content are withheld.</p>
+<table><tbody>
+<tr><th>Queue</th><td><code>{cell(queue_id)}</code></td></tr>
+<tr><th>Reset eligible</th><td>{cell(preflight['reset_eligible'])}</td></tr>
+<tr><th>Retry execution ready</th><td>{cell(preflight['retry_execution_ready'])}</td></tr>
+<tr><th>Retry policy</th><td><code>{cell(preflight['retry_policy'])}</code></td></tr>
+<tr><th>Knowledge</th><td>{cell(knowledge['status'])}; sources={cell(source_count)}</td></tr>
+<tr><th>Team selection</th><td>{cell(team['selection'])}; {tokens(roles)}</td></tr>
+<tr><th>Blockers</th><td>{tokens(blockers)}</td></tr>
+<tr><th>Owner gates</th><td>{tokens(owner_gates)}</td></tr>
+<tr><th>Next action</th><td><code>{cell(preflight['next_action'])}</code></td></tr>
+</tbody></table>
+<p class="meta">schema <code>{cell(preflight['schema'])}</code></p>
 </body></html>"""
 
 
@@ -2012,6 +2125,33 @@ def create_dashboard_server(
                         self.send_header("Content-Type", "text/html; charset=utf-8")
                     except (KeyError, RuntimeError, TypeError, ValueError):
                         body = b"Quality preview unavailable; retry after local state is stable."
+                        self.send_response(409)
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
+            elif not parsed.query and (
+                match := re.fullmatch(
+                    r"/queue-retry-preflight/([0-9a-f]{12})", parsed.path,
+                )
+            ):
+                queue_id = match.group(1)
+                known = any(
+                    str(row[0]) == queue_id for row in company.queue_items()
+                )
+                if not known:
+                    body = b"Queue retry preflight not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                else:
+                    try:
+                        body = render_queue_retry_preflight(
+                            company, queue_id,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                    except (KeyError, RuntimeError, TypeError, ValueError):
+                        body = (
+                            b"Queue retry preflight unavailable; retry after "
+                            b"local state is stable."
+                        )
                         self.send_response(409)
                         self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif not parsed.query and (
