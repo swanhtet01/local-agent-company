@@ -21,7 +21,7 @@ from local_company import __version__
 from local_company.build_info import (
     BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256,
 )
-from local_company.cli import parser
+from local_company.cli import main as cli_main, parser
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
     ReportFinalizationPending, SourceHit,
@@ -408,6 +408,73 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.keep_alive, "30s")
         self.assertEqual(model.temperature, 0.0)
         self.assertEqual(model.seed, 42)
+
+    def test_doctor_exit_codes_distinguish_unavailable_missing_and_ready(self):
+        cases = (
+            (
+                None, 1, "unknown (service unavailable)",
+                "Doctor action: start_ollama_locally",
+            ),
+            ([], 1, "Configured model status: not installed",
+             "Doctor action: install_configured_model"),
+            (["other:latest"], 1, "Configured model status: not installed",
+             "Doctor action: install_configured_model"),
+            (["qwen3.5:0.8b"], 0, "Configured model status: installed",
+             "Doctor action: none"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for models, expected_code, expected_status, expected_action in cases:
+                with self.subTest(models=models):
+                    output = io.StringIO()
+                    with patch(
+                        "sys.argv", [
+                            "local-company", "--home", tmp, "doctor",
+                            "--model", "qwen3.5:0.8b",
+                        ],
+                    ), patch(
+                        "local_company.cli.OllamaModel.models", return_value=models,
+                    ), patch(
+                        "local_company.cli.find_ollama_executable", return_value=None,
+                    ), patch("sys.stdout", output):
+                        exit_code = cli_main()
+                    rendered = output.getvalue()
+                    self.assertEqual(exit_code, expected_code)
+                    self.assertIn(expected_status, rendered)
+                    self.assertIn(expected_action, rendered)
+                    self.assertIn(
+                        "Doctor result: " + (
+                            "ready" if expected_code == 0 else "action required"
+                        ),
+                        rendered,
+                    )
+                    if expected_code == 0:
+                        self.assertIn("Ollama executable: not detected", rendered)
+
+            for malformed_probe in (TypeError("SENTINEL"), [7]):
+                with self.subTest(malformed_probe=type(malformed_probe).__name__):
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    probe = Mock()
+                    if isinstance(malformed_probe, Exception):
+                        probe.side_effect = malformed_probe
+                    else:
+                        probe.return_value = malformed_probe
+                    with patch(
+                        "sys.argv", [
+                            "local-company", "--home", tmp, "doctor",
+                            "--model", "qwen3.5:0.8b",
+                        ],
+                    ), patch(
+                        "local_company.cli.OllamaModel.models", new=probe,
+                    ), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                        exit_code = cli_main()
+                    self.assertEqual(exit_code, 2)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(
+                        stderr.getvalue(),
+                        "ERROR: Ollama model inventory is malformed\n",
+                    )
+                    self.assertNotIn("SENTINEL", stderr.getvalue())
 
     def test_ollama_structured_completion_sends_json_schema(self):
         model = OllamaModel("qwen3.5:0.8b")

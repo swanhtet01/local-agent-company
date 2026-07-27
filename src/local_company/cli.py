@@ -144,7 +144,9 @@ def parser() -> argparse.ArgumentParser:
         decide.add_argument("request_id")
         decide.add_argument("--note", default="")
 
-    doctor = sub.add_parser("doctor", help="Check local runtime and optional Ollama service")
+    doctor = sub.add_parser(
+        "doctor", help="Check local Python, Ollama service, and configured model dependency"
+    )
     doctor.add_argument("--model", default=DEFAULT_MODEL)
     benchmark = sub.add_parser("benchmark", help="Measure one local model generation")
     benchmark.add_argument("--prompt", default="Give three concise rules for reliable local AI work.")
@@ -348,14 +350,47 @@ def main() -> int:
                     print(f"{request_id}  {status:8}  {category:24}  {created}  {description}")
         elif args.command == "doctor":
             ollama = OllamaModel(args.model)
-            models = ollama.models()
+            try:
+                models = ollama.models()
+            except (AttributeError, TypeError, json.JSONDecodeError, RecursionError, UnicodeError):
+                print("ERROR: Ollama model inventory is malformed", file=sys.stderr)
+                return 2
+            if models is not None and (
+                type(models) is not list
+                or any(type(name) is not str or not name for name in models)
+            ):
+                print("ERROR: Ollama model inventory is malformed", file=sys.stderr)
+                return 2
+            service_ready = models is not None
+            model_ready = service_ready and args.model in models
             print(f"Python: {sys.version.split()[0]} (ready)")
             print(f"Database home: {company.home}")
             print(f"Ollama executable: {find_ollama_executable() or 'not detected'}")
-            print(f"Ollama service: {'ready' if models is not None else 'not detected'}")
-            print(f"Installed models: {', '.join(models) if models else 'none detected'}")
+            print(f"Ollama service: {'ready' if service_ready else 'not detected'}")
+            print(
+                "Installed models: " + (
+                    ", ".join(models)
+                    if models else
+                    "none detected" if service_ready else "unknown (service unavailable)"
+                )
+            )
             print(f"Configured model: {args.model}")
-            print(f"Configured model status: {'installed' if models and args.model in models else 'not installed'}")
+            print(
+                "Configured model status: " + (
+                    "installed" if model_ready else
+                    "not installed" if service_ready else
+                    "unknown (service unavailable)"
+                )
+            )
+            print(f"Doctor result: {'ready' if model_ready else 'action required'}")
+            print(
+                "Doctor action: " + (
+                    "none" if model_ready else
+                    "install_configured_model" if service_ready else
+                    "start_ollama_locally"
+                )
+            )
+            return 0 if model_ready else 1
         elif args.command == "benchmark":
             started = time.perf_counter()
             output = company.model.complete(

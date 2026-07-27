@@ -19,7 +19,7 @@ python .\scripts\check_readiness.py --model qwen3.5:0.8b
 ```
 
 The default provider is now the installed local Ollama runtime. Use `--provider mock` only when you intentionally want a fast workflow simulation without real model reasoning.
-The readiness command is the release gate for accepting a new local mission. `doctor` remains an advisory diagnostic and its exit code must not be used as that gate.
+The readiness command is the authoritative release gate for accepting a new local mission. `doctor` checks only the local Python/Ollama/model dependency: exit 0 means that dependency is ready, exit 1 names a known setup action, and exit 2 is an invalid or indeterminate diagnostic. It does not check build identity, company work state, or the queue worker.
 
 ## Use a real local model
 
