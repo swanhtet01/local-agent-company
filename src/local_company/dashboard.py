@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
+from . import __version__
+from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import Company, PLAYBOOKS, QueueClaim, ReportFinalizationPending
 
 
@@ -18,6 +20,17 @@ MAX_FORM_BYTES = 16 * 1024
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def runtime_build_identity() -> dict[str, object]:
+    return {
+        "schema": RUNTIME_BUILD_SCHEMA,
+        "package_version": __version__,
+        "build_id": BUILD_ID,
+        "git_commit": None,
+        "source_dirty": None,
+        "source_sha256": SOURCE_SHA256,
+    }
 
 
 class LocalQueueWorker:
@@ -434,6 +447,7 @@ def create_dashboard_server(
     if port < 0 or port > 65535:
         raise ValueError("Dashboard port must be between 0 and 65535")
     worker = LocalQueueWorker(company) if service_token else None
+    build_identity = runtime_build_identity()
 
     class Handler(BaseHTTPRequestHandler):
         def _local_authorities(self) -> set[str]:
@@ -509,7 +523,11 @@ def create_dashboard_server(
                 self.send_header("Content-Type", "text/html; charset=utf-8")
             elif parsed.path == "/health.json":
                 body = json.dumps(
-                    {"status": "ready", "pid": os.getpid(), **dashboard_snapshot(company, worker)}
+                    {
+                        "status": "ready", "pid": os.getpid(),
+                        "build": dict(build_identity),
+                        **dashboard_snapshot(company, worker),
+                    }
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

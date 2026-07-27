@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 import urllib.error
 import urllib.parse
@@ -16,6 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from local_company import __version__
+from local_company.build_info import (
+    BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256,
+)
 from local_company.cli import parser
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
@@ -32,6 +37,7 @@ from local_company.core import (
 )
 from local_company.dashboard import (
     LocalQueueWorker, create_dashboard_server, render_dashboard, render_mission_detail,
+    runtime_build_identity,
 )
 from local_company.service import _read_state, _startup_lock, _write_state
 
@@ -1953,7 +1959,19 @@ class CompanyTests(unittest.TestCase):
     def test_dashboard_http_is_local_and_rejects_posts(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
-            server = create_dashboard_server(company, 0)
+            build_identity = {
+                "schema": "local-company.runtime-build.v2",
+                "package_version": "0.1.0",
+                "build_id": "local-build-test",
+                "git_commit": None,
+                "source_dirty": None,
+                "source_sha256": "b" * 64,
+            }
+            with patch(
+                "local_company.dashboard.runtime_build_identity",
+                return_value=build_identity,
+            ) as build_snapshot:
+                server = create_dashboard_server(company, 0)
             self.assertEqual(server.server_address[0], "127.0.0.1")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -1961,7 +1979,12 @@ class CompanyTests(unittest.TestCase):
             base = f"http://127.0.0.1:{server.server_address[1]}"
             try:
                 with opener.open(base + "/health.json", timeout=3) as response:
-                    self.assertIn(b'"status": "ready"', response.read())
+                    health = json.load(response)
+                self.assertEqual(health["status"], "ready")
+                self.assertEqual(health["build"], build_identity)
+                with opener.open(base + "/health.json", timeout=3) as response:
+                    self.assertEqual(json.load(response)["build"], build_identity)
+                build_snapshot.assert_called_once_with()
                 request = urllib.request.Request(base + "/", data=b"", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as raised:
                     opener.open(request, timeout=3)
@@ -1971,6 +1994,49 @@ class CompanyTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
+
+    def test_embedded_runtime_build_identity_matches_operational_source(self):
+        project_metadata = tomllib.loads(
+            (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(project_metadata["project"]["version"], __version__)
+
+        source_root = Path(__file__).parents[1] / "src" / "local_company"
+        source_files = sorted(
+            path for path in source_root.rglob("*.py")
+            if path.name != "build_info.py"
+        )
+        expected = hashlib.sha256()
+        for path in source_files:
+            relative = path.relative_to(source_root).as_posix().encode("utf-8")
+            content = path.read_bytes()
+            expected.update(len(relative).to_bytes(4, "big"))
+            expected.update(relative)
+            expected.update(len(content).to_bytes(8, "big"))
+            expected.update(content)
+        self.assertEqual(SOURCE_SHA256, expected.hexdigest())
+
+        with (
+            patch("builtins.open", side_effect=AssertionError("runtime file read")),
+            patch("os.open", side_effect=AssertionError("runtime file read")),
+            patch("subprocess.run", side_effect=AssertionError("runtime process launch")),
+        ):
+            identity = runtime_build_identity()
+            second = runtime_build_identity()
+        self.assertEqual(identity, {
+            "schema": RUNTIME_BUILD_SCHEMA,
+            "package_version": __version__,
+            "build_id": BUILD_ID,
+            "git_commit": None,
+            "source_dirty": None,
+            "source_sha256": SOURCE_SHA256,
+        })
+        self.assertEqual(second, identity)
+        self.assertIsNot(second, identity)
+        self.assertRegex(BUILD_ID, r"\Alocal-build-[0-9]{8}\.[0-9]+\Z")
+        self.assertRegex(SOURCE_SHA256, r"\A[0-9a-f]{64}\Z")
+        self.assertIsNone(identity["git_commit"])
+        self.assertIsNone(identity["source_dirty"])
 
     def test_dashboard_rejects_rebound_host_and_cross_site_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
