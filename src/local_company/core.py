@@ -102,9 +102,10 @@ MAX_KNOWLEDGE_BYTES = 2_000_000
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
+RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.3"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.1"
+EVALUATOR_VERSION = "local-quality-2026-07-27.4"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.2"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 
 
@@ -115,10 +116,22 @@ def count_words(text: str) -> int:
 def truncate_words(text: str, limit: int) -> tuple[str, bool]:
     if limit < 1:
         return "", bool(text.strip())
-    matches = list(re.finditer(r"\b[\w'-]+\b", text))
-    if len(matches) <= limit:
+    if count_words(text) <= limit:
         return text, False
-    shortened = text[:matches[limit - 1].end()].rstrip(" ,;:-")
+    units = re.finditer(
+        r"\[EVIDENCE:[^\]\r\n]+(?:\]|(?=\s|$))|\b[\w'-]+\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    used = 0
+    end = 0
+    for unit in units:
+        cost = count_words(unit.group(0))
+        if used + cost > limit:
+            break
+        used += cost
+        end = unit.end()
+    shortened = text[:end].rstrip(" ,;:-")
     if shortened and shortened[-1] not in ".!?":
         shortened += "."
     return shortened, True
@@ -138,6 +151,34 @@ def extract_labeled_sections(text: str, labels: list[str]) -> dict[str, str]:
         content_end = markers[index + 1][0] if index + 1 < len(markers) else len(text)
         sections[label] = text[content_start:content_end].strip(" \t\r\n*_`#-")
     return sections
+
+
+def _is_label_only(text: str) -> bool:
+    candidate = re.sub(r"[*_`#]", "", text).strip()
+    return bool(re.fullmatch(
+        r"[a-z][a-z ]+(?:\s*\([^:\n]*\))?\s*:", candidate, flags=re.IGNORECASE,
+    ))
+
+
+def sequential_numbered_items(text: str) -> list[str]:
+    """Parse an unambiguous 1..N list without treating inline version numbers as items."""
+    first = re.match(r"^\s*(\d+)[.)][ \t]+", text)
+    if not first:
+        return []
+    markers = [(first.start(), first.end(), int(first.group(1)))]
+    marker_pattern = re.compile(
+        r"(?:^[ \t]*|(?<=[.!?])[ \t]+)(\d+)[.)][ \t]+", flags=re.MULTILINE,
+    )
+    markers.extend(
+        (marker.start(), marker.end(), int(marker.group(1)))
+        for marker in marker_pattern.finditer(text, first.end())
+    )
+    if [number for _, _, number in markers] != list(range(1, len(markers) + 1)):
+        return []
+    return [
+        text[item_end:(markers[index + 1][0] if index + 1 < len(markers) else len(text))].strip()
+        for index, (_, item_end, _) in enumerate(markers)
+    ]
 
 
 _LIMITATION_PATTERN = re.compile(
@@ -219,7 +260,8 @@ def source_limitation_conflicts(
 
 
 def compact_labeled_sections(
-    text: str, labels: list[str], limit: int, required_ending: str = ""
+    text: str, labels: list[str], limit: int, required_ending: str = "",
+    expected_templates: int | None = None,
 ) -> tuple[str, bool]:
     if count_words(text) <= limit:
         return text, False
@@ -231,12 +273,43 @@ def compact_labeled_sections(
     if any(label not in sections for label in labels):
         return truncate_words(text, limit)
     fixed_words = sum(count_words(label) for label in labels) + count_words(required_ending)
+    if fixed_words > limit:
+        return truncate_words(text, limit)
     available = max(0, limit - fixed_words)
     per_section, remainder = divmod(available, len(labels))
     output: list[str] = []
     for index, label in enumerate(labels):
         section_limit = per_section + (1 if index < remainder else 0)
-        content, _ = truncate_words(sections[label], section_limit)
+        content = sections[label]
+        if label == "Task templates" and expected_templates:
+            items = sequential_numbered_items(content)
+            if (
+                len(items) >= expected_templates
+                and all(count_words(item) >= 3 for item in items[:expected_templates])
+            ):
+                items = items[:expected_templates]
+                marker_words = expected_templates
+                content_budget = section_limit - marker_words
+                if content_budget >= expected_templates * 3:
+                    per_item, item_remainder = divmod(content_budget, expected_templates)
+                    compacted_items: list[str] = []
+                    for item_index, item in enumerate(items):
+                        item_limit = per_item + (1 if item_index < item_remainder else 0)
+                        compacted_item, _ = truncate_words(item, item_limit)
+                        if count_words(compacted_item) < 3:
+                            compacted_items = []
+                            break
+                        compacted_items.append(f"{item_index + 1}. {compacted_item}")
+                    if compacted_items:
+                        content = "\n".join(compacted_items)
+                    else:
+                        content, _ = truncate_words(content, section_limit)
+                else:
+                    content, _ = truncate_words(content, section_limit)
+            else:
+                content, _ = truncate_words(content, section_limit)
+        else:
+            content, _ = truncate_words(content, section_limit)
         output.append(f"{label}: {content}".rstrip())
     compacted = "\n\n".join(output)
     if required_ending:
@@ -312,6 +385,8 @@ class OllamaModel:
         self.num_ctx = num_ctx
         self.num_predict = num_predict
         self.keep_alive = keep_alive
+        self.temperature = 0.0
+        self.seed = 42
         self._metrics_local = threading.local()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -355,6 +430,7 @@ class OllamaModel:
                 "provider": "ollama", "model": self.model, "digest": digest,
                 "host": self.host, "num_ctx": self.num_ctx, "num_predict": self.num_predict,
                 "keep_alive": self.keep_alive, "think": False,
+                "temperature": self.temperature, "seed": self.seed,
             }
         return None
 
@@ -364,7 +440,10 @@ class OllamaModel:
             "stream": False,
             "think": False,
             "keep_alive": self.keep_alive,
-            "options": {"num_ctx": self.num_ctx, "num_predict": self.num_predict},
+            "options": {
+                "num_ctx": self.num_ctx, "num_predict": self.num_predict,
+                "temperature": self.temperature, "seed": self.seed,
+            },
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -1153,11 +1232,15 @@ class Company:
 
     def search_knowledge(self, query: str, limit: int = 4, project: str | None = None) -> list[SourceHit]:
         self.initialize()
+        if limit < 1:
+            raise ValueError("Knowledge search limit must be positive")
         project_id = self._resolve_project(project)[0] if project else None
-        terms = set(re.findall(r"[a-z0-9]{3,}", query.lower()))
+        query_lower = query.lower()
+        terms = set(re.findall(r"[a-z0-9]{3,}", query_lower))
         if not terms:
             return []
         hits: list[SourceHit] = []
+        named_positions: dict[str, int] = {}
         with closing(self._connect()) as db:
             if project_id:
                 rows = db.execute(
@@ -1170,10 +1253,16 @@ class Company:
         for source_id, path, source_sha256, content in rows:
             lower = content.lower()
             score = sum(lower.count(term) for term in terms)
-            if not score:
+            basename = Path(path).name.lower()
+            named_match = re.search(
+                rf"(?<![\w.-]){re.escape(basename)}(?![\w.-])", query_lower,
+            )
+            named_position = named_match.start() if named_match else -1
+            explicitly_named = named_match is not None
+            if not score and not explicitly_named:
                 continue
             positions = [lower.find(term) for term in terms if lower.find(term) >= 0]
-            start = max(0, min(positions) - 180)
+            start = max(0, min(positions) - 180) if positions else 0
             end = min(len(content), start + 700)
             excerpt = content[start:end]
             line_start = content.count("\n", 0, start) + 1
@@ -1189,7 +1278,22 @@ class Company:
                 path, excerpt, score, source_id, source_sha256, start, end,
                 line_start, line_end, evidence_id,
             ))
-        return sorted(hits, key=lambda hit: (-hit.score, hit.path))[:limit]
+            if explicitly_named:
+                named_positions[source_id] = named_position
+        if len(named_positions) > limit:
+            raise ValueError(
+                f"Objective names {len(named_positions)} available knowledge sources, "
+                f"exceeding the bounded context limit of {limit}"
+            )
+        return sorted(
+            hits,
+            key=lambda hit: (
+                0 if hit.source_id in named_positions else 1,
+                named_positions.get(hit.source_id, 0),
+                -hit.score,
+                hit.path,
+            ),
+        )[:limit]
 
     @staticmethod
     def _canonical_json(payload: dict[str, object]) -> str:
@@ -2050,7 +2154,24 @@ class Company:
             job_id, job[5],
         )
         valid_evidence_ids = {
-            str(item.get("evidence_id")) for item in (evidence_manifest or {}).get("evidence", [])
+            str(item.get("evidence_id")).lower()
+            for item in (evidence_manifest or {}).get("evidence", [])
+            if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
+        }
+        source_names_by_id = {
+            str(item.get("source_id")): Path(str(item.get("path"))).name.lower()
+            for item in (evidence_manifest or {}).get("sources", [])
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("source_id"), str)
+                and isinstance(item.get("path"), str)
+            )
+        }
+        evidence_source_names = {
+            str(item.get("evidence_id")).lower(): source_names_by_id.get(
+                str(item.get("source_id")), ""
+            )
+            for item in (evidence_manifest or {}).get("evidence", [])
             if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
         }
         source_paths = re.findall(r"(?m)^- `([^`]+)`\s*$", report)
@@ -2143,11 +2264,15 @@ class Company:
                 3 if template_count_match.group(1) == "three" else int(template_count_match.group(1))
             )
             task_section = labeled_sections.get("Task templates", "")
-            numbered_templates = len(re.findall(r"(?<!\w)\d+[.)]\s+", task_section))
-            bullet_templates = len(re.findall(r"(?m)^\s*[-*]\s+\S", task_section))
-            named_templates = len(re.findall(r"\btask template\b", task_section, flags=re.IGNORECASE))
+            numbered_templates = sum(
+                count_words(item) >= 3 for item in sequential_numbered_items(task_section)
+            )
+            bullet_templates = sum(
+                count_words(item) >= 3
+                for item in re.findall(r"(?m)^\s*[-*]\s+(.+)$", task_section)
+            )
             checks["task_template_count_present"] = max(
-                numbered_templates, bullet_templates, named_templates
+                numbered_templates, bullet_templates,
             ) >= expected_templates
         if facts_required and "using" in objective_lower and "imported" in objective_lower:
             source_names = [Path(path).name.lower() for path in source_paths]
@@ -2172,14 +2297,67 @@ class Company:
             and evidence_id.lower() in valid_evidence_ids
             for evidence_id in mentioned_evidence_ids
         )
+        if "matching supplied evidence id" in objective_lower:
+            required_claim_pairs: list[bool] = []
+            known_source_names = {name for name in evidence_source_names.values() if name}
+            for fragment in re.split(r"(?<=[.!?])\s+|[\r\n;]+", model_output):
+                semantic_fragment = re.sub(
+                    r"\[EVIDENCE:[^\]]+\]", "", fragment, flags=re.IGNORECASE,
+                )
+                if _is_label_only(semantic_fragment):
+                    continue
+                pair_required = bool(
+                    _COMPLETION_CLAIM_PATTERN.search(semantic_fragment)
+                    and not _LIMITATION_PATTERN.search(semantic_fragment)
+                )
+                if not pair_required:
+                    continue
+                fragment_pairs: list[bool] = []
+                paired_source_names: set[str] = set()
+                for citation in re.finditer(
+                    r"\[EVIDENCE:([^\]\s]+)\]", fragment, flags=re.IGNORECASE,
+                ):
+                    source_name = evidence_source_names.get(citation.group(1).lower(), "")
+                    adjacent_prefix = fragment[:citation.start()].rstrip(
+                        " \t`*_()[]{}:,-"
+                    )
+                    pair_valid = bool(
+                        source_name and re.search(
+                            rf"(?<![\w.-]){re.escape(source_name)}$",
+                            adjacent_prefix,
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                    fragment_pairs.append(pair_valid)
+                    if pair_valid:
+                        paired_source_names.add(source_name)
+                mentioned_source_names = {
+                    source_name for source_name in known_source_names
+                    if re.search(
+                        rf"(?<![\w.-]){re.escape(source_name)}(?![\w.-])",
+                        semantic_fragment,
+                        flags=re.IGNORECASE,
+                    )
+                }
+                required_claim_pairs.append(bool(
+                    fragment_pairs
+                    and all(fragment_pairs)
+                    and mentioned_source_names
+                    and mentioned_source_names <= paired_source_names
+                ))
+            checks["evidence_filename_pairs_valid"] = bool(
+                required_claim_pairs
+            ) and all(required_claim_pairs)
         source_conflicts = source_limitation_conflicts(model_output, source_documents)
         checks["source_limitations_respected"] = not source_conflicts
         if facts_required and "using" in objective_lower and "imported" in objective_lower:
             positive_claims = []
-            for fragment in re.split(r"(?<=[.!?])\s+|[\r\n]+", model_output):
+            for fragment in re.split(r"(?<=[.!?])\s+|[\r\n;]+", model_output):
                 semantic_fragment = re.sub(
                     r"\[EVIDENCE:[^\]]+\]", "", fragment, flags=re.IGNORECASE,
                 )
+                if _is_label_only(semantic_fragment):
+                    continue
                 if (
                     _COMPLETION_CLAIM_PATTERN.search(semantic_fragment)
                     and not _LIMITATION_PATTERN.search(semantic_fragment)
@@ -2369,7 +2547,9 @@ class Company:
         job_id = uuid.uuid4().hex[:12]
         run_token = _run_token or uuid.uuid4().hex
         assignments = self.plan(objective, roles)
-        sources = self.search_knowledge(objective, project=project)
+        sources = self.search_knowledge(
+            objective, limit=RUN_KNOWLEDGE_HIT_LIMIT, project=project,
+        )
         heartbeat = utc_now()
         evidence_manifest, evidence_manifest_sha256 = self._build_evidence_manifest(
             job_id, project_id, sources, heartbeat,
@@ -2431,7 +2611,14 @@ class Company:
                         report_bytes = self._read_local_report_bytes(reusable[1])
                     except (OSError, ValueError):
                         report_bytes = b""
-                    if report_bytes and hashlib.sha256(report_bytes).hexdigest() == reusable[2]:
+                    report_reusable = bool(
+                        report_bytes
+                        and hashlib.sha256(report_bytes).hexdigest() == reusable[2]
+                    )
+                    manifest_reusable, _, manifest_reason = self._validate_evidence_manifest(
+                        reusable[0], reusable[4],
+                    )
+                    if report_reusable and manifest_reusable:
                         if _queue_id:
                             linked = db.execute(
                                 "UPDATE mission_queue SET job_id=? "
@@ -2465,7 +2652,13 @@ class Company:
                     self._event(
                         db, reusable[0], "job_reuse_rejected",
                         json.dumps(
-                            {"candidate_job_id": reusable[0], "reason": "report_integrity_failed"},
+                            {
+                                "candidate_job_id": reusable[0],
+                                "reason": (
+                                    "report_integrity_failed" if not report_reusable
+                                    else f"evidence_manifest_{manifest_reason}"
+                                ),
+                            },
                             sort_keys=True,
                         ),
                     )
@@ -2526,7 +2719,10 @@ class Company:
         evidence_rule = (
             " Any positive claim using verified, confirmed, validated, passed, ready, active, "
             "operational, connected, wired, or no errors must carry a supplied [EVIDENCE:id] "
-            "in the same sentence. Never invent an evidence ID."
+            "in the same sentence. Never invent an evidence ID or pair one with a different "
+            "source filename; copy only an exact filename and ID pair from the frozen registry, "
+            "with the filename immediately before its matching ID. Use one verified claim per "
+            "sentence; never attach an uncited claim to a cited clause."
             if sources else " Do not label any unsupported statement as verified or confirmed."
         )
         completed_roles = {item.role for item, _ in results}
@@ -2673,10 +2869,19 @@ class Company:
                     else int(template_count_match.group(1))
                 )
             draft_sections = extract_labeled_sections(synthesis, required_labels)
-            draft_template_count = len(re.findall(
-                r"(?<!\w)\d+[.)]\s+|(?m:^\s*[-*]\s+\S)",
-                draft_sections.get("Task templates", ""),
-            ))
+            draft_task_section = draft_sections.get("Task templates", "")
+            draft_template_count = max(
+                sum(
+                    count_words(item) >= 3
+                    for item in sequential_numbered_items(draft_task_section)
+                ),
+                sum(
+                    count_words(item) >= 3
+                    for item in re.findall(
+                        r"(?m)^\s*[-*]\s+(.+)$", draft_task_section,
+                    )
+                ),
+            )
             needs_revision = bool(
                 (synthesis_word_limit and count_words(synthesis) > synthesis_word_limit)
                 or any(label.lower() not in synthesis_lower for label in required_labels)
@@ -2717,12 +2922,13 @@ class Company:
                     )
                 format_rules = "\n".join(f"- Include the exact label `{label}:`." for label in required_labels)
                 if source_citation_required:
+                    source_pairs = ", ".join(
+                        f"{Path(hit.path).name} [EVIDENCE:{hit.evidence_id}]"
+                        for hit in sources
+                    )
                     format_rules += (
-                        "\n- In `Verified facts:`, cite at least one exact source filename from: "
-                        + ", ".join(source_names)
-                        + ".\n- Put the matching supplied [EVIDENCE:id] in the same sentence; valid IDs: "
-                        + ", ".join(f"[EVIDENCE:{hit.evidence_id}]" for hit in sources)
-                        + "."
+                        "\n- In `Verified facts:`, cite at least one exact source filename and "
+                        "its adjacent matching ID. Copy only these exact pairs: " + source_pairs + "."
                     )
                 if expected_templates is not None:
                     format_rules += (
@@ -2757,7 +2963,8 @@ class Company:
                 original_words = count_words(synthesis)
                 if required_labels:
                     synthesis, _ = compact_labeled_sections(
-                        synthesis, required_labels, synthesis_word_limit, required_ending
+                        synthesis, required_labels, synthesis_word_limit, required_ending,
+                        expected_templates,
                     )
                 elif ending_match:
                     ending_index = synthesis.lower().rfind(required_ending.lower())
@@ -2902,7 +3109,9 @@ class Company:
         frozen_manifest = self._load_evidence_manifest(job_id)
         sources = (
             self._source_hits_from_manifest(frozen_manifest)
-            if frozen_manifest else self.search_knowledge(job[0], project=job[2])
+            if frozen_manifest else self.search_knowledge(
+                job[0], limit=RUN_KNOWLEDGE_HIT_LIMIT, project=job[2],
+            )
         )
         run_token = uuid.uuid4().hex
         with closing(self._connect()) as db, db:

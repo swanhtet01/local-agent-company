@@ -19,7 +19,10 @@ from local_company.cli import parser
 from local_company.core import (
     Company, ExecutionLeaseLost, MockModel, OllamaModel, PLAYBOOKS,
     ReportFinalizationPending,
+    compact_labeled_sections,
+    sequential_numbered_items,
     source_limitation_conflicts,
+    truncate_words,
 )
 from local_company.dashboard import LocalQueueWorker, create_dashboard_server, render_dashboard
 from local_company.service import _read_state, _startup_lock, _write_state
@@ -110,11 +113,13 @@ class ConstraintModel(MockModel):
                 )
             return ("word " * 105) + "Ready to deploy. Scheduled: today."
         if self.valid:
-            return (
-                "Verified facts: the local queue and health evidence are available. "
-                "Assumptions: operator adoption remains unmeasured. "
-                "Task templates: Task template intake, Task template review, Task template audit. "
-                "Daily review cadence: inspect once each day. "
+                return (
+                    "Verified facts: the local queue and health evidence are available. "
+                    "Assumptions: operator adoption remains unmeasured. "
+                    "Task templates: 1. Intake preserves evidence and scope. "
+                    "2. Review checks frozen sources and constraints. "
+                    "3. Audit records results and owner gates. "
+                    "Daily review cadence: inspect once each day. "
                 "Success checks: one accepted report and zero bypassed gates. "
                 "Failure modes: truncation or unsupported claims. Owner gates: review every proposed action. "
                 "Owner review required."
@@ -204,6 +209,87 @@ class FilenameOnlyCitationModel(MockModel):
         return "Review notes.md as local evidence, label assumptions, and preserve owner review."
 
 
+class MismatchedEvidencePairModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            evidence = re.search(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)
+            evidence_tag = evidence.group(0) if evidence else "[EVIDENCE:missing]"
+            return (
+                "Verified facts: beta.md is verified as the captured local baseline "
+                f"{evidence_tag}. Assumptions: future adoption remains unknown and must stay "
+                "subject to owner review before any external action. Recommendations remain "
+                "local, reversible, and unexecuted."
+            )
+        return "Review the frozen local sources without claiming execution or external change."
+
+
+class CrossSwappedEvidencePairModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            evidence = list(dict.fromkeys(re.findall(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)))
+            first = evidence[0] if evidence else "[EVIDENCE:missing-one]"
+            second = evidence[1] if len(evidence) > 1 else "[EVIDENCE:missing-two]"
+            return (
+                f"Verified facts: alpha.md {second} and beta.md {first} are verified frozen local "
+                "baselines for review. Assumptions: future adoption remains unknown and requires "
+                "owner validation. Recommendations remain local, reversible, and unexecuted."
+            )
+        return "Review the frozen local sources without claiming execution or external change."
+
+
+class CorrectPairWithAssumptionCitationModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            evidence = re.search(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)
+            evidence_tag = evidence.group(0) if evidence else "[EVIDENCE:missing]"
+            return (
+                f"Verified facts (current):\nalpha.md {evidence_tag} is verified as the frozen local baseline.\n\n"
+                f"Assumptions (unverified):\nFuture adoption may reference {evidence_tag} but remains unknown "
+                "and requires owner validation. Recommendations remain local and unexecuted."
+            )
+        return "Review the frozen local source without claiming execution or external change."
+
+
+class PiggybackEvidencePairModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            evidence = list(dict.fromkeys(re.findall(r"\[EVIDENCE:[0-9a-f]{16}\]", prompt)))
+            second = evidence[1] if len(evidence) > 1 else "[EVIDENCE:missing]"
+            return (
+                "Verified facts: alpha.md establishes telemetry is active; "
+                f"beta.md {second} is verified as a frozen local baseline. "
+                "Assumptions: future adoption remains unknown and requires owner validation. "
+                "Recommendations remain local, reversible, and unexecuted."
+            )
+        return "Review the frozen local sources without claiming execution or external change."
+
+
+class MissingEvidencePairModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            return (
+                "Verified facts: alpha.md is verified as a frozen local baseline. Assumptions: "
+                "future adoption remains unknown and requires owner validation. Recommendations "
+                "remain local, reversible, and unexecuted."
+            )
+        return "Review the frozen local source without claiming execution or external change."
+
+
+class CosmeticTemplateModel(MockModel):
+    def complete(self, system, prompt):
+        if "executive chair" in system or "report editor" in system:
+            return (
+                "Verified facts: local evidence remains limited and available for review. "
+                "Assumptions: operator adoption remains unknown and requires validation. "
+                "Task templates: Task template. Task template. Task template. "
+                "Daily review cadence: inspect local work once each day. "
+                "Success checks: require grounded output and bounded scope. "
+                "Failure modes: watch truncation drift and unsupported claims. "
+                "Owner gates: review every proposed external action. Owner review required."
+            )
+        return "Keep work local reversible and subject to owner review."
+
+
 class CompanyTests(unittest.TestCase):
     def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,6 +326,8 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.num_ctx, 4096)
         self.assertEqual(model.num_predict, 512)
         self.assertEqual(model.keep_alive, "30s")
+        self.assertEqual(model.temperature, 0.0)
+        self.assertEqual(model.seed, 42)
 
     def test_routes_specialists_and_persists_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -873,6 +961,69 @@ class CompanyTests(unittest.TestCase):
 
             self.assertNotEqual(second_job, first_job)
 
+    def test_live_source_drift_blocks_reuse_without_reindex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "inventory.md"
+            source.write_text("inventory baseline is 10 units", encoding="utf-8")
+            model = CountingMockModel()
+            company = Company(root / "state", model)
+            project_id = company.create_project("Inventory")
+            company.add_knowledge(source, project=project_id)
+            first_job, _ = company.run("Review inventory baseline", project=project_id)
+            calls_after_first = model.calls
+
+            source.write_text("inventory baseline is 14 units", encoding="utf-8")
+            second_job, _ = company.run("Review inventory baseline", project=project_id)
+
+            self.assertNotEqual(second_job, first_job)
+            self.assertGreater(model.calls, calls_after_first)
+            rejection_events = [
+                json.loads(event[1]) for event in company.job_detail(first_job)["events"]
+                if event[0] == "job_reuse_rejected"
+            ]
+            self.assertEqual(
+                rejection_events[-1]["reason"], "evidence_manifest_source_stale",
+            )
+
+    def test_source_mutation_during_reuse_report_check_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "inventory.md"
+            source.write_text("inventory baseline is 10 units", encoding="utf-8")
+            model = CountingMockModel()
+            company = Company(root / "state", model)
+            project_id = company.create_project("Inventory")
+            company.add_knowledge(source, project=project_id)
+            first_job, _ = company.run("Review inventory baseline", project=project_id)
+            original_reader = company._read_local_report_bytes
+            mutated = False
+
+            def read_then_mutate(path):
+                nonlocal mutated
+                report_bytes = original_reader(path)
+                if not mutated:
+                    source.write_text("inventory baseline is 14 units", encoding="utf-8")
+                    mutated = True
+                return report_bytes
+
+            with patch.object(
+                company, "_read_local_report_bytes", side_effect=read_then_mutate,
+            ):
+                second_job, _ = company.run(
+                    "Review inventory baseline", project=project_id,
+                )
+
+            self.assertTrue(mutated)
+            self.assertNotEqual(second_job, first_job)
+            rejection_events = [
+                json.loads(event[1]) for event in company.job_detail(first_job)["events"]
+                if event[0] == "job_reuse_rejected"
+            ]
+            self.assertEqual(
+                rejection_events[-1]["reason"], "evidence_manifest_source_stale",
+            )
+
     def test_evidence_manifest_freezes_exact_excerpt_and_detects_stale_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1009,6 +1160,56 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(hits[0].path, str(source.resolve()))
             _, report = company.run("Create a bakery marketing budget")
             self.assertIn(str(source.resolve()), report.read_text(encoding="utf-8"))
+
+    def test_named_knowledge_sources_are_reserved_and_run_context_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", MockModel())
+            project_id = company.create_project("Named Evidence")
+            named = ["alpha.md", "beta.json", "gamma.md", "delta.json"]
+            for index, filename in enumerate(named):
+                source = root / filename
+                source.write_text(f"opaque datum {index}", encoding="utf-8")
+                company.add_knowledge(source, project_id)
+            for index in range(6):
+                source = root / f"generic-{index}.md"
+                source.write_text(("build release brief " * (20 - index)).strip(), encoding="utf-8")
+                company.add_knowledge(source, project_id)
+
+            objective = (
+                "Using alpha.md, beta.json, gamma.md, and delta.json, build release brief"
+            )
+            hits = company.search_knowledge(objective, limit=8, project=project_id)
+
+            self.assertEqual([Path(hit.path).name for hit in hits[:4]], named)
+            self.assertEqual(len(hits), 8)
+            job_id, _ = company.run(objective, roles=["operations"], project=project_id)
+            manifest = company._load_evidence_manifest(job_id)
+            manifest_names = {Path(item["path"]).name for item in manifest["sources"]}
+            self.assertTrue(set(named).issubset(manifest_names))
+            self.assertLessEqual(len(manifest["evidence"]), 8)
+
+    def test_named_sources_use_filename_boundaries_and_fail_closed_over_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", MockModel())
+            project_id = company.create_project("Bounded Names")
+            named = ["other-report.md"] + [f"n{index}.md" for index in range(1, 8)]
+            for filename in named + ["report.md", "n8.md"]:
+                source = root / filename
+                content = "generic release context " * 40 if filename == "report.md" else "opaque"
+                source.write_text(content, encoding="utf-8")
+                company.add_knowledge(source, project_id)
+            objective = "Use " + ", ".join(named) + " for the bounded release context"
+
+            hits = company.search_knowledge(objective, limit=8, project=project_id)
+
+            self.assertEqual([Path(hit.path).name for hit in hits], named)
+            self.assertNotIn("report.md", {Path(hit.path).name for hit in hits})
+            with self.assertRaisesRegex(ValueError, "exceeding the bounded context limit"):
+                company.search_knowledge(
+                    objective + ", n8.md", limit=8, project=project_id,
+                )
 
     def test_unknown_role_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2065,6 +2266,210 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("synthesis_revision_started", event_kinds)
             self.assertIn("objective_constraint_applied", event_kinds)
             self.assertEqual(company.queue_items("complete")[0][0], queue_id)
+
+    def test_structured_compaction_preserves_templates_and_atomic_citations(self):
+        evidence = "[EVIDENCE:0123456789abcdef]"
+        labels = [
+            "Verified facts", "Assumptions", "Task templates", "Daily review cadence",
+            "Success checks", "Failure modes", "Owner gates",
+        ]
+        sections = {
+            "Verified facts": (
+                f"CURRENT.md records a limited local baseline {evidence}. "
+                + "Evidence remains scoped and reversible. " * 7
+            ),
+            "Assumptions": "Adoption remains unknown and requires validation. " * 8,
+            "Task templates": (
+                "1. Intake records objective evidence and owner gate before local work begins. "
+                "2. Review compares output with frozen sources and records every gap. "
+                "3. Audit checks quality failure modes and routes decisions to the owner."
+            ),
+            "Daily review cadence": "Inspect queue health evidence and failures once per day. " * 7,
+            "Success checks": "Require grounded output bounded scope and zero bypassed gates. " * 7,
+            "Failure modes": "Watch for truncation source drift citation mismatch and overclaiming. " * 7,
+            "Owner gates": "Keep deployment sending credentials and payments under owner control. " * 7,
+        }
+        source = "\n\n".join(f"{label}: {sections[label]}" for label in labels)
+        source += "\n\nOwner review required."
+
+        compacted, changed = compact_labeled_sections(
+            source, labels, 180, "Owner review required.", expected_templates=3,
+        )
+
+        self.assertTrue(changed)
+        self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", compacted)), 180)
+        self.assertTrue(all(f"{label}:" in compacted for label in labels))
+        self.assertEqual(
+            len(re.findall(r"(?<!\w)\d+[.)]\s+", re.search(
+                r"Task templates:(.*?)(?:Daily review cadence:)", compacted, flags=re.DOTALL,
+            ).group(1))),
+            3,
+        )
+        self.assertIn(evidence, compacted)
+        self.assertTrue(compacted.endswith("Owner review required."))
+        again, changed_again = compact_labeled_sections(
+            compacted, labels, 180, "Owner review required.", expected_templates=3,
+        )
+        self.assertEqual(again, compacted)
+        self.assertFalse(changed_again)
+
+        prefix, truncated = truncate_words(
+            f"alpha beta {evidence} trailing words", 3,
+        )
+        self.assertTrue(truncated)
+        self.assertEqual(prefix, "alpha beta.")
+        self.assertNotIn("[EVIDENCE:", prefix)
+
+    def test_structured_compaction_never_invents_a_missing_template(self):
+        labels = ["Task templates", "Owner gates"]
+        source = (
+            "Task templates: 1. Intake preserves evidence and scope. "
+            "2. Review records gaps and decisions. "
+            + ("supporting detail " * 60)
+            + "Owner gates: Keep every external action owner controlled. "
+            + ("review detail " * 60)
+        )
+        compacted, changed = compact_labeled_sections(
+            source, labels, 40, expected_templates=3,
+        )
+        self.assertTrue(changed)
+        task_section = re.search(
+            r"Task templates:(.*?)(?:Owner gates:)", compacted, flags=re.DOTALL,
+        ).group(1)
+        self.assertEqual(len(re.findall(r"(?<!\w)\d+[.)]\s+", task_section)), 2)
+        self.assertNotRegex(task_section, r"(?<!\w)3[.)]\s+")
+
+    def test_structured_compaction_rejects_ambiguous_or_cosmetic_templates(self):
+        ambiguous = (
+            "1. Validate schema version 2. for the frozen local evidence and record the gap. "
+            "2. Review the result against owner gates and preserve limitations."
+        )
+        parsed = sequential_numbered_items(ambiguous)
+        self.assertEqual(len(parsed), 2)
+        self.assertIn("schema version 2.", parsed[0])
+
+        labels = ["Task templates", "Owner gates"]
+        source = (
+            f"Task templates: {ambiguous} " + ("supporting detail " * 50)
+            + "Owner gates: Keep every external action owner controlled. "
+            + ("review detail " * 50)
+        )
+        compacted, _ = compact_labeled_sections(
+            source, labels, 50, expected_templates=3,
+        )
+        task_section = re.search(
+            r"Task templates:(.*?)(?:Owner gates:)", compacted, flags=re.DOTALL,
+        ).group(1)
+        self.assertLess(len(sequential_numbered_items(task_section)), 3)
+
+        cosmetic = "1. Intake. 2. Review. 3. Audit."
+        self.assertTrue(all(count < 3 for count in map(
+            lambda item: len(re.findall(r"\b[\w'-]+\b", item)),
+            sequential_numbered_items(cosmetic),
+        )))
+
+        duplicate = (
+            "1. Validate the current release. 2. schema remains supported before review. "
+            "2. Review frozen sources and record gaps. 3. Audit owner gates before action."
+        )
+        self.assertEqual(sequential_numbered_items(duplicate), [])
+
+    def test_cosmetic_named_templates_fail_the_substantive_count_gate(self):
+        objective = (
+            "Define three reusable task templates, a daily review cadence, success checks, "
+            "failure modes, and owner gates. Separate verified facts from assumptions. "
+            "Executive synthesis at most 180 words and end with: Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), CosmeticTemplateModel())
+            job_id, _ = company.run(objective, roles=["quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertFalse(evaluation["checks"]["task_template_count_present"])
+            self.assertFalse(evaluation["passed"])
+
+    def test_structured_compaction_never_exceeds_an_impossible_fixed_budget(self):
+        source = (
+            "Verified facts: grounded local evidence. Owner gates: owner review only. "
+            "REQUIRED END"
+        )
+        compacted, changed = compact_labeled_sections(
+            source, ["Verified facts", "Owner gates"], 3, "REQUIRED END",
+        )
+        self.assertTrue(changed)
+        self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", compacted)), 3)
+        self.assertFalse(compacted.endswith("REQUIRED END"))
+
+    def test_matching_evidence_filename_gate_rejects_mismatched_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", MismatchedEvidencePairModel())
+            project_id = company.create_project("Pair Binding")
+            for filename in ("alpha.md", "beta.md"):
+                source = root / filename
+                source.write_text(
+                    f"{filename} records a local baseline while future adoption remains unknown.",
+                    encoding="utf-8",
+                )
+                company.add_knowledge(source, project_id)
+            job_id, _ = company.run(
+                "Using imported alpha.md and beta.md, separate verified facts from assumptions. "
+                "Every verified claim must name its exact source filename and matching supplied "
+                "evidence ID.",
+                roles=["quality"],
+                project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["checks"]["evidence_ids_valid"])
+            self.assertFalse(evaluation["checks"]["evidence_filename_pairs_valid"])
+            self.assertFalse(evaluation["passed"])
+
+    def test_matching_evidence_filename_gate_rejects_cross_swap_and_missing_pair(self):
+        for model, expected_ids_valid in (
+            (CrossSwappedEvidencePairModel(), True),
+            (MissingEvidencePairModel(), True),
+            (PiggybackEvidencePairModel(), True),
+        ):
+            with self.subTest(model=type(model).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                company = Company(root / "state", model)
+                project_id = company.create_project("Pair Binding")
+                for filename in ("alpha.md", "beta.md"):
+                    source = root / filename
+                    source.write_text(
+                        f"{filename} records a frozen local baseline.", encoding="utf-8",
+                    )
+                    company.add_knowledge(source, project_id)
+                job_id, _ = company.run(
+                    "Using imported alpha.md and beta.md, separate verified facts from assumptions. "
+                    "Every verified claim must name its exact source filename and matching supplied "
+                    "evidence ID.",
+                    roles=["quality"],
+                    project=project_id,
+                )
+                evaluation = company.evaluate_job(job_id)
+                self.assertEqual(
+                    evaluation["checks"]["evidence_ids_valid"], expected_ids_valid,
+                )
+                self.assertFalse(evaluation["checks"]["evidence_filename_pairs_valid"])
+                self.assertFalse(evaluation["passed"])
+
+    def test_matching_pair_gate_ignores_citations_in_nonclaim_assumptions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text("alpha.md records a frozen local baseline.", encoding="utf-8")
+            company = Company(root / "state", CorrectPairWithAssumptionCitationModel())
+            project_id = company.create_project("Pair Binding")
+            company.add_knowledge(source, project_id)
+            job_id, _ = company.run(
+                "Using imported alpha.md, separate verified facts from assumptions. Every "
+                "verified claim must name its exact source filename and matching supplied evidence ID.",
+                roles=["quality"],
+                project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["checks"]["evidence_filename_pairs_valid"])
+            self.assertTrue(evaluation["passed"])
 
     def test_imported_verified_facts_require_exact_source_filename(self):
         objective = (
