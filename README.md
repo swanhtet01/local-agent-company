@@ -83,10 +83,14 @@ Only the file explicitly named is imported. Supported formats are Markdown, text
 .\local-company.cmd knowledge add "C:\path\to\business-notes.md" --project "Yangon Tyre"
 .\local-company.cmd knowledge add-dir "C:\path\to\approved-notes" --project "Yangon Tyre"
 .\local-company.cmd knowledge list --project "Yangon Tyre"
+.\local-company.cmd knowledge audit --project "Yangon Tyre"
+.\local-company.cmd knowledge refresh --project "Yangon Tyre"
 .\local-company.cmd knowledge search "customer pricing" --project "Yangon Tyre"
 ```
 
 Directory reads are non-recursive unless `--recursive` is explicitly supplied, capped at 100 supported files by default, and skip hidden paths, symlinks, dependency folders, unsupported types, and files over 2 MB. Relevant excerpts are included in agent prompts and source paths are recorded in the final report. Imported text is treated as reference material, not executable instructions.
+
+`knowledge audit` is a bounded, read-only freshness check over at most 64 registered sources. Its JSON reports only source IDs, statuses, and current byte counts; it withholds paths, content, and digests, starts no work, and calls no model. `knowledge refresh` requires exactly one project and rereads all of that project's registered sources twice before opening one database transaction. A missing, unavailable, unsafe, over-limit, or changing source refuses the entire refresh. A successful refresh updates only changed index records and never writes to source files.
 
 ## Run teams
 

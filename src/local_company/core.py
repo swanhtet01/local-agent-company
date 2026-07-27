@@ -25,7 +25,7 @@ from .config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA,
     read_validated_company_instance_id, valid_company_instance_id,
 )
-from .spreadsheet import profile_xlsx, read_stable_local_file
+from .spreadsheet import SpreadsheetError, profile_xlsx, read_stable_local_file
 
 
 ROLES = {
@@ -191,6 +191,9 @@ SENSITIVE_ACTION_PATTERNS = {
 
 TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".py", ".ps1", ".js", ".ts"}
 MAX_KNOWLEDGE_BYTES = 2_000_000
+MAX_KNOWLEDGE_AUDIT_SOURCES = 64
+KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
+KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
@@ -550,6 +553,14 @@ class SourceHit:
     line_start: int
     line_end: int
     evidence_id: str
+
+
+@dataclass(frozen=True)
+class _KnowledgeSnapshot:
+    path: str
+    sha256: str
+    byte_count: int
+    content: str | None
 
 
 _STRICT_SECTION_FIELDS = {
@@ -2240,29 +2251,268 @@ class Company:
             ))
         return {"project": item, "sources": sources, "jobs": jobs}
 
+    @classmethod
+    def _read_knowledge_snapshot(
+        cls, source: Path, *, retain_content: bool,
+    ) -> _KnowledgeSnapshot:
+        candidate = Path(os.path.abspath(os.fspath(source)))
+        if candidate.suffix.lower() not in TEXT_SUFFIXES:
+            raise ValueError(
+                f"Unsupported knowledge type: {candidate.suffix or '(none)'}"
+            )
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError("Knowledge source is unavailable or unsafe") from exc
+        try:
+            resolved, raw = read_stable_local_file(
+                candidate,
+                allowed_root=candidate.parent,
+                max_bytes=MAX_KNOWLEDGE_BYTES,
+                require_allowed_root=False,
+            )
+        except SpreadsheetError as exc:
+            raise ValueError("Knowledge source is unavailable or unsafe") from exc
+        content = raw.decode("utf-8", errors="replace")
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return _KnowledgeSnapshot(
+            path=str(resolved),
+            sha256=digest,
+            byte_count=len(raw),
+            content=content if retain_content else None,
+        )
+
+    @staticmethod
+    def _select_knowledge_scope_rows(
+        db: sqlite3.Connection, project_id: str | None,
+    ) -> list[tuple[str, str, str, str]]:
+        if project_id:
+            return list(db.execute(
+                "SELECT k.id, k.path, k.sha256, k.added_at FROM knowledge k "
+                "JOIN project_knowledge pk ON pk.knowledge_id=k.id "
+                "WHERE pk.project_id=? ORDER BY k.id",
+                (project_id,),
+            ))
+        return list(db.execute(
+            "SELECT id, path, sha256, added_at FROM knowledge ORDER BY id"
+        ))
+
+    def _knowledge_scope_rows(
+        self, project: str | None,
+    ) -> tuple[str | None, list[tuple[str, str, str, str]]]:
+        self.initialize()
+        project_id = self._resolve_project(project)[0] if project else None
+        with closing(self._connect()) as db:
+            rows = self._select_knowledge_scope_rows(db, project_id)
+        if len(rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
+            raise ValueError(
+                "Knowledge freshness supports at most "
+                f"{MAX_KNOWLEDGE_AUDIT_SOURCES} registered sources per audit"
+            )
+        return project_id, rows
+
+    def _collect_knowledge_freshness(
+        self, project: str | None, *, retain_content: bool,
+    ) -> tuple[
+        str | None,
+        list[tuple[str, str, str, str]],
+        list[dict[str, object]],
+        dict[str, _KnowledgeSnapshot],
+    ]:
+        project_id, rows = self._knowledge_scope_rows(project)
+        items: list[dict[str, object]] = []
+        snapshots: dict[str, _KnowledgeSnapshot] = {}
+        for item_id, path_text, stored_digest, _ in rows:
+            try:
+                snapshot = self._read_knowledge_snapshot(
+                    Path(path_text), retain_content=retain_content,
+                )
+                same_path = os.path.normcase(os.path.normpath(snapshot.path)) == (
+                    os.path.normcase(os.path.normpath(path_text))
+                )
+                if not same_path:
+                    status = "unavailable"
+                    current_bytes: int | None = None
+                else:
+                    status = "current" if snapshot.sha256 == stored_digest else "changed"
+                    current_bytes = snapshot.byte_count
+                    snapshots[item_id] = snapshot
+            except FileNotFoundError:
+                status = "missing"
+                current_bytes = None
+            except ValueError:
+                status = "unavailable"
+                current_bytes = None
+            items.append({
+                "id": item_id,
+                "status": status,
+                "current_bytes": current_bytes,
+            })
+        return project_id, rows, items, snapshots
+
+    @staticmethod
+    def _knowledge_status_counts(items: list[dict[str, object]]) -> dict[str, int]:
+        return {
+            status: sum(item.get("status") == status for item in items)
+            for status in ("current", "changed", "missing", "unavailable")
+        }
+
+    def knowledge_freshness(self, project: str | None = None) -> dict[str, object]:
+        project_id, _, items, _ = self._collect_knowledge_freshness(
+            project, retain_content=False,
+        )
+        counts = self._knowledge_status_counts(items)
+        return {
+            "schema": KNOWLEDGE_FRESHNESS_SCHEMA,
+            "project_id": project_id,
+            "source_count": len(items),
+            "ready_for_use": counts["changed"] == 0
+            and counts["missing"] == 0
+            and counts["unavailable"] == 0,
+            "status_counts": counts,
+            "items": items,
+            "effects": {
+                "knowledge_records_mutated": False,
+                "model_called": False,
+                "work_started": False,
+            },
+        }
+
+    def refresh_project_knowledge(self, project: str) -> dict[str, object]:
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("Knowledge refresh requires one project")
+        first_project_id, first_rows, first_items, first_snapshots = (
+            self._collect_knowledge_freshness(project, retain_content=False)
+        )
+        first_counts = self._knowledge_status_counts(first_items)
+        if first_counts["missing"] or first_counts["unavailable"]:
+            raise RuntimeError(
+                "Knowledge refresh refused before mutation: "
+                f"missing={first_counts['missing']}, "
+                f"unavailable={first_counts['unavailable']}"
+            )
+        project_id, rows, items, snapshots = self._collect_knowledge_freshness(
+            project, retain_content=True,
+        )
+        counts = self._knowledge_status_counts(items)
+        if counts["missing"] or counts["unavailable"]:
+            raise RuntimeError(
+                "Knowledge refresh refused before mutation: a source became unavailable"
+            )
+        if first_project_id != project_id or first_rows != rows:
+            raise RuntimeError(
+                "Knowledge refresh refused before mutation: registered sources changed"
+            )
+        if set(first_snapshots) != set(snapshots) or any(
+            (
+                first_snapshots[item_id].path,
+                first_snapshots[item_id].sha256,
+                first_snapshots[item_id].byte_count,
+            )
+            != (
+                snapshots[item_id].path,
+                snapshots[item_id].sha256,
+                snapshots[item_id].byte_count,
+            )
+            for item_id in snapshots
+        ):
+            raise RuntimeError(
+                "Knowledge refresh refused before mutation: a source changed during preflight"
+            )
+        changed_ids = [
+            str(item["id"]) for item in items if item.get("status") == "changed"
+        ]
+        if changed_ids:
+            stored_by_id = {
+                item_id: (path_text, stored_digest)
+                for item_id, path_text, stored_digest, _ in rows
+            }
+            refreshed_at = utc_now()
+            try:
+                with closing(self._connect(immediate=True)) as db, db:
+                    current_rows = self._select_knowledge_scope_rows(db, project_id)
+                    if current_rows != rows:
+                        raise RuntimeError(
+                            "Knowledge refresh refused before mutation: "
+                            "registered sources changed"
+                        )
+                    for item_id in changed_ids:
+                        snapshot = snapshots[item_id]
+                        if snapshot.content is None:
+                            raise RuntimeError(
+                                "Knowledge refresh refused before mutation: "
+                                "source content unavailable"
+                            )
+                        path_text, stored_digest = stored_by_id[item_id]
+                        cursor = db.execute(
+                            "UPDATE knowledge SET sha256=?, content=?, added_at=? "
+                            "WHERE id=? AND path=? AND sha256=?",
+                            (
+                                snapshot.sha256, snapshot.content, refreshed_at,
+                                item_id, path_text, stored_digest,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise RuntimeError(
+                                "Knowledge refresh refused before mutation: "
+                                "source record changed"
+                            )
+            except sqlite3.Error as exc:
+                raise RuntimeError(
+                    "Knowledge refresh transaction failed; no partial refresh was committed"
+                ) from exc
+        return {
+            "schema": KNOWLEDGE_REFRESH_SCHEMA,
+            "project_id": project_id,
+            "source_count": len(items),
+            "refreshed_count": len(changed_ids),
+            "unchanged_count": len(items) - len(changed_ids),
+            "refreshed_ids": changed_ids,
+            "effects": {
+                "knowledge_records_mutated": bool(changed_ids),
+                "model_called": False,
+                "work_started": False,
+            },
+        }
+
     def add_knowledge(self, source: Path, project: str | None = None) -> tuple[str, bool]:
         self.initialize()
         project_id = self._resolve_project(project)[0] if project else None
-        source = source.resolve()
-        if not source.is_file():
-            raise ValueError(f"Knowledge source is not a file: {source}")
-        if source.suffix.lower() not in TEXT_SUFFIXES:
-            raise ValueError(f"Unsupported knowledge type: {source.suffix or '(none)'}")
-        if source.stat().st_size > MAX_KNOWLEDGE_BYTES:
-            raise ValueError(f"Knowledge source exceeds {MAX_KNOWLEDGE_BYTES} bytes")
-        content = source.read_text(encoding="utf-8", errors="replace")
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        try:
+            snapshot = self._read_knowledge_snapshot(source, retain_content=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"Knowledge source is not a file: {source}") from exc
+        if snapshot.content is None:
+            raise RuntimeError("Knowledge source content was not retained")
         with closing(self._connect(immediate=True)) as db, db:
-            existing = db.execute("SELECT id, sha256 FROM knowledge WHERE path=?", (str(source),)).fetchone()
-            item_id = existing[0] if existing else hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
-            changed = existing is None or existing[1] != digest
-            db.execute(
-                "INSERT INTO knowledge VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(path) DO UPDATE SET sha256=excluded.sha256, content=excluded.content, added_at=excluded.added_at",
-                (item_id, str(source), digest, content, utc_now()),
-            )
+            existing = db.execute(
+                "SELECT id, sha256 FROM knowledge WHERE path=?", (snapshot.path,),
+            ).fetchone()
+            item_id = existing[0] if existing else hashlib.sha256(
+                snapshot.path.encode("utf-8")
+            ).hexdigest()[:12]
+            changed = existing is None or existing[1] != snapshot.sha256
+            if existing is None:
+                db.execute(
+                    "INSERT INTO knowledge VALUES (?, ?, ?, ?, ?)",
+                    (
+                        item_id, snapshot.path, snapshot.sha256,
+                        snapshot.content, utc_now(),
+                    ),
+                )
+            elif changed:
+                db.execute(
+                    "UPDATE knowledge SET sha256=?, content=?, added_at=? WHERE id=?",
+                    (snapshot.sha256, snapshot.content, utc_now(), item_id),
+                )
             if project_id:
-                db.execute("INSERT OR IGNORE INTO project_knowledge VALUES (?, ?)", (project_id, item_id))
+                db.execute(
+                    "INSERT OR IGNORE INTO project_knowledge VALUES (?, ?)",
+                    (project_id, item_id),
+                )
         return item_id, changed
 
     def add_knowledge_dir(

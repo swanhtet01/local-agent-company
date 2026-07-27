@@ -124,6 +124,14 @@ def parser() -> argparse.ArgumentParser:
     add_dir.add_argument("--max-files", type=int, default=100)
     list_knowledge = knowledge_sub.add_parser("list", help="List local reference files")
     list_knowledge.add_argument("--project")
+    audit_knowledge = knowledge_sub.add_parser(
+        "audit", help="Check registered source freshness without exposing paths"
+    )
+    audit_knowledge.add_argument("--project")
+    refresh_knowledge = knowledge_sub.add_parser(
+        "refresh", help="Atomically refresh every registered source for one project"
+    )
+    refresh_knowledge.add_argument("--project", required=True)
     search = knowledge_sub.add_parser("search", help="Preview local retrieval")
     search.add_argument("query")
     search.add_argument("--project")
@@ -366,6 +374,12 @@ def main() -> int:
                     print("No knowledge sources yet.")
                 for item_id, path, added in rows:
                     print(f"{item_id}  {added}  {path}")
+            elif args.knowledge_command == "audit":
+                print(json.dumps(company.knowledge_freshness(args.project), indent=2))
+            elif args.knowledge_command == "refresh":
+                print(json.dumps(
+                    company.refresh_project_knowledge(args.project), indent=2,
+                ))
             elif args.knowledge_command == "search":
                 hits = company.search_knowledge(args.query, project=args.project)
                 if not hits:

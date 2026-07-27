@@ -4,7 +4,7 @@
 
 1. Check runtime: `.\local-company.cmd doctor`; use `benchmark --num-predict 128` after model or runtime changes.
 2. Run `health`, then `schedules tick` to materialize due recurring work without executing it.
-3. Select or create a project, then add or refresh only its relevant source files.
+3. Select or create a project, add only its relevant source files, then run `knowledge audit --project "PROJECT"`. If registered indexed text changed, use `knowledge refresh --project "PROJECT"`; the command preflights every source twice and either atomically refreshes the changed index records or changes none.
 4. Preview one concrete objective with `route "OBJECTIVE" [--playbook NAME]` or the dashboard's **Preview team (no model)** button. Review selected and omitted departments plus any owner-gate categories; previewing starts no work and preserves the dashboard draft. Then queue it with a measurable outcome, project, playbook, priority, and optional schedule. Use the localhost service form or `queue add`; both record work without running it.
 5. Review the exact ID, priority, due time, project, and objective shown above the dashboard run button, then run that mission. If the queue changed, refresh and review again. For CLI use, pass `queue run-next --queue-id REVIEWED_QUEUE_ID`; the database-wide execution slot protects local memory and leaves losing concurrent attempts queued.
 6. Open the mission ID in the dashboard; compare its report and evidence-manifest SHA-256 values; inspect every frozen excerpt, failed gate, and source conflict; then read the Markdown report and verify its assumptions yourself. Verified wording must cite the displayed `[EVIDENCE:id]`, but the citation remains evidence for owner review rather than proof of a business outcome. Use **Recheck** after quality-rule changes; each run is appended to evaluation history and a prior score is not permanent proof. Use **Retry** only after the failed constraint or model problem is corrected.
@@ -88,7 +88,7 @@ Avoid vague instructions such as `run everything`. The coordinator can recruit s
 - Process stops: use `recover --stale-minutes 60`. It interrupts stale jobs, revokes their execution leases, and marks stale queue claims failed without a model rerun; late responses are discarded. Then use `resume JOB_ID` deliberately to issue a new lease and preserve completed assignments, or reset the failed queue item after review.
 - Another mission is running: wait for it. Only use `recover` when its heartbeat is genuinely stale.
 - Stale queue claim: inspect its preserved job ID and error in `queue list`. Recovery never guesses an unlinked legacy claim while another job is live and is safe to repeat.
-- Bad source: refresh it with `knowledge add`; the path is updated by content hash.
+- Bad source: run `knowledge audit --project "PROJECT"`. Use `knowledge refresh --project "PROJECT"` only when every registered source is present and trusted; missing, unsafe, unstable, or over-limit sources fail before index mutation. Use `knowledge add PATH --project "PROJECT"` only to register a new source deliberately.
 - Source leaked across projects: project runs retrieve only sources explicitly attached to that project; inspect with `projects show`.
 - Wrong approval: decisions are immutable in the CLI. Create a new request documenting the correction instead of erasing history.
 - Dashboard intake rejected: confirm `service status` is live. A direct `dashboard` process is intentionally read-only; authenticated intake is available only through `service start`.
