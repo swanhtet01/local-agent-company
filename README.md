@@ -102,6 +102,7 @@ time or creating company state:
 ```powershell
 .\local-company.cmd route "Improve supplier controls, inventory flow, and customer retention metrics"
 .\local-company.cmd route "Compare supplier options" --playbook procurement-review
+.\local-company.cmd preflight "Compare supplier options" --project "Yangon Tyre" --playbook procurement-review
 ```
 
 The versioned JSON preview shows the fixed chair and quality roles, at most four
@@ -113,8 +114,20 @@ sensitive-action categories that require an owner gate before execution.
 Matching uses normalized whole words and phrases, so text such as `approval`
 cannot accidentally match the engineering signal `app`. The preview does not
 call Ollama, initialize a store, queue work, approve a gate, or authorize an
-action. The private dashboard exposes the same **Preview team (no model)** step
-and keeps the draft objective, project, playbook, and priority ready for review.
+action.
+
+`preflight` adds the selected initialized store's aggregate evidence readiness
+to that deterministic routing result. Its pathless
+`local-company.mission-preflight.v1` JSON withholds the objective, project name,
+source IDs, paths, contents, and digests. It reports only the opaque project ID,
+team roles, owner-gate categories, fixed blocker tokens, aggregate source/status
+counts, queueing eligibility, model-execution readiness, and false effect flags.
+Known drift blocks model readiness before queue creation while still permitting
+record-only queueing; owner-gated wording skips evidence reads because it cannot
+reach model execution. The private dashboard's **Preview team (no model)** step
+shows the same readiness result and keeps the draft objective, project,
+playbook, and priority ready for review. Neither preflight starts work or calls
+Ollama, and `/health.json` remains unchanged.
 
 Automatic routing:
 

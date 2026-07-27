@@ -3741,6 +3741,9 @@ class CompanyTests(unittest.TestCase):
             model = CountingMockModel()
             company = Company(Path(tmp), model)
             project_id = company.create_project("Preview Lab")
+            source = Path(tmp) / "preview-private.md"
+            source.write_text("private dashboard preview datum", encoding="utf-8")
+            company.add_knowledge(source, project_id)
             server = create_dashboard_server(company, 0, service_token="preview-secret")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -3775,6 +3778,9 @@ class CompanyTests(unittest.TestCase):
                 self.assertIn("legal-risk", page)
                 self.assertIn("No model was called", page)
                 self.assertIn("no mission was queued", page)
+                self.assertIn(
+                    "Knowledge preflight ready: 1 registered source(s) current", page,
+                )
                 self.assertIn("&lt;script&gt;", page)
                 self.assertNotIn("<script>", page)
                 self.assertIn(f'value="{project_id}" selected', page)
@@ -3789,10 +3795,24 @@ class CompanyTests(unittest.TestCase):
                     before_digest,
                 )
 
+                source.write_text("private dashboard preview changed", encoding="utf-8")
+                with opener.open(post("Review inventory"), timeout=3) as response:
+                    blocked_page = response.read().decode("utf-8")
+                self.assertIn(
+                    "Model execution preflight blocked: knowledge_changed", blocked_page,
+                )
+                self.assertIn("Queuing remains record-only", blocked_page)
+                self.assertNotIn(str(source.resolve()), blocked_page)
+                self.assertNotIn("private dashboard preview datum", blocked_page)
+                self.assertNotIn("private dashboard preview changed", blocked_page)
+
                 with opener.open(post("Send email to every prospect"), timeout=3) as response:
                     gated_page = response.read().decode("utf-8")
                 self.assertIn("Owner gate required before execution", gated_page)
                 self.assertIn("external communication", gated_page)
+                self.assertIn(
+                    "Knowledge was not checked because the owner gate stops", gated_page,
+                )
                 self.assertEqual(company.action_requests(), [])
                 self.assertEqual(model.calls, 0)
 

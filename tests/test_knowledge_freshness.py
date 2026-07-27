@@ -14,6 +14,7 @@ from local_company.cli import main as cli_main
 from local_company.core import (
     KNOWLEDGE_FRESHNESS_SCHEMA,
     KNOWLEDGE_REFRESH_SCHEMA,
+    MISSION_PREFLIGHT_SCHEMA,
     QUEUE_PREFLIGHT_SCHEMA,
     Company,
     MockModel,
@@ -267,6 +268,15 @@ class KnowledgeFreshnessTests(unittest.TestCase):
                 company.run("Review the bounded source scope", project=project)
             self.assertEqual(model.calls, 0)
             self.assertEqual(company.jobs(), [])
+            mission_preflight = company.mission_preflight(
+                "Review the bounded source scope", project=project,
+            )
+            self.assertEqual(mission_preflight["status"], "blocked")
+            self.assertTrue(mission_preflight["queueing_allowed"])
+            self.assertEqual(
+                mission_preflight["blockers"], ["knowledge_scope_over_limit"],
+            )
+            self.assertEqual(mission_preflight["knowledge"]["source_count"], 65)
             queue_id = company.enqueue(
                 "Review the bounded queued source scope", project=project,
             )
@@ -566,6 +576,112 @@ class KnowledgeFreshnessTests(unittest.TestCase):
             self.assertEqual(company.jobs(), [])
             self.assertEqual(file_sha256(company.db_path), before)
 
+    def test_mission_preflight_is_pathless_read_only_and_reports_drift_or_owner_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = CountingModel()
+            company = Company(root / "state", model)
+            project = company.create_project("Mission Preflight Private")
+            source = root / "private-mission-source.md"
+            source.write_text("confidential current mission datum", encoding="utf-8")
+            source_id, _ = company.add_knowledge(source, project)
+            objective = "Review supplier inventory operations"
+            before = file_sha256(company.db_path)
+
+            ready = company.mission_preflight(objective, project)
+
+            self.assertEqual(ready["schema"], MISSION_PREFLIGHT_SCHEMA)
+            self.assertEqual(ready["status"], "ready")
+            self.assertEqual(ready["project_id"], project)
+            self.assertTrue(ready["queueing_allowed"])
+            self.assertTrue(ready["model_execution_ready"])
+            self.assertEqual(ready["blockers"], [])
+            self.assertEqual(ready["owner_gate_categories"], [])
+            self.assertEqual(ready["team"]["selection"], "automatic")
+            self.assertIn("operations", ready["team"]["roles"])
+            self.assertEqual(ready["knowledge"]["status"], "ready")
+            self.assertEqual(ready["knowledge"]["source_count"], 1)
+            self.assertEqual(
+                ready["effects"],
+                {
+                    "mission_queued": False,
+                    "job_created": False,
+                    "model_called": False,
+                    "state_mutated": False,
+                    "work_started": False,
+                },
+            )
+
+            source.write_text("confidential changed mission datum", encoding="utf-8")
+            drift = company.mission_preflight(objective, project)
+            unscoped_drift = company.mission_preflight(objective)
+            sensitive_objective = "Send email to every prospect"
+            owner_gate = company.mission_preflight(
+                sensitive_objective, project,
+            )
+
+            self.assertEqual(drift["status"], "blocked")
+            self.assertTrue(drift["queueing_allowed"])
+            self.assertFalse(drift["model_execution_ready"])
+            self.assertEqual(drift["blockers"], ["knowledge_changed"])
+            self.assertEqual(drift["knowledge"]["status_counts"]["changed"], 1)
+            self.assertIsNone(unscoped_drift["project_id"])
+            self.assertEqual(unscoped_drift["blockers"], ["knowledge_changed"])
+            self.assertEqual(owner_gate["status"], "owner_gate_required")
+            self.assertTrue(owner_gate["queueing_allowed"])
+            self.assertFalse(owner_gate["model_execution_ready"])
+            self.assertEqual(
+                owner_gate["owner_gate_categories"], ["external_communication"],
+            )
+            self.assertEqual(owner_gate["knowledge"]["status"], "not_checked")
+            for result in (ready, drift, unscoped_drift, owner_gate):
+                rendered = json.dumps(result, sort_keys=True)
+                for private_value in (
+                    objective, sensitive_objective, "Mission Preflight Private", source_id,
+                    str(source.resolve()), "confidential", "sha256",
+                ):
+                    self.assertNotIn(private_value, rendered)
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(model.calls, 0)
+            self.assertEqual(company.queue_items(), [])
+            self.assertEqual(company.jobs(), [])
+
+    def test_mission_preflight_cli_emits_aggregate_json_without_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            source = root / "cli-mission-private.md"
+            source.write_text("CLI mission private datum", encoding="utf-8")
+            company = Company(state, CountingModel())
+            project = company.create_project("CLI Mission Preflight")
+            company.add_knowledge(source, project)
+            objective = "Prepare a procurement readiness brief"
+            before = file_sha256(company.db_path)
+            cli_model = CountingModel()
+            output = io.StringIO()
+
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "preflight", objective,
+                    "--project", project, "--playbook", "procurement-review",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=cli_model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["schema"], MISSION_PREFLIGHT_SCHEMA)
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["team"]["selection"], "playbook")
+            self.assertEqual(result["team"]["playbook"], "procurement-review")
+            self.assertNotIn(objective, output.getvalue())
+            self.assertNotIn(str(source.resolve()), output.getvalue())
+            self.assertNotIn("CLI mission private datum", output.getvalue())
+            self.assertEqual(file_sha256(company.db_path), before)
+            self.assertEqual(cli_model.calls, 0)
+            self.assertEqual(company.queue_items(), [])
+
     def test_queue_preflight_ready_contract_is_pathless_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -806,6 +922,7 @@ class KnowledgeFreshnessTests(unittest.TestCase):
                 {"schema": "company", "instance_id": "a" * 32},
             )
             self.assertNotIn("queue_preflight", json.dumps(health))
+            self.assertNotIn("mission_preflight", json.dumps(health))
             self.assertNotIn("owner_gate", json.dumps(health))
 
 

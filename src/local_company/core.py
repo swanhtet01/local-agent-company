@@ -194,6 +194,7 @@ MAX_KNOWLEDGE_BYTES = 2_000_000
 MAX_KNOWLEDGE_AUDIT_SOURCES = 64
 KNOWLEDGE_FRESHNESS_SCHEMA = "local-company.knowledge-freshness.v1"
 KNOWLEDGE_REFRESH_SCHEMA = "local-company.knowledge-refresh.v1"
+MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 MAX_DATASET_BYTES = 20_000_000
 MAX_PROFILE_ROWS = 10_000
@@ -2379,6 +2380,41 @@ class Company:
             for status in ("current", "changed", "missing", "unavailable")
         }
 
+    @staticmethod
+    def _unchecked_preflight_knowledge() -> dict[str, object]:
+        return {
+            "status": "not_checked",
+            "source_count": None,
+            "status_counts": None,
+        }
+
+    def _knowledge_preflight_summary(
+        self,
+        db: sqlite3.Connection,
+        project_id: str | None,
+    ) -> tuple[dict[str, object], list[str]]:
+        rows = self._select_knowledge_scope_rows(db, project_id)
+        if len(rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
+            return ({
+                "status": "over_limit",
+                "source_count": len(rows),
+                "status_counts": None,
+            }, ["knowledge_scope_over_limit"])
+        items, _ = self._collect_knowledge_freshness_rows(
+            rows, retain_content=False,
+        )
+        counts = self._knowledge_status_counts(items)
+        blockers = [
+            f"knowledge_{status}"
+            for status in ("changed", "missing", "unavailable")
+            if counts[status]
+        ]
+        return ({
+            "status": "ready" if not blockers else "drift",
+            "source_count": len(rows),
+            "status_counts": counts,
+        }, blockers)
+
     def _require_current_knowledge_rows(
         self, rows: list[tuple[str, str, str, str]],
     ) -> tuple[tuple[str, str, str, str], ...]:
@@ -2436,6 +2472,59 @@ class Company:
             "effects": {
                 "knowledge_records_mutated": False,
                 "model_called": False,
+                "work_started": False,
+            },
+        }
+
+    def mission_preflight(
+        self,
+        objective: str,
+        project: str | None = None,
+        playbook: str | None = None,
+    ) -> dict[str, object]:
+        self.initialize()
+        route = self.routing_preview(objective, playbook)
+        with closing(self._connect()) as db:
+            project_id: str | None = None
+            if project:
+                row = db.execute(
+                    "SELECT id FROM projects WHERE id=? OR name=?", (project, project),
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"Unknown project: {project}")
+                project_id = str(row[0])
+            owner_gate_categories = list(route["owner_gate"]["categories"])
+            knowledge = self._unchecked_preflight_knowledge()
+            blockers: list[str] = []
+            if not owner_gate_categories:
+                knowledge, blockers = self._knowledge_preflight_summary(db, project_id)
+
+        model_execution_ready = not blockers and not owner_gate_categories
+        status = (
+            "blocked" if blockers else
+            "owner_gate_required" if owner_gate_categories else
+            "ready"
+        )
+        return {
+            "schema": MISSION_PREFLIGHT_SCHEMA,
+            "status": status,
+            "project_id": project_id,
+            "queueing_allowed": True,
+            "model_execution_ready": model_execution_ready,
+            "blockers": blockers,
+            "owner_gate_categories": owner_gate_categories,
+            "team": {
+                "selection": "playbook" if playbook else "automatic",
+                "routing": route["routing"],
+                "playbook": playbook,
+                "roles": list(route["roles"]),
+            },
+            "knowledge": knowledge,
+            "effects": {
+                "mission_queued": False,
+                "job_created": False,
+                "model_called": False,
+                "state_mutated": False,
                 "work_started": False,
             },
         }
@@ -4214,14 +4303,6 @@ class Company:
             "work_started": False,
         }
 
-    @staticmethod
-    def _unchecked_queue_knowledge() -> dict[str, object]:
-        return {
-            "status": "not_checked",
-            "source_count": None,
-            "status_counts": None,
-        }
-
     def _queue_preflight_from_row(
         self,
         db: sqlite3.Connection,
@@ -4306,30 +4387,13 @@ class Company:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
                 blockers.append("queued_mission_invalid")
 
-        knowledge = self._unchecked_queue_knowledge()
+        knowledge = self._unchecked_preflight_knowledge()
         can_check_knowledge = not blockers and not owner_gate_categories
         if can_check_knowledge:
-            knowledge_rows = self._select_knowledge_scope_rows(db, project_id)
-            if len(knowledge_rows) > MAX_KNOWLEDGE_AUDIT_SOURCES:
-                blockers.append("knowledge_scope_over_limit")
-                knowledge = {
-                    "status": "over_limit",
-                    "source_count": len(knowledge_rows),
-                    "status_counts": None,
-                }
-            else:
-                items, _ = self._collect_knowledge_freshness_rows(
-                    knowledge_rows, retain_content=False,
-                )
-                counts = self._knowledge_status_counts(items)
-                for status in ("changed", "missing", "unavailable"):
-                    if counts[status]:
-                        blockers.append(f"knowledge_{status}")
-                knowledge = {
-                    "status": "ready" if not blockers else "drift",
-                    "source_count": len(knowledge_rows),
-                    "status_counts": counts,
-                }
+            knowledge, knowledge_blockers = self._knowledge_preflight_summary(
+                db, project_id,
+            )
+            blockers.extend(knowledge_blockers)
 
         submission_allowed = not blockers
         model_execution_ready = submission_allowed and not owner_gate_categories
@@ -4395,7 +4459,7 @@ class Company:
             "blockers": blockers,
             "owner_gate_categories": [],
             "team": {"selection": None, "playbook": None, "roles": []},
-            "knowledge": self._unchecked_queue_knowledge(),
+            "knowledge": self._unchecked_preflight_knowledge(),
             "effects": self._queue_preflight_effects(),
         }
 

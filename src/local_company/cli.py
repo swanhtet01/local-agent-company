@@ -36,6 +36,13 @@ def parser() -> argparse.ArgumentParser:
     )
     route.add_argument("objective")
     route.add_argument("--playbook", choices=tuple(PLAYBOOKS))
+    preflight = sub.add_parser(
+        "preflight",
+        help="Preview team, owner gates, and aggregate knowledge readiness without queuing",
+    )
+    preflight.add_argument("objective")
+    preflight.add_argument("--project")
+    preflight.add_argument("--playbook", choices=tuple(PLAYBOOKS))
 
     run = sub.add_parser("run", help="Route and run a team on one objective")
     run.add_argument("objective")
@@ -265,6 +272,10 @@ def main() -> int:
                 print(f"{name:16} {purpose}")
         elif args.command == "route":
             print(json.dumps(Company.routing_preview(args.objective, args.playbook), indent=2))
+        elif args.command == "preflight":
+            print(json.dumps(company.mission_preflight(
+                args.objective, args.project, args.playbook,
+            ), indent=2))
         elif args.command == "run":
             roles = [role.strip() for role in args.roles.split(",") if role.strip()] if args.roles else None
             job_id, output = company.run(args.objective, roles, project=args.project)

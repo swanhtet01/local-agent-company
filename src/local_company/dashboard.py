@@ -1115,14 +1115,15 @@ def create_dashboard_server(
                     return
                 try:
                     if self.path == "/queue/preview-team":
-                        preview = company.routing_preview(
+                        preview = company.mission_preflight(
                             fields.get("objective", ""),
+                            fields.get("project") or None,
                             fields.get("playbook") or None,
                         )
-                        roles = ", ".join(str(role) for role in preview["roles"])
-                        routing = str(preview["routing"]).replace("_", " ")
-                        gate = preview["owner_gate"]
-                        categories = gate["categories"] if isinstance(gate, dict) else []
+                        team = preview["team"]
+                        roles = ", ".join(str(role) for role in team["roles"])
+                        routing = str(team["routing"]).replace("_", " ")
+                        categories = preview["owner_gate_categories"]
                         gate_notice = (
                             " Owner gate required before execution: "
                             + ", ".join(str(value).replace("_", " ") for value in categories)
@@ -1130,9 +1131,30 @@ def create_dashboard_server(
                             if categories else
                             " No sensitive-action category was detected by the wording screen."
                         )
+                        preflight_status = str(preview["status"])
+                        if preflight_status == "ready":
+                            knowledge = preview["knowledge"]
+                            knowledge_notice = (
+                                " Knowledge preflight ready: "
+                                f"{knowledge['source_count']} registered source(s) current."
+                            )
+                        elif preflight_status == "blocked":
+                            blockers = ", ".join(
+                                str(value) for value in preview["blockers"]
+                            ) or "not_ready"
+                            knowledge_notice = (
+                                f" Model execution preflight blocked: {blockers}."
+                                " Queuing remains record-only."
+                            )
+                        else:
+                            knowledge_notice = (
+                                " Knowledge was not checked because the owner gate stops"
+                                " model execution."
+                            )
                         notice = (
                             f"Team preview only ({routing}): {roles}."
-                            f"{gate_notice} No model was called, no state changed, and no mission was queued."
+                            f"{gate_notice}{knowledge_notice} No model was called, no state"
+                            " changed, and no mission was queued."
                         )
                         body = render_dashboard(
                             company, service_token, notice, worker, build_identity,
