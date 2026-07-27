@@ -464,7 +464,8 @@ def main() -> int:
                     print("No relevant local sources found.")
                 for hit in hits:
                     print(
-                        f"[score={hit.score} authority={hit.authority}] "
+                        f"[score={hit.score} authority={hit.authority} "
+                        f"rank={hit.score + hit.authority}] "
                         f"{hit.path}\n{hit.excerpt}\n"
                     )
         elif args.command == "datasets":

@@ -2863,8 +2863,8 @@ class Company:
             key=lambda hit: (
                 0 if hit.source_id in named_positions else 1,
                 named_positions.get(hit.source_id, 0),
+                -(hit.score + authorities.get(hit.source_id, 0)),
                 -authorities.get(hit.source_id, 0),
-                -hit.score,
                 hit.path,
             ),
         )[:limit]

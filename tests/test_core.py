@@ -2560,7 +2560,7 @@ class CompanyTests(unittest.TestCase):
             project = company.create_project("Authority Lab")
             stale = root / "stale.md"
             current = root / "current.md"
-            stale.write_text("current live release commit " * 10, encoding="utf-8")
+            stale.write_text("current live release commit " * 5, encoding="utf-8")
             current.write_text("current live release commit is new", encoding="utf-8")
             stale_id, _ = company.add_knowledge(stale, project)
             current_id, _ = company.add_knowledge(current, project)
@@ -2571,15 +2571,15 @@ class CompanyTests(unittest.TestCase):
                 )[0].path).name,
                 "stale.md",
             )
-            result = company.set_knowledge_authority(current_id, project, 100)
-            self.assertEqual(result["authority"], 100)
+            result = company.set_knowledge_authority(current_id, project, 20)
+            self.assertEqual(result["authority"], 20)
             self.assertFalse(result["effects"]["model_called"])
             current_hit = company.search_knowledge(
                 "current live release commit", project=project,
             )[0]
             self.assertEqual(Path(current_hit.path).name, "current.md")
-            self.assertEqual(current_hit.authority, 100)
-            unchanged = company.set_knowledge_authority(current_id, project, 100)
+            self.assertEqual(current_hit.authority, 20)
+            unchanged = company.set_knowledge_authority(current_id, project, 20)
             self.assertFalse(unchanged["effects"]["knowledge_authority_mutated"])
             self.assertEqual(
                 Path(company.search_knowledge(
@@ -2587,13 +2587,24 @@ class CompanyTests(unittest.TestCase):
                 )[0].path).name,
                 "stale.md",
             )
-            company.set_knowledge_authority(current_id, project, 0)
+            strongest = root / "strongest.md"
+            strongest.write_text("current live release commit " * 30, encoding="utf-8")
+            company.add_knowledge(strongest, project)
             self.assertEqual(
                 Path(company.search_knowledge(
                     "current live release commit", project=project,
                 )[0].path).name,
-                "stale.md",
+                "strongest.md",
             )
+            company.set_knowledge_authority(current_id, project, 0)
+            reset_hits = company.search_knowledge(
+                "current live release commit", project=project,
+            )
+            self.assertEqual(Path(reset_hits[0].path).name, "strongest.md")
+            self.assertEqual(next(
+                hit.authority for hit in reset_hits
+                if Path(hit.path).name == "current.md"
+            ), 0)
             with self.assertRaisesRegex(ValueError, "between -100 and 100"):
                 company.set_knowledge_authority(current_id, project, 101)
             with self.assertRaisesRegex(ValueError, "not attached"):
