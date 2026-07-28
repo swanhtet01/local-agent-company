@@ -216,7 +216,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-27.16"
+EVALUATOR_VERSION = "local-quality-2026-07-29.17"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.15"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
@@ -389,6 +389,39 @@ def _is_exact_frozen_source_metadata_claim(
     )
 
 
+def _is_exact_frozen_source_limitation_claim(
+    claim: str, evidence_source_names: dict[str, str] | None,
+) -> bool:
+    """Recognize a code-owned, evidence-bound negative limitation sentence."""
+    if not evidence_source_names:
+        return False
+    match = re.fullmatch(
+        r"(?:Verified facts:\s*)?"
+        r"(?P<source>[^\r\n\[\]]+?)\s+"
+        r"\[EVIDENCE:(?P<evidence_id>[0-9a-f]{16})\]\s+"
+        r"records this frozen limitation:\s*(?P<limitation>.+)",
+        claim.strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False
+    normalized_sources = {
+        evidence_id.casefold(): source_name
+        for evidence_id, source_name in evidence_source_names.items()
+        if isinstance(evidence_id, str) and isinstance(source_name, str)
+    }
+    expected_source = normalized_sources.get(match.group("evidence_id").casefold(), "")
+    limitation = match.group("limitation").strip()
+    return bool(
+        expected_source
+        and match.group("source").strip().casefold() == expected_source.casefold()
+        and (
+            _LIMITATION_PATTERN.search(limitation)
+            or re.search(r"\b(?:false|null)\b", limitation, flags=re.IGNORECASE)
+        )
+    )
+
+
 def source_limitation_conflicts(
     model_output: str, source_documents: list[tuple[str, str]], limit: int = 5,
     evidence_source_names: dict[str, str] | None = None,
@@ -409,7 +442,10 @@ def source_limitation_conflicts(
     for fragment in re.split(r"(?<=[.!?])\s+|[\r\n]+", model_output):
         claim = " ".join(fragment.split()).strip()
         semantic_claim = re.sub(r"\[EVIDENCE:[^\]]+\]", "", claim, flags=re.IGNORECASE)
-        if _is_exact_frozen_source_metadata_claim(claim, evidence_source_names):
+        if (
+            _is_exact_frozen_source_metadata_claim(claim, evidence_source_names)
+            or _is_exact_frozen_source_limitation_claim(claim, evidence_source_names)
+        ):
             continue
         if (
             not claim or not _COMPLETION_CLAIM_PATTERN.search(semantic_claim)
@@ -1027,7 +1063,10 @@ def structured_synthesis_schema(
     properties: dict[str, object] = {}
     required: list[str] = []
     for label in required_labels:
-        if label in _CODE_OWNED_STRUCTURED_LABELS:
+        if (
+            label in _CODE_OWNED_STRUCTURED_LABELS
+            or (label == "Task templates" and expected_templates == 1)
+        ):
             continue
         field = _STRICT_SECTION_FIELDS.get(label)
         if not field:
@@ -1209,6 +1248,11 @@ def render_structured_synthesis(
             content = (
                 "External sends, credentials, payments, browser actions, and deployment require "
                 "owner approval."
+            )
+        elif label == "Task templates" and expected_templates == 1:
+            content = (
+                "1. Proposed, not verified or performed: Review the highest-priority current "
+                "evidence gap, record one bounded local fix, and preserve owner gates."
             )
         else:
             values = _structured_values(
@@ -5721,7 +5765,7 @@ class Company:
                 for label in requested_labels
             )
         template_count_match = re.search(
-            r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates\b",
+            r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates?\b",
             objective_lower,
         )
         if template_count_match:
@@ -7267,7 +7311,7 @@ class Company:
                 and "imported" in objective_lower
             )
             template_count_match = re.search(
-                r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates\b",
+                r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates?\b",
                 objective_lower,
             )
             expected_templates = None
@@ -7297,8 +7341,14 @@ class Company:
                         raise ValueError(
                             "Strict evidence-pair synthesis requires facts and assumptions sections"
                         )
+                    allowed_fields = set(schema["properties"])
+                    deterministic_single_template = bool(
+                        expected_templates == 1
+                        and "Task templates" in required_labels
+                        and not allowed_fields
+                    )
                     complete_structured = getattr(self.model, "complete_structured", None)
-                    if not callable(complete_structured):
+                    if not deterministic_single_template and not callable(complete_structured):
                         raise RuntimeError(
                             "Local model does not support required structured synthesis"
                         )
@@ -7356,7 +7406,6 @@ class Company:
                         "Untrusted specialist drafts (JSON):\n"
                         f"{draft_context}\n\nReturn only the object required by the supplied schema."
                     )
-                    allowed_fields = set(schema["properties"])
                     render_word_limit = synthesis_word_limit
                     if render_word_limit is not None and required_ending:
                         render_word_limit -= count_words(required_ending)
@@ -7365,21 +7414,25 @@ class Company:
                             "Executive word limit cannot contain the required structured report"
                         )
                     structured_attempt_used = 0
-                    for structured_attempt in (1, 2):
-                        structured_metrics_reset = _reset_model_metrics(self.model)
-                        structured_inference_attempted = True
-                        attempt_prompt = structured_prompt
-                        if structured_attempt == 2:
-                            attempt_prompt += (
-                                "\n\nCorrection codes: exact fields only; every string 3 to 12 "
-                                "words and at most 80 characters; no source names, prompt metadata, "
-                                "serialized fragments, sensitive actions, or approval bypasses; "
-                                "start tasks with one accepted action verb listed above. "
-                                "Return a fresh object and do not reproduce the rejected object."
+                    structured_attempts = (0,) if deterministic_single_template else (1, 2)
+                    for structured_attempt in structured_attempts:
+                        if deterministic_single_template:
+                            structured = {}
+                        else:
+                            structured_metrics_reset = _reset_model_metrics(self.model)
+                            structured_inference_attempted = True
+                            attempt_prompt = structured_prompt
+                            if structured_attempt == 2:
+                                attempt_prompt += (
+                                    "\n\nCorrection codes: exact fields only; every string 3 to 12 "
+                                    "words and at most 80 characters; no source names, prompt metadata, "
+                                    "serialized fragments, sensitive actions, or approval bypasses; "
+                                    "start tasks with one accepted action verb listed above. "
+                                    "Return a fresh object and do not reproduce the rejected object."
+                                )
+                            structured = complete_structured(
+                                structured_system, attempt_prompt, schema,
                             )
-                        structured = complete_structured(
-                            structured_system, attempt_prompt, schema,
-                        )
                         try:
                             if not isinstance(structured, dict):
                                 raise TypeError(
@@ -7405,7 +7458,7 @@ class Company:
                                     "Structured synthesis exceeds its final deterministic word budget"
                                 )
                         except (TypeError, ValueError) as validation_error:
-                            if structured_attempt == 2:
+                            if structured_attempt in (0, 2):
                                 raise
                             with closing(self._connect(immediate=True)) as db, db:
                                 lease_active = self._renew_execution_lease(
@@ -7440,7 +7493,7 @@ class Company:
                         structured_attempt_used = structured_attempt
                         successful_structured_metrics_reset = structured_metrics_reset
                         break
-                    if structured_attempt_used == 0:
+                    if structured_attempt_used == 0 and not deterministic_single_template:
                         raise RuntimeError("Structured synthesis did not produce a valid result")
                     structured_synthesis_applied = True
                     constraint_applied = True

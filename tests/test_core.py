@@ -358,12 +358,13 @@ class StructuredRepairModel(MockModel):
     def complete_structured(self, system, prompt, schema):
         self.schemas.append(schema)
         self.structured_prompts.append((system, prompt))
+        count = schema["properties"]["task_templates"]["maxItems"]
         return {
             "task_templates": [
                 "Capture the objective frozen sources and owner gate",
                 "Perform the bounded local analysis and save its output",
                 "Review evidence limitations quality checks and owner decisions",
-            ],
+            ][:count],
         }
 
 
@@ -1037,6 +1038,28 @@ class CompanyTests(unittest.TestCase):
             evidence_source_names={"aaaaaaaaaaaaaaaa": "CURRENT.md"},
         )
         self.assertEqual(provenance, [])
+        frozen_limitation = source_limitation_conflicts(
+            "NOW.md [EVIDENCE:bbbbbbbbbbbbbbbb] records this frozen limitation: "
+            "Live managed persistence ready: `false`",
+            [(
+                "CURRENT.md",
+                "Hosted managed persistence is not yet proven. No local demo is proof of "
+                "live production persistence.",
+            )],
+            evidence_source_names={"bbbbbbbbbbbbbbbb": "NOW.md"},
+        )
+        self.assertEqual(frozen_limitation, [])
+        forged_limitation = source_limitation_conflicts(
+            "CURRENT.md [EVIDENCE:bbbbbbbbbbbbbbbb] records this frozen limitation: "
+            "Live managed persistence ready: `false`",
+            [(
+                "CURRENT.md",
+                "Hosted managed persistence is not yet proven. No local demo is proof of "
+                "live production persistence.",
+            )],
+            evidence_source_names={"bbbbbbbbbbbbbbbb": "NOW.md"},
+        )
+        self.assertTrue(forged_limitation)
         piggyback = source_limitation_conflicts(
             "Telemetry is active and CURRENT.md [EVIDENCE:aaaaaaaaaaaaaaaa] is verified as a "
             "frozen local source for this brief.",
@@ -5529,6 +5552,45 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(validated["schema"], "local-company.strict-synthesis.v9")
             self.assertNotIn("success_checks", validated["fields"])
             self.assertNotIn("failure_modes", validated["fields"])
+
+    def test_strict_grounded_objective_accepts_one_singular_task_template(self):
+        objective = (
+            "Using imported alpha.md, separate verified facts from assumptions. Define 1 "
+            "reusable task template under Task templates, plus success checks, failure modes, "
+            "and owner gates. Every verified claim must name its exact source filename and "
+            "matching supplied evidence ID. Executive synthesis at most 120 words and end with: "
+            "Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "alpha.md"
+            source.write_text(
+                "Alpha records a bounded local evidence baseline for internal review.",
+                encoding="utf-8",
+            )
+            model = StructuredRepairModel()
+            company = Company(root / "state", model)
+            project_id = company.create_project("Singular template")
+            company.add_knowledge(source, project_id)
+
+            job_id, _ = company.run(
+                objective, roles=["operations", "quality"], project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            synthesis = company.job_detail(job_id)["job"][7]
+
+            self.assertTrue(evaluation["passed"])
+            self.assertEqual(model.schemas, [])
+            self.assertRegex(
+                synthesis,
+                r"Task templates:\s*1\.\s+Proposed, not verified or performed: Review the highest-priority",
+            )
+            validated = next(
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "structured_synthesis_validated"
+            )
+            self.assertEqual(validated["attempt"], 0)
+            self.assertEqual(validated["fields"], [])
 
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
         objective = (
