@@ -2834,6 +2834,42 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(outcome["result"][0], queue_id)
             self.assertEqual(outcome["result"][1], job_id)
 
+    def test_blocking_model_call_renews_execution_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.core.EXECUTION_HEARTBEAT_SECONDS", 0.01,
+        ):
+            model = BlockingModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Review local queue health", roles=["operations"])
+            outcome = {}
+
+            def run_queue():
+                try:
+                    outcome["result"] = company.run_next_queue_item()
+                except Exception as exc:  # pragma: no cover - asserted below
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=run_queue)
+            thread.start()
+            self.assertTrue(model.started.wait(timeout=3))
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                job_id = db.execute(
+                    "SELECT job_id FROM mission_queue WHERE id=?", (queue_id,),
+                ).fetchone()[0]
+                db.execute(
+                    "UPDATE jobs SET heartbeat_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                    (job_id,),
+                )
+
+            time.sleep(0.08)
+            self.assertEqual(company.recover_stale_jobs(1), [])
+            model.release.set()
+            thread.join(timeout=5)
+
+            self.assertFalse(thread.is_alive())
+            self.assertNotIn("error", outcome)
+            self.assertEqual(outcome["result"][1], job_id)
+
     def test_recovery_revokes_worker_lease_and_discards_its_late_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = BlockingModel()

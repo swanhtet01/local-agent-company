@@ -221,6 +221,7 @@ EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.15"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 768
+EXECUTION_HEARTBEAT_SECONDS = 5.0
 DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v3"
 LEGACY_DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v2"
 DATASET_CONTRACT_SCHEMA = "local-company.dataset-contract.v1"
@@ -1780,6 +1781,47 @@ class Company:
                 json.dumps({"stage": stage}, sort_keys=True),
             )
         return active
+
+    def _call_with_lease_heartbeat(
+        self, job_id: str, run_token: str, stage: str, callback,
+    ):
+        """Keep a durable execution lease current during one blocking model call."""
+        stopped = threading.Event()
+        lease_lost = threading.Event()
+
+        def heartbeat() -> None:
+            while not stopped.wait(EXECUTION_HEARTBEAT_SECONDS):
+                try:
+                    with closing(self._connect(immediate=True)) as db, db:
+                        active = db.execute(
+                            "UPDATE jobs SET heartbeat_at=? "
+                            "WHERE id=? AND status='running' AND run_token=?",
+                            (utc_now(), job_id, run_token),
+                        ).rowcount == 1
+                except sqlite3.Error:
+                    # A short SQLite writer overlap is transient; the next interval retries.
+                    continue
+                if not active:
+                    lease_lost.set()
+                    return
+
+        worker = threading.Thread(
+            target=heartbeat,
+            name=f"local-company-heartbeat-{job_id}",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            result = callback()
+        finally:
+            stopped.set()
+            worker.join(timeout=max(1.0, EXECUTION_HEARTBEAT_SECONDS * 2))
+        if lease_lost.is_set():
+            raise ExecutionLeaseLost(
+                f"Execution lease for job {job_id} was recovered or superseded "
+                f"during {stage}"
+            )
+        return result
 
     def _validated_report_finalization_paths(
         self, job_id: str, output_path: str, temporary_path: str,
@@ -7273,13 +7315,18 @@ class Company:
                     ], 12_000)
                     prompt += f"\n\nEarlier team work to build on or challenge:\n{prior_work}"
                 if strict_specialist_num_predict is not None:
-                    result = self.model.complete_bounded(
-                        system,
-                        prompt,
-                        num_predict=strict_specialist_num_predict,
+                    result = self._call_with_lease_heartbeat(
+                        job_id, run_token, f"{item.role}:model",
+                        lambda: self.model.complete_bounded(
+                            system, prompt,
+                            num_predict=strict_specialist_num_predict,
+                        ),
                     )
                 else:
-                    result = self.model.complete(system, prompt)
+                    result = self._call_with_lease_heartbeat(
+                        job_id, run_token, f"{item.role}:model",
+                        lambda: self.model.complete(system, prompt),
+                    )
                 original_word_count = count_words(result)
                 result_trimmed = False
                 applied_word_limit = specialist_word_limit
@@ -7500,8 +7547,12 @@ class Company:
                                     "start tasks with one accepted action verb listed above. "
                                     "Return a fresh object and do not reproduce the rejected object."
                                 )
-                            structured = complete_structured(
-                                structured_system, attempt_prompt, schema,
+                            structured = self._call_with_lease_heartbeat(
+                                job_id, run_token,
+                                f"executive-synthesis:structured-{structured_attempt}",
+                                lambda: complete_structured(
+                                    structured_system, attempt_prompt, schema,
+                                ),
                             )
                         try:
                             if not isinstance(structured, dict):
@@ -7631,10 +7682,13 @@ class Company:
                     "any required final phrase. Return only the final brief, never hidden reasoning."
                     + evidence_rule
                 )
-                synthesis = self.model.complete(
-                    chair_system,
-                    f"Objective: {objective}\n\nCompleted team work:\n{team_work}"
-                    + (f"\n\nFrozen evidence registry:\n{source_context}" if source_context else ""),
+                synthesis = self._call_with_lease_heartbeat(
+                    job_id, run_token, "executive-synthesis:model",
+                    lambda: self.model.complete(
+                        chair_system,
+                        f"Objective: {objective}\n\nCompleted team work:\n{team_work}"
+                        + (f"\n\nFrozen evidence registry:\n{source_context}" if source_context else ""),
+                    ),
                 )
                 synthesis_lower = synthesis.lower()
                 draft_sections = extract_labeled_sections(synthesis, required_labels)
@@ -7714,14 +7768,17 @@ class Company:
                     ending_rule = (
                         f"- End exactly with `{required_ending}`." if required_ending else ""
                     )
-                    synthesis = self.model.complete(
-                        "You are a strict local report editor. Rewrite the draft without adding any "
-                        "new fact, number, schedule, endpoint, tool, or claim. Preserve uncertainty "
-                        "and owner gates. Remove fake links, placeholder paths, UNK markers, and TODO "
-                        "text. Preserve only supplied [EVIDENCE:id] citations and never invent one. "
-                        "Return only the revised brief, never reasoning.",
-                        f"Objective:\n{objective}\n\nRequired format:\n{format_rules}\n"
-                        f"{word_rule}\n{ending_rule}\n\nDraft to rewrite:\n{synthesis}",
+                    synthesis = self._call_with_lease_heartbeat(
+                        job_id, run_token, "executive-synthesis:revision",
+                        lambda: self.model.complete(
+                            "You are a strict local report editor. Rewrite the draft without adding any "
+                            "new fact, number, schedule, endpoint, tool, or claim. Preserve uncertainty "
+                            "and owner gates. Remove fake links, placeholder paths, UNK markers, and TODO "
+                            "text. Preserve only supplied [EVIDENCE:id] citations and never invent one. "
+                            "Return only the revised brief, never reasoning.",
+                            f"Objective:\n{objective}\n\nRequired format:\n{format_rules}\n"
+                            f"{word_rule}\n{ending_rule}\n\nDraft to rewrite:\n{synthesis}",
+                        ),
                     )
             if ending_match and not structured_synthesis_applied:
                 normalized_synthesis = re.sub(r"[*_`]", "", synthesis).rstrip()
