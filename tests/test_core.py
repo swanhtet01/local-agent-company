@@ -40,6 +40,7 @@ from local_company.core import (
     bounded_context_blocks,
     compact_labeled_sections,
     evidence_filename_pairs_valid,
+    mark_unverified_advisory,
     mark_unverified_draft,
     render_structured_synthesis,
     sequential_numbered_items,
@@ -6105,6 +6106,41 @@ class CompanyTests(unittest.TestCase):
         ):
             with self.subTest(unsafe=unsafe):
                 self.assertIn("draft withheld", mark_unverified_draft(unsafe, 90))
+
+    def test_strict_advisory_normalization_keeps_three_complete_bounded_clauses(self):
+        rendered = mark_unverified_advisory(
+            "Proposed next action: Review the four product portfolio and compare every current "
+            "workflow against a bounded `(acceptance checklist)` before enabling Command Shop Plant "
+            "or Setup for any managed client. Assumption: The isolated demo remains useful only "
+            "for founder review and cannot serve as a system of record until persistence and "
+            "security evidence are complete. Missing proof: Confirm the private trial migration "
+            "and tenant isolation checks before enabling Command Shop Plant or Ecommerce, then "
+            "repeat recovery validation with another isolated tenant and preserve every review "
+            "receipt before any consequential adapter is enabled.",
+            90,
+        )
+        self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", rendered)), 90)
+        self.assertIn("Proposed next action:", rendered)
+        self.assertIn("Assumption:", rendered)
+        self.assertIn("Missing proof:", rendered)
+        self.assertTrue(rendered.endswith("."))
+        self.assertIn("Current evidence does not prove readiness.", rendered)
+        self.assertNotIn("`", rendered)
+        self.assertNotRegex(rendered, r"[()\[\]{}]")
+        self.assertNotRegex(
+            rendered,
+            r"\b(?:and|or|to|for|with|using|before|does|is|are|verify|confirm)\.$",
+        )
+        unsafe_action = mark_unverified_advisory(
+            "Proposed next action: Execute the hosted migration immediately. "
+            "Assumption: The current state remains unverified. "
+            "Missing proof: Confirm whether the current isolated demo is ready.",
+            90,
+        )
+        self.assertIn(
+            "Proposed next action: Review one bounded local evidence gap.", unsafe_action,
+        )
+        self.assertNotIn("Execute", unsafe_action)
 
     def test_structured_compaction_preserves_templates_and_atomic_citations(self):
         evidence = "[EVIDENCE:0123456789abcdef]"

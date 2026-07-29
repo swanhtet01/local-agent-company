@@ -811,6 +811,69 @@ def mark_unverified_draft(text: str, limit: int | None = None) -> str:
     return truncate_words("Not verified.", limit)[0]
 
 
+_DANGLING_ADVISORY_WORDS = {
+    "a", "an", "and", "are", "assuming", "at", "before", "can", "confirm", "could",
+    "currently", "does", "for", "from", "has", "have", "in", "is", "may", "might",
+    "must", "of", "on", "or", "should", "the", "to", "using", "verify", "whether",
+    "will", "with", "would",
+}
+
+
+def mark_unverified_advisory(text: str, limit: int = 90) -> str:
+    """Render three complete bounded advisory clauses without granting evidentiary status."""
+    rendered = mark_unverified_draft(text)
+    if "draft withheld" in rendered or "no substantive specialist draft" in rendered:
+        return mark_unverified_draft(text, limit)
+    body = rendered.removeprefix("Not verified or performed:").strip()
+    match = re.fullmatch(
+        r"Proposed next action\s*:\s*(.*?)\s*,?\s*Assumption\s*:\s*(.*?)"
+        r"\s*,?\s*Missing proof\s*:\s*(.*?)\.?",
+        body,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return mark_unverified_draft(text, limit)
+
+    def bounded_value(value: str, word_limit: int, fallback: str) -> str:
+        bounded, truncated = truncate_words(value.strip(" ,."), word_limit)
+        if truncated:
+            return fallback
+        bounded = re.sub(r"[`()\[\]{}]", "", bounded).strip(" ,.")
+        words = bounded.split()
+        while len(words) > 1 and words[-1].strip("`'\"(),:;.").casefold() in _DANGLING_ADVISORY_WORDS:
+            words.pop()
+        return " ".join(words).strip(" ,.")
+
+    raw_values = list(match.groups())
+    if re.match(
+        r"\s*(?:execute|deploy|publish|send|pay|purchase|migrate|enable)\b",
+        raw_values[0],
+        flags=re.IGNORECASE,
+    ):
+        raw_values[0] = "Review one bounded local evidence gap"
+    fallbacks = (
+        "Review one bounded local evidence gap",
+        "Current readiness remains unverified",
+        "Current evidence does not prove readiness",
+    )
+    for clause_limit in range(20, 7, -1):
+        values = [
+            bounded_value(value, clause_limit, fallbacks[index])
+            for index, value in enumerate(raw_values)
+        ]
+        if not all(values):
+            break
+        complete = (
+            f"Not verified or performed: Proposed next action: {values[0]}. "
+            f"Assumption: {values[1]}. Missing proof: {values[2]}."
+        )
+        if count_words(complete) <= limit:
+            return complete
+    return mark_unverified_draft(
+        "specialist draft withheld after advisory clause normalization failed", limit,
+    )
+
+
 def _proposal_clause(text: str, forbidden_source_names: set[str]) -> str:
     if any(ord(character) < 32 and character not in "\t\r\n" for character in text):
         raise ValueError("Structured synthesis contains control characters")
@@ -7104,7 +7167,7 @@ class Company:
                         )
                         isolation_status = "incomplete_withheld"
                     else:
-                        normalized = mark_unverified_draft(original, quarantine_limit)
+                        normalized = mark_unverified_advisory(original, quarantine_limit)
                         isolation_status = "unverified_not_performed"
                     normalized_results.append((item, normalized))
                     resumed_isolations.append(
@@ -7236,7 +7299,7 @@ class Company:
                         )
                         isolation_status = "incomplete_withheld"
                     else:
-                        result = mark_unverified_draft(result, quarantine_limit)
+                        result = mark_unverified_advisory(result, quarantine_limit)
                     result_trimmed = original_word_count > quarantine_limit
                 elif specialist_word_limit:
                     result, result_trimmed = truncate_words(result, specialist_word_limit)
