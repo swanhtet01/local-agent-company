@@ -1049,6 +1049,23 @@ def _structured_validation_code(error: BaseException) -> str:
     return "runtime_error"
 
 
+def _required_ending_from_objective(objective: str) -> str:
+    match = re.search(r"\bend with:\s*", objective, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    tail = objective[match.end():].strip()
+    if not tail:
+        return ""
+    if tail[0] in {'"', "'"}:
+        closing_quote = tail.find(tail[0], 1)
+        if closing_quote > 0:
+            return tail[1:closing_quote].strip()
+    sentence = re.match(r"(.+?[.!?])(?:\s+(?=[A-Z])|$)", tail, flags=re.DOTALL)
+    if sentence:
+        return " ".join(sentence.group(1).split()).strip('"\'')
+    return " ".join(tail.split()).strip('"\'')
+
+
 def _requires_strict_grounded_synthesis(objective: str) -> bool:
     objective_lower = objective.casefold()
     return bool(
@@ -5981,9 +5998,8 @@ class Company:
         checks["numeric_claims_labeled"] = all(
             any(label in line.lower() for label in claim_labels) for line in numeric_claim_lines
         )
-        ending_match = re.search(r"\bend with:\s*(.+?)\s*$", objective, flags=re.IGNORECASE)
-        if ending_match:
-            required_ending = ending_match.group(1).strip().strip("\"'")
+        required_ending = _required_ending_from_objective(objective)
+        if required_ending:
             normalized_synthesis = re.sub(r"[*_`]", "", job[2] or "").rstrip()
             checks["required_ending_present"] = bool(
                 normalized_synthesis.lower().endswith(required_ending.lower())
@@ -7419,7 +7435,6 @@ class Company:
             team_work = bounded_context_blocks([
                 f"{item.role.upper()}\n{result}" for item, result in results
             ], 24_000)
-            ending_match = re.search(r"\bend with:\s*(.+?)\s*$", objective, flags=re.IGNORECASE)
             synthesis_limit_match = re.search(
                 r"\bexecutive synthesis\b.*?\bat most\s+(\d+)\s+words?\b",
                 objective,
@@ -7427,7 +7442,7 @@ class Company:
             )
             synthesis_word_limit = int(synthesis_limit_match.group(1)) if synthesis_limit_match else None
             objective_lower = objective.lower()
-            required_ending = ending_match.group(1).strip().strip("\"'") if ending_match else ""
+            required_ending = _required_ending_from_objective(objective)
             required_labels: list[str] = []
             if "facts from assumptions" in objective_lower:
                 required_labels.extend(["Verified facts", "Assumptions"])
@@ -7800,7 +7815,7 @@ class Company:
                             f"{word_rule}\n{ending_rule}\n\nDraft to rewrite:\n{synthesis}",
                         ),
                     )
-            if ending_match and not structured_synthesis_applied:
+            if required_ending and not structured_synthesis_applied:
                 normalized_synthesis = re.sub(r"[*_`]", "", synthesis).rstrip()
                 if not normalized_synthesis.lower().endswith(required_ending.lower()):
                     synthesis = synthesis.rstrip() + "\n\n" + required_ending
@@ -7817,7 +7832,7 @@ class Company:
                         synthesis, required_labels, synthesis_word_limit, required_ending,
                         expected_templates,
                     )
-                elif ending_match:
+                elif required_ending:
                     ending_index = synthesis.lower().rfind(required_ending.lower())
                     base = synthesis[:ending_index].rstrip(" *_`\n") if ending_index >= 0 else synthesis
                     budget = max(1, synthesis_word_limit - count_words(required_ending))

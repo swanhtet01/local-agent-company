@@ -36,6 +36,7 @@ from local_company.core import (
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
+    _required_ending_from_objective,
     _requires_strict_grounded_synthesis,
     bounded_context_blocks,
     compact_labeled_sections,
@@ -5602,7 +5603,8 @@ class CompanyTests(unittest.TestCase):
             "reusable task template under Task templates, plus success checks, failure modes, "
             "and owner gates. Every verified claim must name its exact source filename and "
             "matching supplied evidence ID. Executive synthesis at most 120 words and end with: "
-            "Owner review required."
+            "Owner review required. Write each specialist section as complete sentences on one "
+            "line. The Proposed next action must begin with review, inspect, compare, or draft."
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5634,6 +5636,8 @@ class CompanyTests(unittest.TestCase):
             )
             self.assertEqual(validated["attempt"], 0)
             self.assertEqual(validated["fields"], [])
+            self.assertTrue(synthesis.endswith("Owner review required."))
+            self.assertNotIn("Write each specialist", synthesis)
 
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
         objective = (
@@ -6359,6 +6363,28 @@ class CompanyTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertLessEqual(len(re.findall(r"\b[\w'-]+\b", compacted)), 3)
         self.assertFalse(compacted.endswith("REQUIRED END"))
+
+    def test_required_ending_stops_before_following_instructions(self):
+        objective = (
+            "Executive synthesis at most 120 words and end with: Owner review required. "
+            "Write each specialist section as complete sentences on one line."
+        )
+        self.assertEqual(
+            _required_ending_from_objective(objective),
+            "Owner review required.",
+        )
+        self.assertEqual(
+            _required_ending_from_objective(
+                'Plan locally and end with: "Owner review required." Then stop.'
+            ),
+            "Owner review required.",
+        )
+        self.assertEqual(
+            _required_ending_from_objective(
+                "Plan inventory and end with: OWNER REVIEW REQUIRED"
+            ),
+            "OWNER REVIEW REQUIRED",
+        )
 
     def test_matching_evidence_filename_gate_rejects_mismatched_pair(self):
         mapping = {
