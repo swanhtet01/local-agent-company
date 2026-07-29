@@ -4640,6 +4640,7 @@ class CompanyTests(unittest.TestCase):
             def __init__(self):
                 super().__init__("qwen3.5:0.8b", num_predict=2048)
                 self.bounded_caps = []
+                self.specialist_systems = []
                 self.structured_prompts = []
 
             def complete(self, system, prompt):
@@ -4647,6 +4648,7 @@ class CompanyTests(unittest.TestCase):
 
             def complete_bounded(self, system, prompt, *, num_predict):
                 self.bounded_caps.append(num_predict)
+                self.specialist_systems.append(system)
                 self.last_metrics = {
                     "done": True, "done_reason": "length", "output_tokens": num_predict,
                     "num_predict": num_predict,
@@ -4694,7 +4696,7 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(evaluation["checks"]["evidence_filename_pairs_valid"])
             self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
             self.assertEqual(evaluation["incomplete_specialist_roles"], ["operations"])
-            self.assertEqual(model.bounded_caps, [512])
+            self.assertEqual(model.bounded_caps, [768])
             self.assertNotIn("UNTRUSTED_RAW_PARTIAL", model.structured_prompts[0])
             self.assertNotIn(
                 "UNTRUSTED_RAW_PARTIAL", report_path.read_text(encoding="utf-8"),
@@ -4716,7 +4718,7 @@ class CompanyTests(unittest.TestCase):
             operations_metrics = next(
                 metric for metric in metrics if metric.get("stage") == "operations"
             )
-            self.assertEqual(operations_metrics["num_predict"], 512)
+            self.assertEqual(operations_metrics["num_predict"], 768)
             self.assertEqual(operations_metrics["done_reason"], "length")
             policy_events = [
                 json.loads(event[1]) for event in company.job_detail(job_id)["events"]
@@ -4724,10 +4726,14 @@ class CompanyTests(unittest.TestCase):
             ]
             self.assertEqual(policy_events, [{
                 "configured_num_predict": 2048,
-                "effective_num_predict": 512,
+                "effective_num_predict": 768,
                 "policy": "strict-bounded-v1",
                 "role": "operations",
             }])
+            specialist_system = model.specialist_systems[0]
+            self.assertIn("Proposed next action", specialist_system)
+            self.assertIn("Missing proof", specialist_system)
+            self.assertNotIn("must carry a supplied [EVIDENCE:id]", specialist_system)
             projected = company.job_detail(job_id)["evaluation"]
             self.assertEqual(projected["incomplete_specialist_roles"], ["operations"])
             mission_page = render_mission_detail(company, job_id)
