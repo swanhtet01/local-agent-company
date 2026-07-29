@@ -1,5 +1,16 @@
 # Operator Runbook
 
+## One-project execution focus
+
+On a memory-constrained coordinator, activate one durable focus before allowing model-backed work:
+
+```powershell
+.\local-company.cmd focus set --project "SuperMega" --max-roles 4
+.\local-company.cmd focus show
+```
+
+The focus applies to `run`, `queue run-next`, `retry`, `resume`, and `benchmark`. A different or missing project, or a team wider than the role budget, is rejected before queue claim or model load. Read-only inspection, recovery, approvals, knowledge checks, and queue creation remain available. `focus clear` writes a disabled audit record instead of deleting the control. The focus is an admission boundary, not permission for external actions; existing owner gates still apply.
+
 ## Daily loop
 
 1. Check runtime: `.\local-company.cmd doctor`; use `benchmark --num-predict 128` after model or runtime changes.

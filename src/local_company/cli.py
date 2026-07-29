@@ -10,6 +10,13 @@ from pathlib import Path
 
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
+from .focus import (
+    EXECUTION_FOCUS_MAX_ROLES,
+    clear_execution_focus,
+    enforce_execution_focus,
+    read_execution_focus,
+    set_execution_focus,
+)
 
 
 DEFAULT_PROVIDER = os.getenv("LOCAL_COMPANY_PROVIDER", "ollama")
@@ -31,6 +38,13 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
+    focus_sub = focus.add_subparsers(dest="focus_command", required=True)
+    focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
+    focus_set.add_argument("--project", required=True)
+    focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=4)
+    focus_sub.add_parser("show", help="Show the bounded pathless execution focus")
+    focus_sub.add_parser("clear", help="Disable execution focus without deleting its audit record")
     route = sub.add_parser(
         "route", help="Preview an automatic or playbook team without calling a model"
     )
@@ -251,6 +265,7 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--model", default=DEFAULT_MODEL)
     benchmark = sub.add_parser("benchmark", help="Measure one local model generation")
     benchmark.add_argument("--prompt", default="Give three concise rules for reliable local AI work.")
+    benchmark.add_argument("--project", help="Required when an execution focus is active")
     add_runtime_args(benchmark)
     dashboard = sub.add_parser("dashboard", help="Serve a read-only operator view on 127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
@@ -304,17 +319,74 @@ def selected_model(args: argparse.Namespace):
     ) if getattr(args, "provider", "mock") == "ollama" else MockModel()
 
 
+def _project_identity(company: Company, project: str | None) -> tuple[str | None, str | None]:
+    if project is None:
+        return None, None
+    detail = company.project_detail(project)["project"]
+    return str(detail[0]), str(detail[1])
+
+
+def _enforce_cli_execution_focus(company: Company, args: argparse.Namespace) -> None:
+    model_backed_commands = {"run", "retry", "resume", "benchmark"}
+    if args.command == "queue":
+        if args.queue_command != "run-next":
+            return
+    elif args.command not in model_backed_commands:
+        return
+    focus = read_execution_focus(company.home)
+    if not focus["enabled"]:
+        return
+    project_id: str | None = None
+    roles: list[str] = []
+    action = args.command
+    if args.command == "run":
+        project_id, _ = _project_identity(company, args.project)
+        roles = (
+            [role.strip() for role in args.roles.split(",") if role.strip()]
+            if args.roles else list(Company.routing_preview(args.objective)["roles"])
+        )
+    elif args.command == "queue" and args.queue_command == "run-next":
+        preview = company.queue_preflight(args.queue_id)
+        if preview["queue_id"] is None or preview["reviewed_queue_matches"] is False:
+            return
+        project_id = preview["project_id"]
+        roles = list(preview["team"]["roles"])
+        action = "queue run-next"
+    elif args.command in {"retry", "resume"}:
+        detail = company.job_detail(args.job_id)
+        project_name = detail["job"][6]
+        project_id, _ = _project_identity(company, project_name)
+        roles = [str(assignment[1]) for assignment in detail["assignments"]]
+    elif args.command == "benchmark":
+        project_id, _ = _project_identity(company, args.project)
+        roles = ["benchmark"]
+    else:
+        return
+    enforce_execution_focus(focus, project_id, roles, action)
+
+
 def main() -> int:
     try:
         args = parser().parse_args()
         company_home = args.home if args.home is not None else default_company_home()
         company = Company(company_home.resolve(), selected_model(args))
+        _enforce_cli_execution_focus(company, args)
         if args.command == "init":
             company.initialize()
             print(f"Initialized local company at {company.home}")
         elif args.command == "roles":
             for name, purpose in ROLES.items():
                 print(f"{name:16} {purpose}")
+        elif args.command == "focus":
+            if args.focus_command == "set":
+                project_id, project_name = _project_identity(company, args.project)
+                print(json.dumps(set_execution_focus(
+                    company.home, str(project_id), str(project_name), args.max_roles,
+                ), indent=2))
+            elif args.focus_command == "show":
+                print(json.dumps(read_execution_focus(company.home), indent=2))
+            elif args.focus_command == "clear":
+                print(json.dumps(clear_execution_focus(company.home), indent=2))
         elif args.command == "route":
             print(json.dumps(Company.routing_preview(args.objective, args.playbook), indent=2))
         elif args.command == "preflight":
