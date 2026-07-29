@@ -26,6 +26,7 @@ from .config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA,
     read_validated_company_instance_id, valid_company_instance_id,
 )
+from .focus import enforce_execution_focus, read_execution_focus
 from .spreadsheet import SpreadsheetError, profile_xlsx, read_stable_local_file
 
 
@@ -4635,6 +4636,17 @@ class Company:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
                 blockers.append("queued_mission_invalid")
 
+        if "queued_mission_invalid" not in blockers:
+            try:
+                enforce_execution_focus(
+                    read_execution_focus(self.home),
+                    project_id if isinstance(project_id, str) else None,
+                    team["roles"],
+                    "queue run-next",
+                )
+            except RuntimeError:
+                blockers.append("execution_focus_mismatch")
+
         knowledge = self._unchecked_preflight_knowledge()
         can_check_knowledge = not blockers and not owner_gate_categories
         if can_check_knowledge:
@@ -6964,6 +6976,11 @@ class Company:
         if len(objective) > MAX_OBJECTIVE_CHARS:
             raise ValueError(f"Objective cannot exceed {MAX_OBJECTIVE_CHARS} characters")
         project_id, project_name = self._resolve_project(project) if project else (None, None)
+        assignments = self.plan(objective, roles)
+        enforce_execution_focus(
+            read_execution_focus(self.home), project_id,
+            [assignment.role for assignment in assignments], "run",
+        )
         blocked = self.sensitive_categories(objective)
         if blocked:
             request_id = self.request_action(objective)
@@ -6973,7 +6990,6 @@ class Company:
         _, knowledge_scope_rows = self._require_current_knowledge(project_id)
         job_id = uuid.uuid4().hex[:12]
         run_token = _run_token or uuid.uuid4().hex
-        assignments = self.plan(objective, roles)
         sources = self.search_knowledge(
             objective, limit=RUN_KNOWLEDGE_HIT_LIMIT, project=project,
         )
@@ -7017,6 +7033,10 @@ class Company:
         with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db)
             self._ensure_no_active_queue_claim(db, _queue_id)
+            enforce_execution_focus(
+                read_execution_focus(self.home), project_id,
+                [assignment.role for assignment in assignments], "run",
+            )
             transaction_knowledge_rows = self._require_unchanged_current_knowledge_scope(
                 db, project_id, knowledge_scope_rows,
             )
@@ -7939,6 +7959,10 @@ class Company:
             ))
         assignments = [Assignment(row[0], row[1], row[2], row[3]) for row in rows]
         results = [(assignments[index], row[4]) for index, row in enumerate(rows) if row[5] == "complete" and row[4]]
+        enforce_execution_focus(
+            read_execution_focus(self.home), job[2],
+            [assignment.role for assignment in assignments], "resume",
+        )
         _, resume_knowledge_rows = self._require_current_knowledge(job[2])
         frozen_manifest = self._load_evidence_manifest(job_id)
         if frozen_manifest:
@@ -7959,6 +7983,10 @@ class Company:
         with closing(self._connect(immediate=True)) as db, db:
             self._ensure_no_active_job(db, job_id)
             self._ensure_no_active_queue_claim(db)
+            enforce_execution_focus(
+                read_execution_focus(self.home), job[2],
+                [assignment.role for assignment in assignments], "resume",
+            )
             self._require_unchanged_current_knowledge_scope(
                 db, job[2], resume_knowledge_rows,
             )

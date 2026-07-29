@@ -105,6 +105,38 @@ class ExecutionFocusTests(unittest.TestCase):
             self.assertIn("at most 4 roles", stderr.getvalue())
             self.assertEqual([row[0] for row in company.queue_items("queued")], [queue_id])
 
+    def test_core_queue_preflight_and_claim_deny_unfocused_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            focused_id = company.create_project("SuperMega")
+            company.create_project("SuperMega Vision")
+            queue_id = company.enqueue(
+                "Prepare a Vision brief", "SuperMega Vision", ["quality"], priority=90,
+            )
+            set_execution_focus(home, focused_id, "SuperMega", 4)
+
+            preflight = company.queue_preflight(queue_id)
+            self.assertEqual(preflight["status"], "blocked")
+            self.assertIn("execution_focus_mismatch", preflight["blockers"])
+            self.assertFalse(preflight["effects"]["state_mutated"])
+            with self.assertRaisesRegex(RuntimeError, "execution_focus_mismatch"):
+                company.claim_next_queue_item(queue_id)
+            self.assertEqual([row[0] for row in company.queue_items("queued")], [queue_id])
+            self.assertEqual(company.health_snapshot()["active_jobs"], 0)
+
+    def test_core_run_denies_unfocused_project_before_job_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            focused_id = company.create_project("SuperMega")
+            company.create_project("SuperMega Vision")
+            set_execution_focus(home, focused_id, "SuperMega", 4)
+
+            with self.assertRaisesRegex(RuntimeError, "denied before model load"):
+                company.run("Prepare a concise brief", roles=["quality"], project="SuperMega Vision")
+            self.assertEqual(company.health_snapshot()["active_jobs"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
