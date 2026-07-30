@@ -62,7 +62,7 @@ $env:LOCAL_COMPANY_PROVIDER = "ollama"
 $env:LOCAL_COMPANY_MODEL = "qwen3.5:0.8b"
 $env:LOCAL_COMPANY_NUM_CTX = "4096"
 $env:LOCAL_COMPANY_NUM_PREDICT = "512"
-$env:LOCAL_COMPANY_KEEP_ALIVE = "30s"
+$env:LOCAL_COMPANY_KEEP_ALIVE = "0s"
 ```
 
 ## Create a project workspace
