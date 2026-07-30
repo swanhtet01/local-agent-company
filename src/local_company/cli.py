@@ -43,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
     focus_set.add_argument("--project", required=True)
-    focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=1)
+    focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=4)
     focus_sub.add_parser("show", help="Show the bounded pathless execution focus")
     focus_sub.add_parser("clear", help="Disable execution focus without deleting its audit record")
     route = sub.add_parser(

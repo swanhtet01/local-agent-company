@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from local_company.cli import main
+from local_company.cli import main, parser
 from local_company.core import Company, MockModel
 from local_company.focus import (
     EXECUTION_FOCUS_FILENAME,
@@ -22,6 +22,10 @@ from local_company.focus import (
 
 
 class ExecutionFocusTests(unittest.TestCase):
+    def test_cli_focus_defaults_to_four_serial_roles(self):
+        args = parser().parse_args(["focus", "set", "--project", "0123456789ab"])
+        self.assertEqual(args.max_roles, 4)
+
     def test_focus_round_trip_is_bounded_and_clear_preserves_audit_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

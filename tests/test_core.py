@@ -1078,8 +1078,8 @@ class CompanyTests(unittest.TestCase):
             service_args = parser().parse_args(["service", "start"])
         self.assertIsNone(service_args.home)
         self.assertEqual(service_args.num_ctx, 4096)
-        self.assertEqual(service_args.num_predict, 2048)
-        self.assertEqual(service_args.keep_alive, "30s")
+        self.assertEqual(service_args.num_predict, 768)
+        self.assertEqual(service_args.keep_alive, "0s")
 
         model = OllamaModel("qwen3.5:0.8b")
         self.assertEqual(model.num_ctx, 4096)
