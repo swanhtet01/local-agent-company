@@ -3646,6 +3646,7 @@ class CompanyTests(unittest.TestCase):
                 "scripts/check_runtime_supervisor.py",
                 "scripts/runtime_guard.py", "scripts/stamp_build_manifest.py",
                 "src/local_company/__init__.py", "src/local_company/cli.py",
+                "src/local_company/capacity.py",
                 "src/local_company/config.py", "src/local_company/core.py",
                 "src/local_company/dashboard.py", "src/local_company/service.py",
                 "src/local_company/focus.py", "src/local_company/spreadsheet.py",

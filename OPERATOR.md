@@ -9,6 +9,14 @@ On a memory-constrained coordinator, activate one durable focus before allowing 
 .\local-company.cmd focus show
 ```
 
+Before admitting another local company cycle, run the read-only machine envelope:
+
+```powershell
+.\local-company.cmd capacity --project "SuperMega"
+```
+
+It combines the execution focus, one-at-a-time work counters, verified service identity, duplicate listener inventory for the SuperMega frontend/backend, local company service and Ollama, loaded-model inventory, physical-memory headroom, evidence freshness, and the operator brief's next action. Registered roles are definitions and create no resident role processes. Any unavailable observation is `indeterminate`; duplicate listeners, an idle loaded model, less than 1 GiB available memory, focus drift, or company attention fails admission without starting or stopping anything.
+
 The focus applies to `run`, `queue run-next`, `retry`, `resume`, and `benchmark`. A different or missing project, or a team wider than the role budget, is rejected before queue claim or model load. Read-only inspection, recovery, approvals, knowledge checks, and queue creation remain available. `focus show` returns the validated focus plus its SHA-256 digest. Repeating the exact active `focus set` is idempotent; changing an active project or role budget with `focus set` fails closed.
 
 Switch only after the current work and completion journals are idle. Copy the exact digest from a fresh `focus show`, then run one explicit compare-and-swap handoff:

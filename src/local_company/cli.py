@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from .capacity import machine_capacity_snapshot
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 from .focus import (
@@ -304,6 +305,10 @@ def parser() -> argparse.ArgumentParser:
         "brief", help="Show one pathless project operating brief and next action"
     )
     brief.add_argument("--project", required=True)
+    capacity = sub.add_parser(
+        "capacity", help="Prove the bounded Ally runtime and company admission state"
+    )
+    capacity.add_argument("--project", required=True)
     health = sub.add_parser("health", help="Show local storage, model, queue, and runtime health")
     add_runtime_args(health)
     export = sub.add_parser("export", help="Write a portable audit JSON and SHA-256 manifest")
@@ -734,6 +739,8 @@ def main() -> int:
             print(json.dumps(result, indent=2))
         elif args.command == "brief":
             print(json.dumps(company.operator_brief(args.project), indent=2))
+        elif args.command == "capacity":
+            print(json.dumps(machine_capacity_snapshot(company, args.project), indent=2))
         elif args.command == "health":
             print(json.dumps(company.health_snapshot(), indent=2))
         elif args.command == "export":

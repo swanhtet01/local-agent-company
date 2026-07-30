@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+from local_company.capacity import build_capacity_snapshot, parse_windows_listeners
+from local_company.cli import main
+from local_company.core import Company, MockModel
+
+
+def ready_inputs() -> dict[str, dict[str, object]]:
+    return {
+        "brief": {
+            "status": "ready",
+            "project_id": "0123456789ab",
+            "next_action": "queue_or_schedule_reviewed_mission",
+        },
+        "focus": {
+            "enabled": True,
+            "projectId": "0123456789ab",
+            "maxRoles": 4,
+        },
+        "health": {"active_jobs": 0, "running_missions": 0},
+        "listeners": {
+            "status": "ready",
+            "counts": {"5173": 1, "8765": 1, "8788": 1, "11434": 1},
+        },
+        "loaded_models": {"status": "ready", "loaded_count": 0},
+        "memory": {
+            "status": "ready",
+            "total_bytes": 16 * 1024**3,
+            "available_bytes": 4 * 1024**3,
+        },
+        "service": {
+            "status": "running",
+            "live": True,
+            "process_identity_status": "match",
+        },
+    }
+
+
+class CapacityTests(unittest.TestCase):
+    def test_ready_snapshot_proves_serial_zero_resident_role_contract(self) -> None:
+        result = build_capacity_snapshot(**ready_inputs())
+        self.assertEqual(result["schema"], "local-company.machine-capacity.v1")
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["company"]["execution_parallelism"], 1)
+        self.assertEqual(result["company"]["resident_role_processes"], 0)
+        self.assertGreaterEqual(result["company"]["registered_roles"], 10)
+        self.assertEqual(result["blockers"], [])
+        self.assertFalse(any(result["effects"].values()))
+
+    def test_duplicate_listener_idle_model_and_low_memory_fail_closed(self) -> None:
+        values = ready_inputs()
+        values["listeners"]["counts"]["5173"] = 2
+        values["loaded_models"]["loaded_count"] = 1
+        values["memory"]["available_bytes"] = 512 * 1024**2
+        result = build_capacity_snapshot(**values)
+        self.assertEqual(result["status"], "attention_required")
+        self.assertIn("duplicate_listener_5173", result["blockers"])
+        self.assertIn("idle_model_loaded", result["blockers"])
+        self.assertIn("memory_headroom_below_1gib", result["blockers"])
+        self.assertEqual(result["next_action"], "review_duplicate_local_runtime")
+
+    def test_unavailable_observation_is_indeterminate(self) -> None:
+        values = ready_inputs()
+        values["listeners"] = {
+            "status": "unavailable",
+            "counts": {"5173": None, "8765": None, "8788": None, "11434": None},
+        }
+        values["loaded_models"] = {"status": "unavailable", "loaded_count": None}
+        result = build_capacity_snapshot(**values)
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertIn("listener_inventory_unavailable", result["indeterminate"])
+        self.assertIn("loaded_model_inventory_unavailable", result["indeterminate"])
+
+    def test_netstat_parser_counts_unique_listener_owners(self) -> None:
+        output = "\n".join([
+            "  TCP    127.0.0.1:5173       0.0.0.0:0       LISTENING       100",
+            "  TCP    127.0.0.1:5173       0.0.0.0:0       LISTENING       100",
+            "  TCP    127.0.0.1:5173       0.0.0.0:0       LISTENING       101",
+            "  TCP    127.0.0.1:8765       0.0.0.0:0       LISTENING       200",
+            "  UDP    127.0.0.1:8788       *:*                             300",
+        ])
+        self.assertEqual(parse_windows_listeners(output), {
+            5173: 2, 8765: 1, 8788: 0, 11434: 0,
+        })
+
+    def test_cli_exposes_capacity_without_model_or_state_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            company.create_project("SuperMega")
+            expected = build_capacity_snapshot(**ready_inputs())
+            argv = [
+                "local-company", "--home", str(home), "capacity",
+                "--project", "SuperMega",
+            ]
+            stdout = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                patch("local_company.cli.machine_capacity_snapshot", return_value=expected),
+                redirect_stdout(stdout),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(main(), 0)
+            self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()
