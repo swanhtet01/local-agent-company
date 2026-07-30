@@ -344,7 +344,7 @@ _GROUNDING_STOPWORDS = {
     "more", "must", "not", "only", "other", "our", "owner", "provided", "ready",
     "scaling", "should", "source", "standard", "still", "such", "system", "template",
     "than", "that", "the", "their", "there", "these", "they", "this", "those", "through",
-    "record", "trial", "under", "until", "verified", "via", "was", "were", "will", "with", "without",
+    "evidence", "produce", "record", "supermega", "trial", "under", "until", "verified", "via", "vision", "was", "were", "will", "with", "without",
     "would", "you", "your",
 }
 
@@ -7205,8 +7205,10 @@ class Company:
         )
         evidence_rule = (
             " Any positive claim using verified, confirmed, validated, passed, ready, active, "
-            "operational, connected, wired, or no errors must carry a supplied [EVIDENCE:id] "
-            "in the same sentence. Never invent an evidence ID or pair one with a different "
+            "operational, connected, wired, or no errors must carry a supplied citation in "
+            "the exact [EVIDENCE:0123456789abcdef] shape in the same sentence. Replace that "
+            "example with one supplied 16-character ID; never write [EVIDENCE:id]. Never "
+            "invent an evidence ID or pair one with a different "
             "source filename; copy only an exact filename and ID pair from the frozen registry, "
             "with the filename immediately before its matching ID. Use one verified claim per "
             "sentence; never attach an uncited claim to a cited clause."
@@ -7826,7 +7828,9 @@ class Company:
                             "You are a strict local report editor. Rewrite the draft without adding any "
                             "new fact, number, schedule, endpoint, tool, or claim. Preserve uncertainty "
                             "and owner gates. Remove fake links, placeholder paths, UNK markers, and TODO "
-                            "text. Preserve only supplied [EVIDENCE:id] citations and never invent one. "
+                            "text. Preserve only supplied citations in the exact "
+                            "[EVIDENCE:0123456789abcdef] shape, replacing that example with a "
+                            "supplied 16-character ID. Never write [EVIDENCE:id] or invent an ID. "
                             "Return only the revised brief, never reasoning.",
                             f"Objective:\n{objective}\n\nRequired format:\n{format_rules}\n"
                             f"{word_rule}\n{ending_rule}\n\nDraft to rewrite:\n{synthesis}",

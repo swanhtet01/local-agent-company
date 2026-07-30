@@ -1025,6 +1025,14 @@ class CompanyTests(unittest.TestCase):
             worker.cancel_shutdown()
 
     def test_negative_evidence_claim_is_not_misclassified_as_completion(self):
+        generic_overlap = source_limitation_conflicts(
+            "Use current SuperMega Vision evidence to produce a planning brief.",
+            [
+                ("training.md", "SuperMega Vision checks dataset fitness before training."),
+                ("selling.md", "Week four produces an evidence report and go/no-go recommendation."),
+            ],
+        )
+        self.assertEqual(generic_overlap, [])
         findings = source_limitation_conflicts(
             "Verified facts: No telemetry or hosted activation is ready in the current evidence.",
             [("activation.md", "This is a local release gate, not hosted activation.")],
