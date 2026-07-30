@@ -11,10 +11,13 @@ from pathlib import Path
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 from .focus import (
+    EXECUTION_FOCUS_HANDOFF_CONFIRMATION,
     EXECUTION_FOCUS_MAX_ROLES,
     clear_execution_focus,
     enforce_execution_focus,
     enforce_execution_resource_envelope,
+    execution_focus_digest,
+    handoff_execution_focus,
     read_execution_focus,
     set_execution_focus,
 )
@@ -44,8 +47,18 @@ def parser() -> argparse.ArgumentParser:
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
     focus_set.add_argument("--project", required=True)
     focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=4)
+    focus_handoff = focus_sub.add_parser("handoff", help="Atomically switch one active focus")
+    focus_handoff.add_argument("--from-project", required=True)
+    focus_handoff.add_argument("--project", required=True)
+    focus_handoff.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=4)
+    focus_handoff.add_argument("--expected-focus-digest", required=True)
+    focus_handoff.add_argument("--reason", required=True)
+    focus_handoff.add_argument("--confirm", required=True, choices=[EXECUTION_FOCUS_HANDOFF_CONFIRMATION])
     focus_sub.add_parser("show", help="Show the bounded pathless execution focus")
-    focus_sub.add_parser("clear", help="Disable execution focus without deleting its audit record")
+    focus_clear = focus_sub.add_parser("clear", help="Disable active focus with a digest-bound audit record")
+    focus_clear.add_argument("--expected-focus-digest", required=True)
+    focus_clear.add_argument("--reason", required=True)
+    focus_clear.add_argument("--confirm", required=True, choices=[EXECUTION_FOCUS_HANDOFF_CONFIRMATION])
     route = sub.add_parser(
         "route", help="Preview an automatic or playbook team without calling a model"
     )
@@ -377,6 +390,28 @@ def _enforce_cli_execution_focus(company: Company, args: argparse.Namespace) -> 
     enforce_execution_focus(focus, project_id, roles, action)
 
 
+def _assert_focus_mutation_idle(company: Company) -> None:
+    health = company.health_snapshot()
+    if (
+        health.get("active_jobs") != 0
+        or health.get("running_missions") != 0
+        or health.get("pending_report_finalizations") != 0
+        or health.get("pending_evaluations") != 0
+        or health.get("pending_completion") != []
+    ):
+        raise RuntimeError(
+            "Execution focus cannot change while local work is active or completing"
+        )
+
+
+def _focus_output(focus: dict[str, object]) -> dict[str, object]:
+    return {
+        "contract": "local-company.execution-focus-observation.v1",
+        "focus": focus,
+        "focusDigest": execution_focus_digest(focus),
+    }
+
+
 def main() -> int:
     try:
         args = parser().parse_args()
@@ -392,13 +427,29 @@ def main() -> int:
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)
-                print(json.dumps(set_execution_focus(
+                print(json.dumps(_focus_output(set_execution_focus(
                     company.home, str(project_id), str(project_name), args.max_roles,
-                ), indent=2))
+                )), indent=2))
+            elif args.focus_command == "handoff":
+                _assert_focus_mutation_idle(company)
+                from_project_id, _ = _project_identity(company, args.from_project)
+                to_project_id, to_project_name = _project_identity(company, args.project)
+                print(json.dumps(_focus_output(handoff_execution_focus(
+                    company.home,
+                    str(from_project_id),
+                    str(to_project_id),
+                    str(to_project_name),
+                    args.max_roles,
+                    args.expected_focus_digest,
+                    args.reason,
+                )), indent=2))
             elif args.focus_command == "show":
-                print(json.dumps(read_execution_focus(company.home), indent=2))
+                print(json.dumps(_focus_output(read_execution_focus(company.home)), indent=2))
             elif args.focus_command == "clear":
-                print(json.dumps(clear_execution_focus(company.home), indent=2))
+                _assert_focus_mutation_idle(company)
+                print(json.dumps(_focus_output(clear_execution_focus(
+                    company.home, args.expected_focus_digest, args.reason,
+                )), indent=2))
         elif args.command == "route":
             print(json.dumps(Company.routing_preview(args.objective, args.playbook), indent=2))
         elif args.command == "preflight":

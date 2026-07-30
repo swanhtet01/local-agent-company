@@ -12,10 +12,13 @@ from unittest.mock import patch
 from local_company.cli import main, parser
 from local_company.core import Company, MockModel
 from local_company.focus import (
+    EXECUTION_FOCUS_HANDOFF_CONFIRMATION,
     EXECUTION_FOCUS_FILENAME,
     clear_execution_focus,
     enforce_execution_focus,
     enforce_execution_resource_envelope,
+    execution_focus_digest,
+    handoff_execution_focus,
     read_execution_focus,
     set_execution_focus,
 )
@@ -32,11 +35,78 @@ class ExecutionFocusTests(unittest.TestCase):
             self.assertFalse(read_execution_focus(home)["enabled"])
             active = set_execution_focus(home, "0123456789ab", "SuperMega", 6)
             self.assertTrue(active["enabled"])
+            self.assertEqual(active["revision"], 1)
             self.assertEqual(read_execution_focus(home), active)
-            cleared = clear_execution_focus(home)
+            active_digest = execution_focus_digest(active)
+            cleared = clear_execution_focus(
+                home, active_digest, "Pause model-backed company work for maintenance.",
+            )
             self.assertFalse(cleared["enabled"])
+            self.assertEqual(cleared["revision"], 2)
+            self.assertEqual(cleared["handoff"]["priorFocusDigest"], active_digest)
             self.assertTrue((home / EXECUTION_FOCUS_FILENAME).is_file())
             self.assertEqual(read_execution_focus(home), cleared)
+
+    def test_active_focus_requires_digest_bound_handoff_and_rejects_stale_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            current = set_execution_focus(home, "0123456789ab", "SuperMega", 4)
+            with self.assertRaisesRegex(RuntimeError, "explicit digest-bound handoff"):
+                set_execution_focus(home, "abcdef012345", "Other", 4)
+            current_digest = execution_focus_digest(current)
+            handed_off = handoff_execution_focus(
+                home,
+                "0123456789ab",
+                "abcdef012345",
+                "Other",
+                2,
+                current_digest,
+                "Move the single active company outcome to the reviewed project.",
+            )
+            self.assertEqual(handed_off["projectId"], "abcdef012345")
+            self.assertEqual(handed_off["revision"], current["revision"] + 1)
+            self.assertEqual(handed_off["handoff"]["priorFocusDigest"], current_digest)
+            with self.assertRaisesRegex(RuntimeError, "changed; refresh"):
+                handoff_execution_focus(
+                    home,
+                    "0123456789ab",
+                    "fedcba543210",
+                    "Stale target",
+                    1,
+                    current_digest,
+                    "Attempt a stale concurrent handoff after the focus changed.",
+                )
+
+    def test_legacy_focus_is_normalized_without_rewriting_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = home / EXECUTION_FOCUS_FILENAME
+            legacy = {
+                "schema": "local-company.execution-focus.v1",
+                "enabled": True,
+                "projectId": "0123456789ab",
+                "projectName": "SuperMega",
+                "maxRoles": 4,
+                "updatedAt": "2026-07-30T00:00:00+00:00",
+                "controls": {
+                    "modelBackedCommandsOnly": True,
+                    "externalWritesAllowed": False,
+                    "bypassAllowed": False,
+                },
+            }
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            normalized = read_execution_focus(home)
+            self.assertEqual(normalized["schema"], "local-company.execution-focus.v2")
+            self.assertEqual(normalized["revision"], 1)
+            self.assertIsNone(normalized["handoff"])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), legacy)
+
+    def test_focus_mutation_rejects_unsafe_lock_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".execution-focus.lock").mkdir()
+            with self.assertRaises((IsADirectoryError, RuntimeError, PermissionError)):
+                set_execution_focus(home, "0123456789ab", "SuperMega", 4)
 
     def test_focus_rejects_wrong_project_missing_project_and_oversized_team(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,10 +158,51 @@ class ExecutionFocusTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "controls are invalid"):
                 read_execution_focus(home)
-            argv = ["local-company", "--home", str(home), "focus", "clear"]
-            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+            argv = [
+                "local-company", "--home", str(home), "focus", "clear",
+                "--expected-focus-digest", f"sha256:{'0' * 64}",
+                "--reason", "Reject and investigate the tampered focus control.",
+                "--confirm", EXECUTION_FOCUS_HANDOFF_CONFIRMATION,
+            ]
+            stderr = io.StringIO()
+            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                self.assertEqual(main(), 2)
+            self.assertIn("controls are invalid", stderr.getvalue())
+            self.assertTrue(path.is_file())
+
+    def test_cli_handoff_requires_idle_runtime_and_exact_current_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            source_id = company.create_project("SuperMega")
+            target_id = company.create_project("Reviewed next project")
+            current = set_execution_focus(home, source_id, "SuperMega", 4)
+            argv = [
+                "local-company", "--home", str(home), "focus", "handoff",
+                "--from-project", "SuperMega", "--project", "Reviewed next project",
+                "--max-roles", "2", "--expected-focus-digest", execution_focus_digest(current),
+                "--reason", "Move the reviewed company outcome after current work completed.",
+                "--confirm", EXECUTION_FOCUS_HANDOFF_CONFIRMATION,
+            ]
+            stdout = io.StringIO()
+            with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
                 self.assertEqual(main(), 0)
-            self.assertFalse(read_execution_focus(home)["enabled"])
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["contract"], "local-company.execution-focus-observation.v1")
+            self.assertEqual(output["focus"]["projectId"], target_id)
+            self.assertEqual(output["focus"]["maxRoles"], 2)
+
+            with patch.object(Company, "health_snapshot", return_value={
+                "active_jobs": 1,
+                "running_missions": 0,
+                "pending_report_finalizations": 0,
+                "pending_evaluations": 0,
+                "pending_completion": [],
+            }):
+                stderr = io.StringIO()
+                with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    self.assertEqual(main(), 2)
+                self.assertIn("while local work is active", stderr.getvalue())
 
     def test_cli_denies_unfocused_queue_before_claim_or_model_call(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,7 +9,21 @@ On a memory-constrained coordinator, activate one durable focus before allowing 
 .\local-company.cmd focus show
 ```
 
-The focus applies to `run`, `queue run-next`, `retry`, `resume`, and `benchmark`. A different or missing project, or a team wider than the role budget, is rejected before queue claim or model load. Read-only inspection, recovery, approvals, knowledge checks, and queue creation remain available. `focus clear` writes a disabled audit record instead of deleting the control. The focus is an admission boundary, not permission for external actions; existing owner gates still apply.
+The focus applies to `run`, `queue run-next`, `retry`, `resume`, and `benchmark`. A different or missing project, or a team wider than the role budget, is rejected before queue claim or model load. Read-only inspection, recovery, approvals, knowledge checks, and queue creation remain available. `focus show` returns the validated focus plus its SHA-256 digest. Repeating the exact active `focus set` is idempotent; changing an active project or role budget with `focus set` fails closed.
+
+Switch only after the current work and completion journals are idle. Copy the exact digest from a fresh `focus show`, then run one explicit compare-and-swap handoff:
+
+```powershell
+.\local-company.cmd focus handoff `
+  --from-project "SuperMega" `
+  --project "REVIEWED-NEXT-PROJECT" `
+  --max-roles 4 `
+  --expected-focus-digest "sha256:REPLACE-WITH-CURRENT-DIGEST" `
+  --reason "Move the single active company outcome after current work completed." `
+  --confirm "HANDOFF ACTIVE EXECUTION FOCUS"
+```
+
+A stale digest, wrong source, same target, active job, running queue claim, or pending report/evaluation rejects the handoff before mutation. The new focus atomically retains its prior digest, source project, reason, authorization time, and monotonic revision. `focus clear` requires the same digest, reason, confirmation, and idle checks; it writes a disabled audit record instead of deleting the control. The focus remains an admission boundary, not permission for external actions; existing owner gates still apply.
 
 ## Daily loop
 
@@ -23,7 +37,7 @@ The focus applies to `run`, `queue run-next`, `retry`, `resume`, and `benchmark`
 8. Periodically write an audit export to an approved local or removable destination and verify its SHA-256 manifest.
 9. Perform approved real-world actions yourself until a separately audited executor exists.
 
-The default 4K context and 30-second model keep-alive are the Ally-safe profile. Increase either only for one measured mission, then return to the defaults so an idle local team does not reserve shared memory.
+The Ally-safe profile is a 4K context, 768-token output ceiling, and zero-second model keep-alive. The focus supports four serial roles by default and six at the hard maximum; it does not create resident subagents. Do not increase these limits on this coordinator without a separately measured and reviewed profile.
 
 Repeated direct runs reuse a prior 24-hour report only when its inputs, stable model identity/configuration, current evaluator pass, and sealed bytes all match. Legacy, failed, changed, moved, or uncacheable work runs fresh. Use `retry JOB_ID` deliberately when the prior result—not the inputs—needs another model attempt.
 
