@@ -14,6 +14,7 @@ from .focus import (
     EXECUTION_FOCUS_MAX_ROLES,
     clear_execution_focus,
     enforce_execution_focus,
+    enforce_execution_resource_envelope,
     read_execution_focus,
     set_execution_focus,
 )
@@ -42,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
     focus_set.add_argument("--project", required=True)
-    focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=4)
+    focus_set.add_argument("--max-roles", type=int, choices=range(1, EXECUTION_FOCUS_MAX_ROLES + 1), default=1)
     focus_sub.add_parser("show", help="Show the bounded pathless execution focus")
     focus_sub.add_parser("clear", help="Disable execution focus without deleting its audit record")
     route = sub.add_parser(
@@ -299,7 +300,7 @@ def parser() -> argparse.ArgumentParser:
     service_start = service_sub.add_parser("start", help="Start the localhost dashboard in the background")
     service_start.add_argument("--port", type=int, default=8765)
     add_runtime_args(service_start)
-    service_start.set_defaults(num_predict=int(os.getenv("LOCAL_COMPANY_SERVICE_NUM_PREDICT", "2048")))
+    service_start.set_defaults(num_predict=int(os.getenv("LOCAL_COMPANY_SERVICE_NUM_PREDICT", "768")))
     service_sub.add_parser("status", help="Verify the recorded PID against localhost health")
     service_sub.add_parser("stop", help="Stop the recorded service using its local secret")
     return p
@@ -310,7 +311,7 @@ def add_runtime_args(command: argparse.ArgumentParser) -> None:
     command.add_argument("--model", default=DEFAULT_MODEL)
     command.add_argument("--num-ctx", type=int, default=int(os.getenv("LOCAL_COMPANY_NUM_CTX", "4096")))
     command.add_argument("--num-predict", type=int, default=int(os.getenv("LOCAL_COMPANY_NUM_PREDICT", "512")))
-    command.add_argument("--keep-alive", default=os.getenv("LOCAL_COMPANY_KEEP_ALIVE", "30s"))
+    command.add_argument("--keep-alive", default=os.getenv("LOCAL_COMPANY_KEEP_ALIVE", "0s"))
 
 
 def selected_model(args: argparse.Namespace):
@@ -328,13 +329,24 @@ def _project_identity(company: Company, project: str | None) -> tuple[str | None
 
 def _enforce_cli_execution_focus(company: Company, args: argparse.Namespace) -> None:
     model_backed_commands = {"run", "retry", "resume", "benchmark"}
+    service_start = args.command == "service" and args.service_command == "start"
     if args.command == "queue":
         if args.queue_command != "run-next":
             return
-    elif args.command not in model_backed_commands:
+    elif args.command not in model_backed_commands and not service_start:
         return
     focus = read_execution_focus(company.home)
-    if not focus["enabled"]:
+    enforce_execution_resource_envelope(
+        focus,
+        getattr(args, "provider", "mock"),
+        getattr(args, "num_ctx", 4096),
+        getattr(args, "num_predict", 512),
+        getattr(args, "keep_alive", "0s"),
+        "service start" if service_start else (
+            "queue run-next" if args.command == "queue" else args.command
+        ),
+    )
+    if service_start or not focus["enabled"]:
         return
     project_id: str | None = None
     roles: list[str] = []

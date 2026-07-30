@@ -129,6 +129,58 @@ class OperatorBriefTests(unittest.TestCase):
             self.assertEqual(result["next_action"], "queue_or_schedule_reviewed_mission")
             self.assertTrue(result["knowledge"]["ready_for_use"])
 
+    def test_brief_preserves_but_does_not_alert_on_superseded_queue_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", CountingModel())
+            project_id = company.create_project("Recovered Project")
+            source = root / "current.md"
+            source.write_text("current local evidence", encoding="utf-8")
+            company.add_knowledge(source, project_id)
+            objective = "Produce one recovered local brief"
+            queue_id = company.enqueue(objective, project=project_id)
+            interrupted_job = "a" * 12
+            successor_job = "b" * 12
+            now = datetime.now(timezone.utc).isoformat()
+            linked = json.dumps({"queue_id": queue_id, "reused": False}, sort_keys=True)
+            with closing(company._connect(immediate=True)) as db, db:
+                db.execute(
+                    "INSERT INTO jobs(id, objective, status, created_at, project_id) "
+                    "VALUES (?, ?, 'interrupted', ?, ?)",
+                    (interrupted_job, objective, now, project_id),
+                )
+                db.execute(
+                    "INSERT INTO jobs(id, objective, status, created_at, project_id) "
+                    "VALUES (?, ?, 'complete', ?, ?)",
+                    (successor_job, objective, now, project_id),
+                )
+                db.execute(
+                    "INSERT INTO events(job_id, kind, detail, created_at) "
+                    "VALUES (?, 'queue_job_linked', ?, ?)",
+                    (interrupted_job, linked, now),
+                )
+                db.execute(
+                    "UPDATE mission_queue SET status='complete', job_id=?, completed_at=? "
+                    "WHERE id=?",
+                    (successor_job, now, queue_id),
+                )
+                db.execute(
+                    "INSERT INTO evaluations(job_id, passed, score, checks_json, evaluated_at) "
+                    "VALUES (?, 1, 100, '{}', ?)",
+                    (successor_job, now),
+                )
+            before = file_sha256(company.db_path)
+
+            result = company.operator_brief(project_id)
+
+            self.assertEqual(result["counts"]["failed_or_interrupted_jobs"], 0)
+            self.assertNotIn("failed_or_interrupted_jobs", {
+                item["code"] for item in result["attention"]
+            })
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(company.job_detail(interrupted_job)["job"][2], "interrupted")
+            self.assertEqual(file_sha256(company.db_path), before)
+
     def test_brief_rejects_database_race(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

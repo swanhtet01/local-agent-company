@@ -5390,8 +5390,25 @@ class Company:
                 SELECT
                     (SELECT COUNT(*) FROM jobs
                      WHERE project_id=:project_id AND status='running'),
-                    (SELECT COUNT(*) FROM jobs
-                     WHERE project_id=:project_id AND status IN ('failed', 'interrupted')),
+                    (
+                        SELECT COUNT(*) FROM jobs j
+                        WHERE j.project_id=:project_id
+                          AND j.status IN ('failed', 'interrupted')
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM events e
+                              JOIN mission_queue q ON e.detail IN (
+                                  '{"queue_id": "' || q.id || '", "reused": false}',
+                                  '{"queue_id": "' || q.id || '", "reused": true}'
+                              )
+                              JOIN jobs successor ON successor.id=q.job_id
+                              WHERE e.job_id=j.id
+                                AND e.kind='queue_job_linked'
+                                AND q.project_id IS j.project_id
+                                AND q.job_id<>j.id
+                                AND successor.status='complete'
+                          )
+                    ),
                     (SELECT COUNT(*) FROM mission_queue
                      WHERE project_id=:project_id AND status='queued'),
                     (SELECT COUNT(*) FROM mission_queue

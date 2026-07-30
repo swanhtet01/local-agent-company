@@ -13,7 +13,11 @@ from typing import Iterable
 EXECUTION_FOCUS_SCHEMA = "local-company.execution-focus.v1"
 EXECUTION_FOCUS_FILENAME = "execution-focus.json"
 EXECUTION_FOCUS_MAX_BYTES = 4096
-EXECUTION_FOCUS_MAX_ROLES = 8
+EXECUTION_FOCUS_MAX_ROLES = 6
+EXECUTION_RESOURCE_ENVELOPE_SCHEMA = "local-company.execution-resource-envelope.v1"
+EXECUTION_RESOURCE_MAX_NUM_CTX = 4096
+EXECUTION_RESOURCE_MAX_NUM_PREDICT = 768
+EXECUTION_RESOURCE_KEEP_ALIVE = "0s"
 _PROJECT_ID = re.compile(r"^[0-9a-f]{12}$")
 _EXACT_KEYS = {
     "schema", "enabled", "projectId", "projectName", "maxRoles", "updatedAt", "controls",
@@ -201,3 +205,47 @@ def enforce_execution_focus(
             f"Execution focus allows at most {validated['maxRoles']} roles; "
             f"the requested {role_count} were denied before model load"
         )
+
+
+def enforce_execution_resource_envelope(
+    focus: dict[str, object], provider: str, num_ctx: int,
+    num_predict: int, keep_alive: str, action: str,
+) -> dict[str, object]:
+    validated = validate_execution_focus(focus)
+    if provider == "mock":
+        return {
+            "schema": EXECUTION_RESOURCE_ENVELOPE_SCHEMA,
+            "provider": "mock",
+            "focusRequired": False,
+            "modelLoadAllowed": False,
+        }
+    if provider != "ollama":
+        raise RuntimeError(f"Execution provider is not allowed for {action}; no model was loaded")
+    if not validated["enabled"]:
+        raise RuntimeError(
+            f"Execution focus must be enabled for Ollama {action}; no model was loaded"
+        )
+    if type(num_ctx) is not int or not 1024 <= num_ctx <= EXECUTION_RESOURCE_MAX_NUM_CTX:
+        raise RuntimeError(
+            f"Execution context exceeds {EXECUTION_RESOURCE_MAX_NUM_CTX} tokens; "
+            "no model was loaded"
+        )
+    if type(num_predict) is not int or not 32 <= num_predict <= EXECUTION_RESOURCE_MAX_NUM_PREDICT:
+        raise RuntimeError(
+            f"Execution output exceeds {EXECUTION_RESOURCE_MAX_NUM_PREDICT} tokens; "
+            "no model was loaded"
+        )
+    if keep_alive != EXECUTION_RESOURCE_KEEP_ALIVE:
+        raise RuntimeError(
+            f"Execution keep-alive must be {EXECUTION_RESOURCE_KEEP_ALIVE}; no model was loaded"
+        )
+    return {
+        "schema": EXECUTION_RESOURCE_ENVELOPE_SCHEMA,
+        "provider": "ollama",
+        "focusRequired": True,
+        "maxRoles": EXECUTION_FOCUS_MAX_ROLES,
+        "maxNumCtx": EXECUTION_RESOURCE_MAX_NUM_CTX,
+        "maxNumPredict": EXECUTION_RESOURCE_MAX_NUM_PREDICT,
+        "keepAlive": EXECUTION_RESOURCE_KEEP_ALIVE,
+        "modelLoadAllowed": True,
+    }
