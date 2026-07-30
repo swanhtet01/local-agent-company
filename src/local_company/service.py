@@ -25,6 +25,9 @@ _ACTIVE_STATES = {"starting", "running", "cleanup_failed"}
 _STATE_STATUSES = _ACTIVE_STATES | {"stopped", "failed"}
 _MAX_STATE_BYTES = 64 * 1024
 _MAX_HEALTH_BYTES = 64 * 1024
+_SERVICE_PROBE_TIMEOUT_SECONDS = 6
+_STARTUP_HEALTH_ATTEMPTS = 120
+_STARTUP_HEALTH_DEADLINE_SECONDS = 60
 _LOWER_HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 _URLSAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]{16,512}\Z")
@@ -423,7 +426,8 @@ def _probe(port: int) -> dict[str, object] | None:
         return None
     try:
         with _loopback_opener().open(
-            f"http://127.0.0.1:{port}/__service/health.json", timeout=2,
+            f"http://127.0.0.1:{port}/__service/health.json",
+            timeout=_SERVICE_PROBE_TIMEOUT_SECONDS,
         ) as response:
             payload = response.read(_MAX_HEALTH_BYTES + 1)
         if len(payload) > _MAX_HEALTH_BYTES:
@@ -450,6 +454,23 @@ def _port_in_use(port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _service_python_executable() -> str:
+    # On Windows, a venv python.exe can remain as a launcher parent while the
+    # base interpreter becomes the HTTP server. Spawn the base executable
+    # directly so the captured child PID is also the serving PID.
+    raw = getattr(sys, "_base_executable", sys.executable) if os.name == "nt" else sys.executable
+    candidate = Path(raw)
+    if not candidate.is_absolute() or candidate.is_symlink():
+        raise RuntimeError("Service Python executable is not a trusted regular file")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("Service Python executable is unavailable") from exc
+    if not resolved.is_file():
+        raise RuntimeError("Service Python executable is not a trusted regular file")
+    return str(resolved)
 
 
 def _has_current_identity(state: dict[str, object]) -> bool:
@@ -645,7 +666,7 @@ def start_service(
         environment["LOCAL_COMPANY_SERVICE_TOKEN"] = token
         environment["LOCAL_COMPANY_SERVICE_INSTANCE_ID"] = service_instance_id
         command = [
-            sys.executable, "-m", "local_company.cli", "--home", str(home),
+            _service_python_executable(), "-m", "local_company.cli", "--home", str(home),
             "dashboard", "--port", str(port), "--provider", provider, "--model", model,
             "--num-ctx", str(num_ctx), "--num-predict", str(num_predict),
             "--keep-alive", keep_alive,
@@ -658,6 +679,7 @@ def start_service(
             popen_kwargs["start_new_session"] = True
         process: subprocess.Popen[bytes] | None = None
         state: dict[str, object] | None = None
+        readiness_failure = "startup_timeout"
         try:
             with log_path.open("ab") as log:
                 try:
@@ -697,11 +719,19 @@ def start_service(
                 "num_predict": num_predict, "keep_alive": keep_alive,
             }
             _write_state(home, state)
-            for _ in range(30):
+            # Low-power Windows hosts can spend longer importing the dashboard
+            # and scheduling a loopback response after a cold working-set trim.
+            # Keep both attempts and elapsed startup time bounded.
+            startup_deadline = time.monotonic() + _STARTUP_HEALTH_DEADLINE_SECONDS
+            for _ in range(_STARTUP_HEALTH_ATTEMPTS):
+                if time.monotonic() >= startup_deadline:
+                    break
                 if process.poll() is not None:
+                    readiness_failure = "child_exited"
                     break
                 current = _observe_process(process.pid)
                 if _identity_relation(state, current) != "match":
+                    readiness_failure = "identity_changed"
                     break
                 health = _probe(port)
                 if _health_matches(state, health):
@@ -710,6 +740,12 @@ def start_service(
                         state["status"] = "running"
                         _write_state(home, state)
                         return _status_result(state, "match", health)
+                    readiness_failure = "identity_changed"
+                    break
+                readiness_failure = (
+                    "endpoint_unavailable" if health is None
+                    else "endpoint_identity_mismatch"
+                )
                 time.sleep(0.5)
         except BaseException as exc:
             cleaned = process is None or _terminate_owned_child(process)
@@ -744,7 +780,10 @@ def start_service(
             raise RuntimeError(
                 f"Dashboard failed to become ready and its child could not be reaped; inspect {log_path}"
             )
-        raise RuntimeError(f"Dashboard service failed to become ready; inspect {log_path}")
+        raise RuntimeError(
+            f"Dashboard service failed to become ready ({readiness_failure}); "
+            f"inspect {log_path}"
+        )
 
 
 def stop_service(home: Path) -> dict[str, object]:

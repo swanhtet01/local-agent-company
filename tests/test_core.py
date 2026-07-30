@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -58,7 +59,9 @@ from local_company.dashboard import (
 )
 from local_company.service import (
     PROCESS_BIRTH_SCHEMA, SERVICE_STATE_SCHEMA, _ProcessObservation,
-    _observe_process, _probe, _read_state, _startup_lock, _write_state, service_status,
+    _SERVICE_PROBE_TIMEOUT_SECONDS, _STARTUP_HEALTH_ATTEMPTS,
+    _STARTUP_HEALTH_DEADLINE_SECONDS, _observe_process, _probe, _read_state,
+    _startup_lock, _write_state, service_status,
     start_service, stop_service,
 )
 
@@ -677,6 +680,10 @@ class CompanyTests(unittest.TestCase):
         inherited = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         self.assertEqual(spawn.call_args_list[0].kwargs["creationflags"], strict)
         self.assertEqual(spawn.call_args_list[1].kwargs["creationflags"], inherited)
+        self.assertEqual(
+            spawn.call_args_list[0].args[0][0],
+            str(Path(sys._base_executable).resolve()),
+        )
 
         denied_again = PermissionError(13, "scheduler denied breakaway")
         denied_again.winerror = 5
@@ -743,6 +750,41 @@ class CompanyTests(unittest.TestCase):
                     start_service(home, provider="mock")
             self.assertTrue(child.terminated)
             self.assertEqual(_read_state(home)["status"], "failed")
+
+    def test_start_service_accepts_bounded_slow_cold_start(self):
+        class FakeProcess:
+            pid = 5007
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            birth = _ProcessObservation("present", "f" * 64)
+            health = {
+                "status": "ready",
+                "pid": child.pid,
+                "service_instance_id": "e" * 32,
+            }
+            probe_results = [None] * 30 + [health]
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch("local_company.service._observe_process", return_value=birth), patch(
+                "local_company.service._probe", side_effect=probe_results,
+            ) as probe, patch(
+                "local_company.service.secrets.token_hex", return_value="e" * 32,
+            ), patch(
+                "local_company.service.secrets.token_urlsafe",
+                return_value="new-token-value-1234567890",
+            ), patch("local_company.service.time.sleep"):
+                result = start_service(home, provider="mock")
+            self.assertTrue(result["live"])
+            self.assertEqual(result["status"], "running")
+            self.assertEqual(probe.call_count, 31)
+            self.assertGreater(_STARTUP_HEALTH_ATTEMPTS, 30)
+            self.assertEqual(_SERVICE_PROBE_TIMEOUT_SECONDS, 6)
+            self.assertEqual(_STARTUP_HEALTH_DEADLINE_SECONDS, 60)
 
     def test_start_service_records_an_unreaped_detached_child(self):
         class FakeProcess:
