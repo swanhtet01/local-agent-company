@@ -5838,6 +5838,45 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(synthesis.endswith("Owner review required."))
             self.assertNotIn("Write each specialist", synthesis)
 
+    def test_supermega_ceo_outcomes_use_code_owned_department_templates(self):
+        cases = {
+            "daily-company-control": "Reconcile the current four-product readiness ledger",
+            "engineering-release-control": "Compare current candidate and live release evidence",
+            "product-portfolio-control": "Draft the authorized product work order",
+            "growth-pipeline-control": "Draft one truthful four-product lead-qualification",
+            "finance-risk-control": "Reconcile one zero-spend operating budget and risk register",
+        }
+        for outcome_id, expected in cases.items():
+            with self.subTest(outcome_id=outcome_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "alpha.md"
+                source.write_text(
+                    "Alpha records a bounded local evidence baseline for internal review.",
+                    encoding="utf-8",
+                )
+                model = StructuredRepairModel()
+                company = Company(root / "state", model)
+                project_id = company.create_project(f"SuperMega {outcome_id}")
+                company.add_knowledge(source, project_id)
+                objective = (
+                    f"[ALLY_CEO_OUTCOME:2026-07-30:{outcome_id}] Using imported alpha.md, "
+                    "separate verified facts from assumptions. Define 1 reusable task template "
+                    "under Task templates, plus success checks, failure modes, and owner gates. "
+                    "Every verified claim must name its exact source filename and matching "
+                    "supplied evidence ID. Executive synthesis at most 120 words and end with: "
+                    "Owner review required."
+                )
+
+                job_id, _ = company.run(
+                    objective, roles=["operations"], project=project_id,
+                )
+                evaluation = company.evaluate_job(job_id)
+                synthesis = company.job_detail(job_id)["job"][7]
+
+                self.assertTrue(evaluation["passed"])
+                self.assertIn(f"Task templates: 1. Proposed, not verified or performed: {expected}", synthesis)
+                self.assertTrue(synthesis.endswith("Owner review required."))
+
     def test_strict_grounded_objective_fails_closed_without_valid_structured_output(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Every verified "

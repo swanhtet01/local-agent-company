@@ -1177,6 +1177,39 @@ def _reset_model_metrics(model: object) -> bool:
     return type(reset_value) is dict and len(reset_value) == 0
 
 
+_SUPERMEGA_CEO_TASK_TEMPLATES = {
+    "daily-company-control": (
+        "Reconcile the current four-product readiness ledger, name every blocked proof, "
+        "and assign no external action"
+    ),
+    "engineering-release-control": (
+        "Compare current candidate and live release evidence, define one bounded local fix, "
+        "and preserve every security gate"
+    ),
+    "product-portfolio-control": (
+        "Draft the authorized product work order with user job, state transition, recovery, "
+        "mobile, import, security, and automated-test acceptance"
+    ),
+    "growth-pipeline-control": (
+        "Draft one truthful four-product lead-qualification and demo-readiness record without "
+        "contacting or naming prospects"
+    ),
+    "finance-risk-control": (
+        "Reconcile one zero-spend operating budget and risk register, recording evidence gaps "
+        "and owner approvals"
+    ),
+}
+
+
+def _supermega_ceo_task_template(objective: str) -> str | None:
+    outcome_ids = re.findall(
+        r"\[ALLY_CEO_OUTCOME:\d{4}-\d{2}-\d{2}:([a-z0-9-]+)\]", objective,
+    )
+    if len(outcome_ids) != 1:
+        return None
+    return _SUPERMEGA_CEO_TASK_TEMPLATES.get(outcome_ids[0])
+
+
 def structured_synthesis_schema(
     required_labels: list[str], expected_templates: int | None,
 ) -> dict[str, object]:
@@ -1462,9 +1495,12 @@ def render_structured_synthesis(
                 "owner approval."
             )
         elif label == "Task templates" and expected_templates == 1:
+            supermega_template = _supermega_ceo_task_template(objective)
             content = (
-                "1. Proposed, not verified or performed: Review the highest-priority current "
-                "evidence gap, record one bounded local fix, and preserve owner gates."
+                f"1. Proposed, not verified or performed: {supermega_template}."
+                if supermega_template
+                else "1. Proposed, not verified or performed: Review the highest-priority "
+                "current evidence gap, record one bounded local fix, and preserve owner gates."
             )
         else:
             values = _structured_values(
