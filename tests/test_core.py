@@ -40,7 +40,9 @@ from local_company.core import (
     _requires_strict_grounded_synthesis,
     bounded_context_blocks,
     compact_labeled_sections,
+    count_words,
     evidence_filename_pairs_valid,
+    extract_labeled_sections,
     mark_unverified_advisory,
     mark_unverified_draft,
     render_structured_synthesis,
@@ -5637,6 +5639,70 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("now.md [EVIDENCE:", synthesis)
             self.assertTrue(evaluation["checks"]["minimum_current_sources_cited"])
 
+    def test_design_partner_brief_is_code_owned_complete_and_measurable(self):
+        objective = (
+            "Using only current registered SuperMega Vision project evidence, produce an "
+            "internal decision-ready 30-day design-partner planning brief. Separate verified "
+            "facts from assumptions. Define one ideal-user profile, one bounded pilot concept, "
+            "qualification and disqualification checks, a safe local demo sequence, a "
+            "20-account selection rubric without inventing account names, five "
+            "discovery-session learning goals, one pilot-conversion decision criterion, "
+            "price-test assumptions, variable-based unit economics, objections, acceptance "
+            "metrics, and privacy, legal, and action-control review gates. Every verified "
+            "claim must cite its exact source filename and supplied evidence ID. This is "
+            "advisory planning only. Each specialist section must be at most 100 words. "
+            "Executive synthesis must be at most 200 words and end with: Owner review required."
+        )
+        self.assertTrue(_requires_strict_grounded_synthesis(objective))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            product = root / "vision-product.md"
+            governance = root / "vision-governance.md"
+            product.write_text(
+                "The local evaluation workflow remains advisory and action execution is disabled.",
+                encoding="utf-8",
+            )
+            governance.write_text(
+                "Pilot pricing and customer readiness are not verified.", encoding="utf-8",
+            )
+            company = Company(root / "state", CountingMockModel())
+            project_id = company.create_project("Vision commercial contract")
+            company.add_knowledge(product, project_id)
+            company.add_knowledge(governance, project_id)
+
+            job_id, _ = company.run(
+                objective,
+                roles=["chief-of-staff", "product", "finance", "quality"],
+                project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            synthesis = company.job_detail(job_id)["job"][7]
+
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            for label in (
+                "Verified facts", "Ideal-user profile", "Pilot concept",
+                "Qualification checks", "Disqualification checks",
+                "Safe local demo sequence", "20-account selection rubric",
+                "Discovery learning goals", "Pilot-conversion criterion",
+                "Price-test assumptions", "Unit economics", "Objections",
+                "Acceptance metrics", "Review gates", "Assumptions",
+            ):
+                self.assertIn(f"{label}:", synthesis)
+            self.assertEqual(
+                len(sequential_numbered_items(
+                    extract_labeled_sections(
+                        synthesis, ["Discovery learning goals", "Pilot-conversion criterion"],
+                    )["Discovery learning goals"]
+                )),
+                5,
+            )
+            self.assertTrue(evaluation["checks"]["twenty_account_rubric_present"])
+            self.assertTrue(evaluation["checks"]["variable_unit_economics_present"])
+            self.assertLessEqual(count_words(synthesis), 200)
+            self.assertTrue(synthesis.endswith("Owner review required."))
+
     def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Define three "
@@ -5726,7 +5792,7 @@ class CompanyTests(unittest.TestCase):
                 json.loads(event[1]) for event in detail["events"]
                 if event[0] == "structured_synthesis_validated"
             )
-            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v9")
+            self.assertEqual(validated["schema"], "local-company.strict-synthesis.v10")
             self.assertNotIn("success_checks", validated["fields"])
             self.assertNotIn("failure_modes", validated["fields"])
 

@@ -217,10 +217,10 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-30.18"
+EVALUATOR_VERSION = "local-quality-2026-07-30.19"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.15"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
-STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
+STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 768
 EXECUTION_HEARTBEAT_SECONDS = 5.0
 DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v3"
@@ -632,6 +632,11 @@ _CODE_OWNED_STRUCTURED_LABELS = {
     "Highest-value internal next action",
     "Acceptance check", "Missing proof", "Assumptions", "Daily review cadence",
     "Success checks", "Failure modes", "Owner gates",
+    "Ideal-user profile", "Pilot concept", "Qualification checks",
+    "Disqualification checks", "Safe local demo sequence",
+    "20-account selection rubric", "Discovery learning goals",
+    "Pilot-conversion criterion", "Price-test assumptions", "Unit economics",
+    "Objections", "Acceptance metrics", "Review gates",
 }
 _SENSITIVE_PROPOSAL_PATTERN = re.compile(
     r"\b(?:send|contact|notify|message|email|post)\b.{0,80}\b(?:reports?|results?|data|"
@@ -1068,10 +1073,32 @@ def _required_ending_from_objective(objective: str) -> str:
     return " ".join(tail.split()).strip('"\'')
 
 
+def _requires_design_partner_brief(objective: str) -> bool:
+    objective_lower = objective.casefold()
+    return all(
+        trigger in objective_lower for trigger in (
+            "design-partner planning brief",
+            "ideal-user profile",
+            "bounded pilot concept",
+            "qualification and disqualification checks",
+            "safe local demo sequence",
+            "20-account selection rubric",
+            "five discovery-session learning goals",
+            "pilot-conversion decision criterion",
+            "price-test assumptions",
+            "variable-based unit economics",
+            "acceptance metrics",
+            "privacy, legal, and action-control review gates",
+            "exact source filename and supplied evidence id",
+        )
+    )
+
+
 def _requires_strict_grounded_synthesis(objective: str) -> bool:
     objective_lower = objective.casefold()
     return bool(
-        "matching supplied evidence id" in objective_lower
+        _requires_design_partner_brief(objective)
+        or "matching supplied evidence id" in objective_lower
         or (
             "exact source filename" in objective_lower
             and "supplied evidence id" in objective_lower
@@ -1351,7 +1378,13 @@ def render_structured_synthesis(
     sections: list[str] = []
     forbidden_source_names = {Path(hit.path).name.lower() for hit in sources}
     for label in required_labels:
-        if label == "Verified facts":
+        if label == "Verified facts" and _requires_design_partner_brief(objective):
+            primary = sources[0]
+            content = (
+                f"{Path(primary.path).name} [EVIDENCE:{primary.evidence_id}] is verified as a "
+                "frozen local source for this brief."
+            )
+        elif label == "Verified facts":
             content = grounded_verified_facts(sources, objective)
         elif label == "Current verified state":
             content = grounded_verified_facts(sources, objective)
@@ -1376,8 +1409,41 @@ def render_structured_synthesis(
             )
         elif label == "Assumptions":
             content = (
-                "Current operational readiness and adoption remain unverified pending owner review."
+                "Readiness and adoption remain unverified pending owner review."
+                if _requires_design_partner_brief(objective)
+                else "Current operational readiness and adoption remain unverified pending owner review."
             )
+        elif label == "Ideal-user profile":
+            content = "Assumption: Operations teams with repetitive PC and mobile workflows."
+        elif label == "Pilot concept":
+            content = "Proposed: Evaluate one approved workflow locally for 30 days."
+        elif label == "Qualification checks":
+            content = "Require data rights, reviewer ownership, baseline metrics, and device fit."
+        elif label == "Disqualification checks":
+            content = "Reject unclear rights, unattended actions, credentials, or safety-critical use."
+        elif label == "Safe local demo sequence":
+            content = "1. Load approved sample. 2. Infer offline. 3. Review proposal. 4. Keep actions disabled."
+        elif label == "20-account selection rubric":
+            content = (
+                "Score 20 unnamed accounts on repetition, fit, rights, urgency, capacity, and budget."
+            )
+        elif label == "Discovery learning goals":
+            content = (
+                "1. Workflow pain. 2. Data rights. 3. Error tolerance. 4. Review effort. "
+                "5. Buying conditions."
+            )
+        elif label == "Pilot-conversion criterion":
+            content = "Convert only after metrics pass and owner approves scope and controls."
+        elif label == "Price-test assumptions":
+            content = "Assume setup plus monthly fees; test willingness without quoting or payment."
+        elif label == "Unit economics":
+            content = "Contribution equals revenue minus labeling, support, compute, and contingency."
+        elif label == "Objections":
+            content = "Review privacy, accuracy, latency, integration, action safety, and switching cost."
+        elif label == "Acceptance metrics":
+            content = "Measure task success, false actions, p95 latency, review effort, and unauthorized actions."
+        elif label == "Review gates":
+            content = "Owner approval controls data, legal terms, demos, pricing, and action enablement."
         elif label == "Daily review cadence":
             content = (
                 "Review the local queue, failed gates, source freshness, and owner decisions each "
@@ -5963,6 +6029,25 @@ class Company:
         requested_labels = [
             label for trigger, label in concept_labels.items() if trigger in objective_lower
         ]
+        if _requires_design_partner_brief(objective):
+            requested_labels.extend(
+                label for label in (
+                    "Ideal-user profile",
+                    "Pilot concept",
+                    "Qualification checks",
+                    "Disqualification checks",
+                    "Safe local demo sequence",
+                    "20-account selection rubric",
+                    "Discovery learning goals",
+                    "Pilot-conversion criterion",
+                    "Price-test assumptions",
+                    "Unit economics",
+                    "Objections",
+                    "Acceptance metrics",
+                    "Review gates",
+                )
+                if label not in requested_labels
+            )
         if re.search(r"\btask templates?\b", objective_lower) and "Task templates" not in requested_labels:
             requested_labels.append("Task templates")
         all_labels = (["Verified facts", "Assumptions"] if facts_required else []) + requested_labels
@@ -5980,6 +6065,24 @@ class Company:
                     or _failure_mode_is_substantive(labeled_sections.get(label, ""))
                 )
                 for label in requested_labels
+            )
+        if _requires_design_partner_brief(objective):
+            discovery_section = labeled_sections.get("Discovery learning goals", "")
+            checks["discovery_learning_goal_count_present"] = (
+                len(sequential_numbered_items(discovery_section)) == 5
+            )
+            rubric_section = labeled_sections.get("20-account selection rubric", "")
+            checks["twenty_account_rubric_present"] = bool(
+                re.search(r"\b20\b", rubric_section)
+                and not re.search(
+                    r"\b(?:account|company|customer)\s+[A-Z][A-Za-z0-9&.-]+",
+                    rubric_section,
+                )
+            )
+            unit_economics = labeled_sections.get("Unit economics", "")
+            checks["variable_unit_economics_present"] = all(
+                term in unit_economics.casefold()
+                for term in ("revenue", "labeling", "support", "compute", "contingency")
             )
         template_count_match = re.search(
             r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates?\b",
@@ -7574,6 +7677,25 @@ class Company:
                     label for _, label in limitation_control_labels
                     if label not in required_labels
                 )
+            if _requires_design_partner_brief(objective):
+                required_labels.extend(
+                    label for label in (
+                        "Ideal-user profile",
+                        "Pilot concept",
+                        "Qualification checks",
+                        "Disqualification checks",
+                        "Safe local demo sequence",
+                        "20-account selection rubric",
+                        "Discovery learning goals",
+                        "Pilot-conversion criterion",
+                        "Price-test assumptions",
+                        "Unit economics",
+                        "Objections",
+                        "Acceptance metrics",
+                        "Review gates",
+                    )
+                    if label not in required_labels
+                )
             concept_labels = {
                 "task templates": "Task templates",
                 "daily review cadence": "Daily review cadence",
@@ -7655,8 +7777,13 @@ class Company:
                             "Assumptions",
                         ],
                     )
+                    deterministic_design_partner = _requires_design_partner_brief(
+                        objective,
+                    )
                     deterministic_code_owned = bool(
-                        deterministic_single_template or deterministic_daily_control
+                        deterministic_single_template
+                        or deterministic_daily_control
+                        or deterministic_design_partner
                     )
                     complete_structured = getattr(self.model, "complete_structured", None)
                     if not deterministic_code_owned and not callable(complete_structured):
