@@ -191,6 +191,9 @@ After every completed mission, deterministic gates verify that all assignments c
 
 The deterministic renderer also owns the success criterion, so model-generated past-tense
 completion wording cannot define acceptance.
+Daily briefs that lead with current limitations and require at least two current sources use
+the same code-owned path; the evaluator counts distinct valid frozen evidence IDs in the final
+synthesis and rejects a one-source result even when its formatting is otherwise correct.
 Strict proposal fields reject serialized-object fragments and source/evidence metadata keys;
 malformed task text receives the same single local retry and then fails closed.
 Task templates must begin with a listed action verb. In strict grounded runs, failure-mode prose is

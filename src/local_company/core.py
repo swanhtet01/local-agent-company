@@ -217,7 +217,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-29.17"
+EVALUATOR_VERSION = "local-quality-2026-07-30.18"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.15"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v9"
@@ -628,7 +628,8 @@ _STRICT_SECTION_FIELDS = {
     "Owner gates": "owner_gates",
 }
 _CODE_OWNED_STRUCTURED_LABELS = {
-    "Verified facts", "Current verified state", "Highest-value internal next action",
+    "Verified facts", "Current verified state", "Current limitations",
+    "Highest-value internal next action",
     "Acceptance check", "Missing proof", "Assumptions", "Daily review cadence",
     "Success checks", "Failure modes", "Owner gates",
 }
@@ -1085,6 +1086,18 @@ def _requires_strict_grounded_synthesis(objective: str) -> bool:
             )
         )
         or (
+            "current limitations" in objective_lower
+            and "filename [evidence:16-hex-id]" in objective_lower
+            and all(
+                field in objective_lower for field in (
+                    "highest-value internal next action",
+                    "measurable acceptance check",
+                    "missing proof",
+                    "assumptions",
+                )
+            )
+        )
+        or (
             "facts from assumptions" in objective_lower
             and "using" in objective_lower
             and "imported" in objective_lower
@@ -1241,6 +1254,7 @@ def _structured_values(
 
 def grounded_verified_facts(
     sources: list[SourceHit], objective: str, max_limitations: int = 1,
+    minimum_sources: int = 1,
 ) -> str:
     if not sources:
         raise ValueError("Structured grounded synthesis requires frozen sources")
@@ -1302,15 +1316,30 @@ def grounded_verified_facts(
                 f"limitation: {limitation}",
             ))
     seen: set[str] = set()
+    cited_sources: set[str] = {primary.evidence_id}
     limitations_added = 0
     for _, _, evidence_id, fact in sorted(candidates):
         if evidence_id in seen:
             continue
         seen.add(evidence_id)
+        cited_sources.add(evidence_id)
         facts.append(fact)
         limitations_added += 1
         if limitations_added >= max_limitations:
             break
+    if len(cited_sources) < minimum_sources:
+        for hit in sources:
+            if hit.evidence_id in cited_sources:
+                continue
+            facts.append(
+                f"{Path(hit.path).name} [EVIDENCE:{hit.evidence_id}] is verified as another "
+                "frozen local source for this brief."
+            )
+            cited_sources.add(hit.evidence_id)
+            if len(cited_sources) >= minimum_sources:
+                break
+    if len(cited_sources) < minimum_sources:
+        raise ValueError("Structured grounded synthesis lacks enough distinct frozen sources")
     return " ".join(facts)
 
 
@@ -1326,6 +1355,10 @@ def render_structured_synthesis(
             content = grounded_verified_facts(sources, objective)
         elif label == "Current verified state":
             content = grounded_verified_facts(sources, objective)
+        elif label == "Current limitations":
+            content = grounded_verified_facts(
+                sources, objective, max_limitations=2, minimum_sources=2,
+            )
         elif label == "Highest-value internal next action":
             content = (
                 "Proposed, not verified or performed: Review the highest-authority frozen "
@@ -5993,6 +6026,25 @@ class Company:
             and evidence_id.lower() in valid_evidence_ids
             for evidence_id in mentioned_evidence_ids
         )
+        minimum_sources_match = re.search(
+            r"\bcite at least (two|\d+) current sources\b",
+            objective_lower,
+        )
+        if minimum_sources_match:
+            minimum_sources = (
+                2 if minimum_sources_match.group(1) == "two"
+                else int(minimum_sources_match.group(1))
+            )
+            synthesis_evidence_ids = {
+                evidence_id.lower() for evidence_id in re.findall(
+                    r"\[EVIDENCE:([0-9a-f]{16})\]", synthesis,
+                    flags=re.IGNORECASE,
+                )
+                if evidence_id.lower() in valid_evidence_ids
+            }
+            checks["minimum_current_sources_cited"] = (
+                len(synthesis_evidence_ids) >= minimum_sources
+            )
         if _requires_strict_grounded_synthesis(objective):
             checks["evidence_filename_pairs_valid"] = evidence_filename_pairs_valid(
                 model_output, evidence_source_names,
@@ -7510,6 +7562,18 @@ class Company:
                     label for _, label in daily_control_labels
                     if label not in required_labels
                 )
+            limitation_control_labels = (
+                ("current limitations", "Current limitations"),
+                ("highest-value internal next action", "Highest-value internal next action"),
+                ("measurable acceptance check", "Acceptance check"),
+                ("missing proof", "Missing proof"),
+                ("assumptions", "Assumptions"),
+            )
+            if all(trigger in objective_lower for trigger, _ in limitation_control_labels):
+                required_labels.extend(
+                    label for _, label in limitation_control_labels
+                    if label not in required_labels
+                )
             concept_labels = {
                 "task templates": "Task templates",
                 "daily review cadence": "Daily review cadence",
@@ -7564,6 +7628,7 @@ class Company:
                     if (
                         "Verified facts" not in required_labels
                         and "Current verified state" not in required_labels
+                        and "Current limitations" not in required_labels
                     ):
                         raise ValueError(
                             "Strict evidence-pair synthesis requires one code-owned verified section"
@@ -7574,13 +7639,22 @@ class Company:
                         and "Task templates" in required_labels
                         and not allowed_fields
                     )
-                    deterministic_daily_control = required_labels == [
-                        "Current verified state",
-                        "Highest-value internal next action",
-                        "Acceptance check",
-                        "Missing proof",
-                        "Assumptions",
-                    ]
+                    deterministic_daily_control = required_labels in (
+                        [
+                            "Current verified state",
+                            "Highest-value internal next action",
+                            "Acceptance check",
+                            "Missing proof",
+                            "Assumptions",
+                        ],
+                        [
+                            "Current limitations",
+                            "Highest-value internal next action",
+                            "Acceptance check",
+                            "Missing proof",
+                            "Assumptions",
+                        ],
+                    )
                     deterministic_code_owned = bool(
                         deterministic_single_template or deterministic_daily_control
                     )

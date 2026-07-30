@@ -5583,6 +5583,40 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("Task templates: 1.", synthesis)
             self.assertTrue(evaluation["checks"]["task_template_count_present"])
 
+    def test_daily_limitations_brief_binds_two_distinct_current_sources(self):
+        objective = (
+            "Using current.md and now.md, produce one daily operating control brief. Lead "
+            "with current limitations, then "
+            "include one highest-value internal next action, one measurable acceptance check, "
+            "missing proof, and assumptions. Cite at least two current sources using exactly "
+            "this shape: filename [EVIDENCE:16-hex-id]. End with: Owner review required."
+        )
+        self.assertTrue(_requires_strict_grounded_synthesis(objective))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "current.md"
+            second = root / "now.md"
+            first.write_text("Managed persistence is not ready.", encoding="utf-8")
+            second.write_text("Security readiness remains false.", encoding="utf-8")
+            company = Company(root / "state", CountingMockModel())
+            project_id = company.create_project("Limitations brief")
+            company.add_knowledge(first, project_id)
+            company.add_knowledge(second, project_id)
+
+            job_id, _ = company.run(
+                objective, roles=["operations"], project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            synthesis = company.job_detail(job_id)["job"][7]
+
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            self.assertIn("Current limitations:", synthesis)
+            self.assertIn("current.md [EVIDENCE:", synthesis)
+            self.assertIn("now.md [EVIDENCE:", synthesis)
+            self.assertTrue(evaluation["checks"]["minimum_current_sources_cited"])
+
     def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Define three "
