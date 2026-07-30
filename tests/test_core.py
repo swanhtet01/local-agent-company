@@ -5552,6 +5552,37 @@ class CompanyTests(unittest.TestCase):
             self.assertTrue(synthesis.endswith("Owner review required."))
             self.assertNotIn("file://", synthesis)
 
+    def test_strict_single_task_template_singular_is_rendered_and_evaluated(self):
+        objective = (
+            "Using imported evidence, produce one daily brief and separate verified facts "
+            "from assumptions. Define 1 reusable task template for the highest-value internal "
+            "next action, plus success checks, failure modes, and owner gates. Every verified "
+            "claim must name its exact source filename and matching supplied evidence ID. "
+            "End with: Owner review required."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "current.md"
+            source.write_text(
+                "Managed persistence is not ready and production remains unauthorized.",
+                encoding="utf-8",
+            )
+            company = Company(root / "state", CountingMockModel())
+            project_id = company.create_project("Single template")
+            company.add_knowledge(source, project_id)
+
+            job_id, _ = company.run(
+                objective, roles=["operations"], project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            synthesis = company.job_detail(job_id)["job"][7]
+
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            self.assertIn("Task templates: 1.", synthesis)
+            self.assertTrue(evaluation["checks"]["task_template_count_present"])
+
     def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Define three "

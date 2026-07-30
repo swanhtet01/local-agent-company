@@ -5930,6 +5930,8 @@ class Company:
         requested_labels = [
             label for trigger, label in concept_labels.items() if trigger in objective_lower
         ]
+        if re.search(r"\btask templates?\b", objective_lower) and "Task templates" not in requested_labels:
+            requested_labels.append("Task templates")
         all_labels = (["Verified facts", "Assumptions"] if facts_required else []) + requested_labels
         labeled_sections = extract_labeled_sections(synthesis, all_labels)
         if "facts from assumptions" in objective_lower:
@@ -7518,6 +7520,11 @@ class Company:
             required_labels.extend(
                 label for trigger, label in concept_labels.items() if trigger in objective_lower
             )
+            if (
+                re.search(r"\btask templates?\b", objective_lower)
+                and "Task templates" not in required_labels
+            ):
+                required_labels.append("Task templates")
             source_names = sorted({Path(hit.path).name for hit in sources})
             source_citation_required = bool(
                 strict_evidence_pairs_required
