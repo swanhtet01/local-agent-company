@@ -54,7 +54,28 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(result["company"]["resident_role_processes"], 0)
         self.assertGreaterEqual(result["company"]["registered_roles"], 10)
         self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["advisories"], [])
         self.assertFalse(any(result["effects"].values()))
+
+    def test_retained_quality_failures_are_visible_without_deadlocking_idle_capacity(self) -> None:
+        values = ready_inputs()
+        values["brief"]["status"] = "attention_required"
+        values["brief"]["next_action"] = "review_quality_failures_before_retry"
+        result = build_capacity_snapshot(**values)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["advisories"], ["quality_failures_retained_for_review"])
+        self.assertEqual(result["company_attention"]["status"], "attention_required")
+        self.assertEqual(result["next_action"], "review_quality_failures_before_retry")
+
+    def test_non_quality_company_attention_still_blocks_capacity(self) -> None:
+        values = ready_inputs()
+        values["brief"]["status"] = "attention_required"
+        values["brief"]["next_action"] = "review_pending_approval"
+        result = build_capacity_snapshot(**values)
+        self.assertEqual(result["status"], "attention_required")
+        self.assertIn("company_attention_required", result["blockers"])
+        self.assertEqual(result["advisories"], [])
 
     def test_duplicate_listener_idle_model_and_low_memory_fail_closed(self) -> None:
         values = ready_inputs()

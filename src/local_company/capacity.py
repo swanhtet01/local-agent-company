@@ -147,6 +147,7 @@ def build_capacity_snapshot(
         counts = {str(port): None for port in LISTENER_PORTS}
     blockers: list[str] = []
     indeterminate: list[str] = []
+    advisories: list[str] = []
 
     if not focus.get("enabled"):
         blockers.append("execution_focus_disabled")
@@ -194,12 +195,20 @@ def build_capacity_snapshot(
         blockers.append("memory_headroom_below_1gib")
 
     if brief.get("status") == "attention_required":
-        blockers.append("company_attention_required")
+        if (
+            brief.get("next_action") == "review_quality_failures_before_retry"
+            and active_jobs == 0
+            and running_missions == 0
+        ):
+            advisories.append("quality_failures_retained_for_review")
+        else:
+            blockers.append("company_attention_required")
     elif brief.get("status") not in {"ready", "work_pending"}:
         indeterminate.append("operator_brief_unavailable")
 
     blockers = list(dict.fromkeys(blockers))
     indeterminate = list(dict.fromkeys(indeterminate))
+    advisories = list(dict.fromkeys(advisories))
     if indeterminate:
         status = "indeterminate"
         next_action = "inspect_machine_capacity_observations"
@@ -248,6 +257,7 @@ def build_capacity_snapshot(
         },
         "blockers": blockers,
         "indeterminate": indeterminate,
+        "advisories": advisories,
         "next_action": next_action,
         "effects": {
             "database_mutated": False,
