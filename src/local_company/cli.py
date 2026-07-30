@@ -390,7 +390,11 @@ def _enforce_cli_execution_focus(company: Company, args: argparse.Namespace) -> 
         detail = company.job_detail(args.job_id)
         project_name = detail["job"][6]
         project_id, _ = _project_identity(company, project_name)
-        roles = [str(assignment[1]) for assignment in detail["assignments"]]
+        roles = (
+            [role.strip() for role in args.roles.split(",") if role.strip()]
+            if args.command == "retry" and args.roles
+            else [str(assignment[1]) for assignment in detail["assignments"]]
+        )
     elif args.command == "benchmark":
         project_id, _ = _project_identity(company, args.project)
         roles = ["benchmark"]

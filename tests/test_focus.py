@@ -338,6 +338,33 @@ class ExecutionFocusTests(unittest.TestCase):
             )
             self.assertEqual(company.job_detail(retry_job_id)["job"][5], original_job_id)
 
+    def test_cli_retry_focus_preflight_uses_explicit_role_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            project_id = company.create_project("SuperMega")
+            original_job_id, _ = company.run(
+                "Prepare one decision-ready local operating plan",
+                roles=["chief-of-staff", "research", "finance", "legal-risk", "quality"],
+                project=project_id,
+            )
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            argv = [
+                "local-company", "--home", str(home), "retry", original_job_id,
+                "--roles", "chief-of-staff,operations,finance,quality", "--provider", "mock",
+            ]
+            stdout = io.StringIO()
+            with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                self.assertEqual(main(), 0)
+            self.assertIn("Completed retry job", stdout.getvalue())
+            retry_job_id = company.jobs()[0][0]
+            detail = company.job_detail(retry_job_id)
+            self.assertEqual(detail["job"][5], original_job_id)
+            self.assertEqual(
+                [assignment[1] for assignment in detail["assignments"]],
+                ["chief-of-staff", "operations", "finance", "quality"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
