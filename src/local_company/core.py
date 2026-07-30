@@ -8185,13 +8185,17 @@ class Company:
             run_token,
         )
 
-    def retry(self, job_id: str) -> tuple[str, Path]:
+    def retry(
+        self, job_id: str, roles: list[str] | None = None,
+    ) -> tuple[str, Path]:
         self.initialize()
         with closing(self._connect()) as db:
             row = db.execute("SELECT objective, project_id FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
             raise ValueError(f"Unknown job: {job_id}")
-        return self.run(row[0], parent_job_id=job_id, project=row[1])
+        return self.run(
+            row[0], roles=roles, parent_job_id=job_id, project=row[1],
+        )
 
     @staticmethod
     def _report(

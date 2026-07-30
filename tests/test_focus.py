@@ -312,6 +312,32 @@ class ExecutionFocusTests(unittest.TestCase):
                 company.run("Prepare a concise brief", roles=["quality"], project="SuperMega Vision")
             self.assertEqual(company.health_snapshot()["active_jobs"], 0)
 
+    def test_retry_role_override_preserves_focus_enforcement_and_parent_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            project_id = company.create_project("SuperMega")
+            original_job_id, _ = company.run(
+                "Prepare one decision-ready local operating plan",
+                roles=["chief-of-staff", "research", "finance", "legal-risk", "quality"],
+                project=project_id,
+            )
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            job_count = len(company.jobs())
+
+            with self.assertRaisesRegex(RuntimeError, "denied before model load"):
+                company.retry(
+                    original_job_id,
+                    roles=["chief-of-staff", "research", "finance", "legal-risk", "quality"],
+                )
+            self.assertEqual(len(company.jobs()), job_count)
+
+            retry_job_id, _ = company.retry(
+                original_job_id,
+                roles=["chief-of-staff", "operations", "finance", "quality"],
+            )
+            self.assertEqual(company.job_detail(retry_job_id)["job"][5], original_job_id)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3040,6 +3040,26 @@ class CompanyTests(unittest.TestCase):
             self.assertNotIn("error", outcome)
             self.assertIn("result", outcome)
 
+    def test_retry_accepts_explicit_bounded_roles_and_preserves_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            original_job_id, _ = company.run(
+                "Review one bounded local operating change",
+                roles=["chief-of-staff", "research", "finance", "legal-risk", "quality"],
+            )
+
+            retry_job_id, _ = company.retry(
+                original_job_id,
+                roles=["chief-of-staff", "operations", "finance", "quality"],
+            )
+            detail = company.job_detail(retry_job_id)
+
+            self.assertEqual(detail["job"][5], original_job_id)
+            self.assertEqual(
+                [assignment[1] for assignment in detail["assignments"]],
+                ["chief-of-staff", "operations", "finance", "quality"],
+            )
+
     def test_orphan_running_queue_claim_blocks_a_direct_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())

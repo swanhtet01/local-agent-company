@@ -166,6 +166,10 @@ def parser() -> argparse.ArgumentParser:
     show.add_argument("job_id")
     retry = sub.add_parser("retry", help="Run a new job from a previous objective")
     retry.add_argument("job_id")
+    retry.add_argument(
+        "--roles",
+        help="Comma-separated bounded retry team; preserves objective and parent lineage",
+    )
     add_runtime_args(retry)
     resume = sub.add_parser("resume", help="Continue incomplete assignments in a failed or interrupted job")
     resume.add_argument("job_id")
@@ -570,7 +574,11 @@ def main() -> int:
         elif args.command == "show":
             print(json.dumps(company.job_detail(args.job_id), indent=2))
         elif args.command == "retry":
-            job_id, output = company.retry(args.job_id)
+            roles = (
+                [role.strip() for role in args.roles.split(",") if role.strip()]
+                if args.roles else None
+            )
+            job_id, output = company.retry(args.job_id, roles=roles)
             print(f"Completed retry job {job_id}\nReport: {output}")
         elif args.command == "resume":
             job_id, output = company.resume(args.job_id)

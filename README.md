@@ -343,9 +343,14 @@ Freshness is fixed to the sealed five-minute task: a `300`-second interval, `180
 .\local-company.cmd recover --stale-minutes 60
 .\local-company.cmd resume JOB_ID
 .\local-company.cmd retry JOB_ID --provider ollama
+.\local-company.cmd retry JOB_ID --roles chief-of-staff,operations,finance,quality --provider ollama
 ```
 
 Each completed assignment is checkpointed. Before a final report filename is published, the exact report bytes, digest, paths, and execution lease are committed to a private SQLite finalization journal. Windows publication uses replace-existing plus write-through semantics; other platforms replace in the same directory and flush that directory. If a process or machine stops before or immediately after file replacement, `recover` can recreate a missing temporary file or register an exact matching final report, seal it, run the deterministic evaluator, and reconcile its queue without rerunning the model. Transient filesystem sharing errors retain the intent and leases for a later retry. A readable mismatched path, lease, temporary file, or final file fails closed as `interrupted`; suspicious artifacts are never registered or overwritten. A sealed stale job that crashed before evaluation is evaluated before its queue is reconciled. A stale queue linked to a completed job receives a fresh deterministic recheck for that recovery attempt; recovery never decides from the unbound summary cache alone. Recovery is idempotent.
+
+`retry --roles` preserves the exact objective, project, and parent-job lineage while replacing only
+the retry team. Normal role validation and the active execution-focus ceiling still run before job
+creation or model load, so this can shrink a legacy oversized playbook but cannot bypass capacity.
 
 For other stale-heartbeat jobs, `recover` revokes their execution leases and reconciles stale queue claims to `failed` without resuming or rerunning a model. Linked job IDs are preserved; ambiguous legacy claims are never guessed while any job is still live. Any old model response arriving after recovery is audited and discarded. Use `resume` to issue a new lease and continue ordinary interrupted work deliberately, `retry` to create a new auditable child when a report artifact failed integrity checks, or `queue reset` to make a failed queue item eligible for an explicit later run. Lease tokens and pending report bytes are excluded from portable audit exports. Only one mission may run at a time, protecting shared RAM from competing local generations.
 
