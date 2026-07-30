@@ -5513,6 +5513,45 @@ class CompanyTests(unittest.TestCase):
             "Using imported evidence, separate verified facts from assumptions."
         ))
 
+    def test_daily_control_brief_uses_code_owned_grounded_synthesis(self):
+        objective = (
+            "Produce one concise internal daily SuperMega operating control brief from "
+            "registered project evidence. Include exactly: current verified state, one "
+            "highest-value internal next action, one measurable acceptance check, missing "
+            "proof, and assumptions. Every verified claim must cite its exact source filename "
+            "and supplied evidence ID. End with: Owner review required."
+        )
+        self.assertTrue(_requires_strict_grounded_synthesis(objective))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "current.md"
+            source.write_text(
+                "Managed persistence is not ready and production remains unauthorized.",
+                encoding="utf-8",
+            )
+            company = Company(root / "state", CountingMockModel())
+            project_id = company.create_project("Daily control")
+            company.add_knowledge(source, project_id)
+
+            job_id, _ = company.run(
+                objective, roles=["operations"], project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+            detail = company.job_detail(job_id)
+
+            self.assertTrue(evaluation["passed"], {
+                key: value for key, value in evaluation["checks"].items() if not value
+            })
+            synthesis = detail["job"][7]
+            for label in (
+                "Current verified state", "Highest-value internal next action",
+                "Acceptance check", "Missing proof", "Assumptions",
+            ):
+                self.assertIn(f"{label}:", synthesis)
+            self.assertIn("current.md [EVIDENCE:", synthesis)
+            self.assertTrue(synthesis.endswith("Owner review required."))
+            self.assertNotIn("file://", synthesis)
+
     def test_strict_grounded_objective_uses_structured_synthesis_and_isolates_drafts(self):
         objective = (
             "Using imported alpha.md, separate verified facts from assumptions. Define three "

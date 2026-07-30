@@ -628,8 +628,9 @@ _STRICT_SECTION_FIELDS = {
     "Owner gates": "owner_gates",
 }
 _CODE_OWNED_STRUCTURED_LABELS = {
-    "Verified facts", "Assumptions", "Daily review cadence", "Success checks", "Failure modes",
-    "Owner gates",
+    "Verified facts", "Current verified state", "Highest-value internal next action",
+    "Acceptance check", "Missing proof", "Assumptions", "Daily review cadence",
+    "Success checks", "Failure modes", "Owner gates",
 }
 _SENSITIVE_PROPOSAL_PATTERN = re.compile(
     r"\b(?:send|contact|notify|message|email|post)\b.{0,80}\b(?:reports?|results?|data|"
@@ -1071,6 +1072,19 @@ def _requires_strict_grounded_synthesis(objective: str) -> bool:
     return bool(
         "matching supplied evidence id" in objective_lower
         or (
+            "exact source filename" in objective_lower
+            and "supplied evidence id" in objective_lower
+            and all(
+                field in objective_lower for field in (
+                    "current verified state",
+                    "highest-value internal next action",
+                    "measurable acceptance check",
+                    "missing proof",
+                    "assumptions",
+                )
+            )
+        )
+        or (
             "facts from assumptions" in objective_lower
             and "using" in objective_lower
             and "imported" in objective_lower
@@ -1310,6 +1324,23 @@ def render_structured_synthesis(
     for label in required_labels:
         if label == "Verified facts":
             content = grounded_verified_facts(sources, objective)
+        elif label == "Current verified state":
+            content = grounded_verified_facts(sources, objective)
+        elif label == "Highest-value internal next action":
+            content = (
+                "Proposed, not verified or performed: Review the highest-authority frozen "
+                "limitation and record one bounded local remediation."
+            )
+        elif label == "Acceptance check":
+            content = (
+                "Pass only when current source hashes, the sealed report hash, and every "
+                "deterministic quality gate match."
+            )
+        elif label == "Missing proof":
+            content = (
+                "Current evidence does not prove managed persistence, security readiness, or "
+                "production authorization."
+            )
         elif label == "Assumptions":
             content = (
                 "Current operational readiness and adoption remain unverified pending owner review."
@@ -7465,6 +7496,18 @@ class Company:
             required_labels: list[str] = []
             if "facts from assumptions" in objective_lower:
                 required_labels.extend(["Verified facts", "Assumptions"])
+            daily_control_labels = (
+                ("current verified state", "Current verified state"),
+                ("highest-value internal next action", "Highest-value internal next action"),
+                ("measurable acceptance check", "Acceptance check"),
+                ("missing proof", "Missing proof"),
+                ("assumptions", "Assumptions"),
+            )
+            if all(trigger in objective_lower for trigger, _ in daily_control_labels):
+                required_labels.extend(
+                    label for _, label in daily_control_labels
+                    if label not in required_labels
+                )
             concept_labels = {
                 "task templates": "Task templates",
                 "daily review cadence": "Daily review cadence",
@@ -7477,9 +7520,12 @@ class Company:
             )
             source_names = sorted({Path(hit.path).name for hit in sources})
             source_citation_required = bool(
-                "facts from assumptions" in objective_lower
-                and "using" in objective_lower
-                and "imported" in objective_lower
+                strict_evidence_pairs_required
+                or (
+                    "facts from assumptions" in objective_lower
+                    and "using" in objective_lower
+                    and "imported" in objective_lower
+                )
             )
             template_count_match = re.search(
                 r"\bdefine\s+(three|\d+)\s+(?:reusable\s+)?task templates?\b",
@@ -7508,9 +7554,12 @@ class Company:
                         raise ValueError(
                             "Strict evidence-pair synthesis requires frozen local sources"
                         )
-                    if required_labels[:2] != ["Verified facts", "Assumptions"]:
+                    if (
+                        "Verified facts" not in required_labels
+                        and "Current verified state" not in required_labels
+                    ):
                         raise ValueError(
-                            "Strict evidence-pair synthesis requires facts and assumptions sections"
+                            "Strict evidence-pair synthesis requires one code-owned verified section"
                         )
                     allowed_fields = set(schema["properties"])
                     deterministic_single_template = bool(
@@ -7518,8 +7567,18 @@ class Company:
                         and "Task templates" in required_labels
                         and not allowed_fields
                     )
+                    deterministic_daily_control = required_labels == [
+                        "Current verified state",
+                        "Highest-value internal next action",
+                        "Acceptance check",
+                        "Missing proof",
+                        "Assumptions",
+                    ]
+                    deterministic_code_owned = bool(
+                        deterministic_single_template or deterministic_daily_control
+                    )
                     complete_structured = getattr(self.model, "complete_structured", None)
-                    if not deterministic_single_template and not callable(complete_structured):
+                    if not deterministic_code_owned and not callable(complete_structured):
                         raise RuntimeError(
                             "Local model does not support required structured synthesis"
                         )
@@ -7585,9 +7644,9 @@ class Company:
                             "Executive word limit cannot contain the required structured report"
                         )
                     structured_attempt_used = 0
-                    structured_attempts = (0,) if deterministic_single_template else (1, 2)
+                    structured_attempts = (0,) if deterministic_code_owned else (1, 2)
                     for structured_attempt in structured_attempts:
-                        if deterministic_single_template:
+                        if deterministic_code_owned:
                             structured = {}
                         else:
                             structured_metrics_reset = _reset_model_metrics(self.model)
@@ -7668,7 +7727,7 @@ class Company:
                         structured_attempt_used = structured_attempt
                         successful_structured_metrics_reset = structured_metrics_reset
                         break
-                    if structured_attempt_used == 0 and not deterministic_single_template:
+                    if structured_attempt_used == 0 and not deterministic_code_owned:
                         raise RuntimeError("Structured synthesis did not produce a valid result")
                     structured_synthesis_applied = True
                     constraint_applied = True
