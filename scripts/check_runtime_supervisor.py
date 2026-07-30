@@ -25,6 +25,7 @@ if __package__:
     )
     from .runtime_guard import (  # noqa: E402
         OLLAMA_SHA256_PATTERN, READINESS_ACTION_MAP, RESULT_JOURNAL_NAME,
+        RUNTIME_KEEP_ALIVE, RUNTIME_NUM_CTX, RUNTIME_NUM_PREDICT,
         GuardExecutableError, GuardExecutableHashMismatch,
         GuardResultJournalError, _normalized_company_home, _record_metadata,
         _render_result as _render_guard_result, _same_record,
@@ -39,6 +40,7 @@ else:
     )
     from runtime_guard import (  # noqa: E402
         OLLAMA_SHA256_PATTERN, READINESS_ACTION_MAP, RESULT_JOURNAL_NAME,
+        RUNTIME_KEEP_ALIVE, RUNTIME_NUM_CTX, RUNTIME_NUM_PREDICT,
         GuardExecutableError, GuardExecutableHashMismatch,
         GuardResultJournalError, _normalized_company_home, _record_metadata,
         _render_result as _render_guard_result, _same_record,
@@ -53,9 +55,9 @@ TASK_SNAPSHOT_SCHEMA = "local-company.runtime-task-snapshot.v1"
 EXPECTED_TASK_NAME = "SuperMega Local Runtime Guard"
 EXPECTED_TASK_PATH = "\\"
 PORT = 8765
-NUM_CTX = 4096
-NUM_PREDICT = 2048
-KEEP_ALIVE = "30s"
+NUM_CTX = RUNTIME_NUM_CTX
+NUM_PREDICT = RUNTIME_NUM_PREDICT
+KEEP_ALIVE = RUNTIME_KEEP_ALIVE
 WAIT_SECONDS = 15
 SCHEDULE_INTERVAL_SECONDS = 300
 DISPATCH_GRACE_SECONDS = 120

@@ -66,6 +66,11 @@ def _readiness_result() -> dict[str, object]:
 
 
 class RuntimeSupervisorTests(unittest.TestCase):
+    def test_supervisor_uses_guard_scale_to_zero_profile(self):
+        self.assertEqual(supervisor.NUM_CTX, runtime_guard.RUNTIME_NUM_CTX)
+        self.assertEqual(supervisor.NUM_PREDICT, 768)
+        self.assertEqual(supervisor.KEEP_ALIVE, "0s")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

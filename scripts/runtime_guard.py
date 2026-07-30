@@ -58,6 +58,9 @@ KNOWN_PROCESS_RELATIONS = {
 }
 OLLAMA_PORT = 11434
 OLLAMA_HOST = "127.0.0.1:11434"
+RUNTIME_NUM_CTX = 4096
+RUNTIME_NUM_PREDICT = 768
+RUNTIME_KEEP_ALIVE = "0s"
 READINESS_ACTION_MAP = {
     "align_company_home": "inspect_company_store",
     "inspect_build_provenance": "inspect_build_manifest",
@@ -152,7 +155,7 @@ def _valid_runtime_arguments(
         and type(num_ctx) is int and 1024 <= num_ctx <= 131072
         and type(num_predict) is int and 32 <= num_predict <= 4096
         and type(keep_alive) is str
-        and re.fullmatch(r"[1-9][0-9]{0,4}[smh]", keep_alive)
+        and re.fullmatch(r"(?:0s|[1-9][0-9]{0,4}[smh])", keep_alive)
         and type(wait_seconds) is int and 1 <= wait_seconds <= 30
     )
 
@@ -1266,7 +1269,8 @@ def _guard_locked(
 
 def guard_once(
     home: Path, *, port: int = 8765, model: str = "qwen3.5:0.8b",
-    num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
+    num_ctx: int = RUNTIME_NUM_CTX, num_predict: int = RUNTIME_NUM_PREDICT,
+    keep_alive: str = RUNTIME_KEEP_ALIVE,
     wait_seconds: int = 10, ollama_executable: Path | None = None,
     ollama_sha256: str | None = None,
     allow_job_inheritance: bool = False,
@@ -1350,9 +1354,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--home", type=Path)
     result.add_argument("--port", type=int, default=8765)
     result.add_argument("--model", default="qwen3.5:0.8b")
-    result.add_argument("--num-ctx", type=int, default=4096)
-    result.add_argument("--num-predict", type=int, default=2048)
-    result.add_argument("--keep-alive", default="30s")
+    result.add_argument("--num-ctx", type=int, default=RUNTIME_NUM_CTX)
+    result.add_argument("--num-predict", type=int, default=RUNTIME_NUM_PREDICT)
+    result.add_argument("--keep-alive", default=RUNTIME_KEEP_ALIVE)
     result.add_argument("--wait-seconds", type=int, default=10)
     result.add_argument("--ollama-executable", type=Path)
     result.add_argument("--ollama-sha256")

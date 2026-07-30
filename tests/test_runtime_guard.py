@@ -33,8 +33,8 @@ def _live_service_result(**extra: object) -> dict[str, object]:
         "provider": "ollama",
         "model": MODEL,
         "num_ctx": 4096,
-        "num_predict": 2048,
-        "keep_alive": "30s",
+        "num_predict": 768,
+        "keep_alive": "0s",
         **extra,
     }
 
@@ -46,8 +46,8 @@ def _locked_arguments(home: Path) -> dict[str, object]:
         "port": 8765,
         "model": MODEL,
         "num_ctx": 4096,
-        "num_predict": 2048,
-        "keep_alive": "30s",
+        "num_predict": 768,
+        "keep_alive": "0s",
         "wait_seconds": 1,
         "ollama_executable": None,
         "ollama_sha256": None,
@@ -497,7 +497,7 @@ class RuntimeGuardTests(unittest.TestCase):
             self.assertEqual(payload["changes"], ["service_started"])
             start.assert_called_once_with(
                 Path(tmp), port=8765, provider="ollama", model=MODEL,
-                num_ctx=4096, num_predict=2048, keep_alive="30s",
+                num_ctx=4096, num_predict=768, keep_alive="0s",
             )
 
     def test_full_readiness_vetoes_live_mixed_release_and_is_followed_by_exact_rechecks(self):
@@ -631,7 +631,7 @@ class RuntimeGuardTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 status, relation, live = guard._service_components(
                     raw, port=8765, model=MODEL, num_ctx=4096,
-                    num_predict=2048, keep_alive="30s",
+                    num_predict=768, keep_alive="0s",
                 )
                 self.assertEqual(status, "invalid")
                 self.assertFalse(live)
@@ -641,7 +641,7 @@ class RuntimeGuardTests(unittest.TestCase):
         self.assertEqual(
             guard._service_components(
                 wrong_configuration, port=8765, model=MODEL, num_ctx=4096,
-                num_predict=2048, keep_alive="30s",
+                num_predict=768, keep_alive="0s",
             ),
             ("configuration_mismatch", "match", False),
         )
