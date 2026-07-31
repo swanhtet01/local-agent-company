@@ -9,6 +9,7 @@ from pathlib import Path
 from local_company.cli import _interactive_vision_sales_intake, parser
 from local_company.supermega import (
     _vision_sales_bundle_digest,
+    create_vision_prospect_drafts,
     create_vision_sales_intake,
     import_vision_prospects,
     run_vision_sales,
@@ -166,6 +167,12 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(prospect_args.supermega_command, "vision-prospect-import")
         self.assertEqual(prospect_args.input, self.root / "prospects.csv")
 
+        draft_args = parser().parse_args([
+            "supermega", "vision-prospect-drafts", "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(draft_args.supermega_command, "vision-prospect-drafts")
+        self.assertEqual(draft_args.sales_root, self.sales)
+
     def _write_prospect_csv(self, rows=None):
         rows = rows or [
             {
@@ -207,6 +214,7 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertNotIn("Example POS", json.dumps(first))
         self.assertEqual(status["research"], {
             "researched_unsent_unqualified": 2,
+            "outreach_drafts_ready": 0,
             "integrity_failures": 0,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         })
@@ -241,6 +249,40 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_must_be_https"):
             import_vision_prospects(self._write_prospect_csv(rows), self.sales)
         self.assertFalse((self.sales / "research").exists())
+
+    def test_outreach_drafts_are_local_idempotent_and_integrity_checked(self):
+        import_vision_prospects(self._write_prospect_csv(), self.sales)
+        prospect_files = sorted((self.sales / "research" / "prospects").glob("*.json"))
+        research_before = {path.name: path.read_bytes() for path in prospect_files}
+
+        first = create_vision_prospect_drafts(self.sales)
+        second = create_vision_prospect_drafts(self.sales)
+        status = vision_sales_status(self.sales)
+
+        self.assertEqual(first["contract"], "local-company.supermega-vision-prospect-drafts.v1")
+        self.assertEqual(first["drafts_created"], 2)
+        self.assertEqual(first["receipts_created"], 2)
+        self.assertEqual(second["drafts_created"], 0)
+        self.assertEqual(second["drafts_replayed"], 2)
+        self.assertEqual(first["controls"]["external_sends"], 0)
+        self.assertEqual(first["controls"]["lead_qualifications"], 0)
+        self.assertEqual(status["research"]["outreach_drafts_ready"], 2)
+        self.assertEqual(status["pipeline"]["qualified_drafts"], 0)
+        self.assertEqual(status["pipeline"]["draft_pipeline_value_usd"], 0)
+        self.assertIn("nothing has been sent, qualified, or counted as revenue", status["next_action"])
+        self.assertEqual({path.name: path.read_bytes() for path in prospect_files}, research_before)
+
+        draft = next((self.sales / "research" / "outreach-drafts").glob("*.txt"))
+        draft_text = draft.read_text(encoding="utf-8")
+        self.assertIn("DRAFT — OWNER REVIEW REQUIRED — NOT SENT", draft_text)
+        self.assertIn("I am not assuming a fit", draft_text)
+        self.assertIn("This local draft has not been sent", draft_text)
+        draft.write_text("tampered", encoding="utf-8")
+        attention = vision_sales_status(self.sales)
+        self.assertEqual(attention["status"], "attention")
+        self.assertEqual(attention["research"]["integrity_failures"], 1)
+        with self.assertRaisesRegex(RuntimeError, "outreach_conflict"):
+            create_vision_prospect_drafts(self.sales)
 
     def test_interactive_intake_collects_locally_without_command_argument_data(self):
         answers = iter([
@@ -389,6 +431,7 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         })
         self.assertEqual(result["research"], {
             "researched_unsent_unqualified": 0,
+            "outreach_drafts_ready": 0,
             "integrity_failures": 0,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         })

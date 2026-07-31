@@ -15,7 +15,9 @@ VISION_SALES_CONTRACT = "local-company.supermega-vision-sales.v1"
 VISION_SALES_STATUS_CONTRACT = "local-company.supermega-vision-sales-status.v1"
 VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
 VISION_PROSPECT_IMPORT_CONTRACT = "local-company.supermega-vision-prospect-import.v1"
+VISION_PROSPECT_DRAFTS_CONTRACT = "local-company.supermega-vision-prospect-drafts.v1"
 PROSPECT_RESEARCH_CONTRACT = "supermega.vision.prospect_research.v1"
+PROSPECT_OUTREACH_RECEIPT_CONTRACT = "supermega.vision.prospect_outreach_receipt.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
 VISION_SALES_BUNDLE_DOMAIN = b"supermega.vision-sales-worker.v1\0"
 VISION_SALES_BUNDLE_PATHS = (
@@ -336,6 +338,139 @@ def import_vision_prospects(input_path: Path, sales_root: Path | None = None) ->
     }
 
 
+def _render_prospect_outreach_draft(record: dict) -> bytes:
+    organization = " ".join(record["organization"].split())
+    signal = " ".join(record["verified_public_signal"].split())
+    contact = " ".join(record["public_contact"].split())
+    audience = "your product team" if record["route_type"] == "direct product team" else "your team or one authorized client project"
+    body = f"""DRAFT — OWNER REVIEW REQUIRED — NOT SENT
+
+Prospect: {organization}
+Public contact route: {contact}
+Evidence source: {record['source']}
+Research status: researched, unsent, and unqualified
+
+Subject: Small local visual-QA pilot for {organization}
+
+Hi {organization} team,
+
+Your public product or service information describes: {signal}
+
+We built SuperMega Vision, a local observation-only system that learns a small set of buyer-approved Windows or Android screen states and reports held-out accuracy, false positives, abstentions, and device latency. It does not need to click, send messages, accept payments, handle credentials, or change production data.
+
+I am not assuming a fit. Is there one screen workflow that {audience} repeatedly checks by eye? If so, we can first verify screenshot rights, the state set, human fallback, device, workload, and acceptance thresholds. Only then would we decide whether a four-week paid founding pilot is worthwhile.
+
+No data upload or production connection is required for the first conversation.
+
+This local draft has not been sent. Its public claims and contact route must be rechecked before use.
+"""
+    return body.encode("utf-8")
+
+
+def _prospect_outreach_artifacts(prospect_id: str, research_bytes: bytes, record: dict) -> tuple[bytes, bytes]:
+    draft = _render_prospect_outreach_draft(record)
+    receipt = {
+        "contract": PROSPECT_OUTREACH_RECEIPT_CONTRACT,
+        "prospect_id": prospect_id,
+        "research_sha256": hashlib.sha256(research_bytes).hexdigest(),
+        "draft_sha256": hashlib.sha256(draft).hexdigest(),
+        "draft_file": f"{prospect_id}.txt",
+        "status": "owner_review_required_unsent",
+        "effects": {
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "lead_qualifications": 0,
+        },
+    }
+    encoded_receipt = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return draft, encoded_receipt
+
+
+def _write_exact_if_missing(path: Path, expected: bytes, conflict: str) -> bool:
+    if path.exists():
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.stat().st_size != len(expected)
+            or path.read_bytes() != expected
+        ):
+            raise RuntimeError(conflict)
+        return False
+    try:
+        with path.open("xb") as handle:
+            handle.write(expected)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+    except FileExistsError:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.stat().st_size != len(expected)
+            or path.read_bytes() != expected
+        ):
+            raise RuntimeError(conflict)
+        return False
+
+
+def create_vision_prospect_drafts(sales_root: Path | None = None) -> dict:
+    requested_sales = (sales_root or default_vision_sales_root()).expanduser()
+    if requested_sales.exists() and requested_sales.is_symlink():
+        raise RuntimeError("vision_sales_root_unsafe")
+    sales = requested_sales.resolve()
+    research_root = sales / "research"
+    prospects = research_root / "prospects"
+    inventory, integrity_failures = _prospect_research_inventory(prospects)
+    if integrity_failures:
+        raise RuntimeError("vision_prospect_research_integrity_failed")
+
+    drafts = research_root / "outreach-drafts"
+    receipts = research_root / "outreach-receipts"
+    for directory in (research_root, drafts, receipts):
+        if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
+            raise RuntimeError("vision_prospect_outreach_store_unsafe")
+    drafts.mkdir(parents=True, exist_ok=True)
+    receipts.mkdir(parents=True, exist_ok=True)
+
+    expected = []
+    for prospect_id, (record, research_bytes) in sorted(inventory.items()):
+        draft, receipt = _prospect_outreach_artifacts(prospect_id, research_bytes, record)
+        expected.append((drafts / f"{prospect_id}.txt", draft, receipts / f"{prospect_id}.json", receipt))
+    for draft_path, draft, receipt_path, receipt in expected:
+        for path, content in ((draft_path, draft), (receipt_path, receipt)):
+            if path.exists() and (
+                not path.is_file()
+                or path.is_symlink()
+                or path.stat().st_size != len(content)
+                or path.read_bytes() != content
+            ):
+                raise RuntimeError("vision_prospect_outreach_conflict")
+
+    drafts_created = 0
+    receipts_created = 0
+    for draft_path, draft, receipt_path, receipt in expected:
+        drafts_created += int(_write_exact_if_missing(draft_path, draft, "vision_prospect_outreach_conflict"))
+        receipts_created += int(_write_exact_if_missing(receipt_path, receipt, "vision_prospect_outreach_conflict"))
+    return {
+        "contract": VISION_PROSPECT_DRAFTS_CONTRACT,
+        "status": "ready",
+        "researched_prospects": len(inventory),
+        "drafts_created": drafts_created,
+        "receipts_created": receipts_created,
+        "drafts_replayed": len(inventory) - drafts_created,
+        "next_action": "Review one local outreach draft; nothing has been sent, qualified, or priced as revenue.",
+        "controls": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "lead_qualifications": 0,
+            "research_mutations": 0,
+        },
+    }
+
+
 def _validated_worker_result(stdout: str) -> dict:
     lines = [line for line in stdout.splitlines() if line.strip()]
     if len(lines) != 1:
@@ -459,9 +594,9 @@ def _regular_json_files(directory: Path) -> tuple[list[Path], int]:
     return files, attention
 
 
-def _prospect_research_status(directory: Path) -> tuple[int, int]:
+def _prospect_research_inventory(directory: Path) -> tuple[dict[str, tuple[dict, bytes]], int]:
     files, integrity_failures = _regular_json_files(directory)
-    researched = 0
+    inventory = {}
     for path in files:
         try:
             if path.stat().st_size > MAX_STATUS_FILE_BYTES:
@@ -481,10 +616,64 @@ def _prospect_research_status(directory: Path) -> tuple[int, int]:
                 or encoded != expected
             ):
                 raise ValueError("prospect_artifact_invalid")
-            researched += 1
+            inventory[prospect_id] = (normalized, encoded)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
             integrity_failures += 1
-    return researched, integrity_failures
+    return inventory, integrity_failures
+
+
+def _regular_text_files(directory: Path) -> tuple[list[Path], int]:
+    if not directory.exists():
+        return [], 0
+    if not directory.is_dir() or directory.is_symlink():
+        return [], 1
+    entries = sorted(directory.iterdir(), key=lambda path: path.name.encode("utf-8"))
+    attention = max(0, len(entries) - MAX_STATUS_FILES)
+    files = []
+    for path in entries[:MAX_STATUS_FILES]:
+        if path.suffix.lower() != ".txt" or not path.is_file() or path.is_symlink():
+            attention += 1
+            continue
+        files.append(path)
+    return files, attention
+
+
+def _prospect_outreach_status(research_root: Path, inventory: dict[str, tuple[dict, bytes]]) -> tuple[int, int]:
+    receipt_files, integrity_failures = _regular_json_files(research_root / "outreach-receipts")
+    draft_files, draft_attention = _regular_text_files(research_root / "outreach-drafts")
+    integrity_failures += draft_attention
+    drafts_by_name = {path.name: path for path in draft_files}
+    referenced_drafts = set()
+    ready = 0
+    for receipt_path in receipt_files:
+        try:
+            if receipt_path.stat().st_size > MAX_STATUS_FILE_BYTES:
+                raise ValueError("outreach_receipt_too_large")
+            encoded_receipt = receipt_path.read_bytes()
+            receipt = json.loads(encoded_receipt.decode("utf-8"))
+            prospect_id = receipt.get("prospect_id")
+            if not isinstance(prospect_id, str) or prospect_id not in inventory:
+                raise ValueError("outreach_prospect_unknown")
+            record, research_bytes = inventory[prospect_id]
+            expected_draft, expected_receipt = _prospect_outreach_artifacts(prospect_id, research_bytes, record)
+            draft_name = f"{prospect_id}.txt"
+            draft_path = drafts_by_name.get(draft_name)
+            if draft_path is not None:
+                referenced_drafts.add(draft_name)
+            if (
+                receipt.get("contract") != PROSPECT_OUTREACH_RECEIPT_CONTRACT
+                or receipt_path.name != f"{prospect_id}.json"
+                or encoded_receipt != expected_receipt
+                or draft_path is None
+                or draft_path.stat().st_size != len(expected_draft)
+                or draft_path.read_bytes() != expected_draft
+            ):
+                raise ValueError("outreach_artifact_invalid")
+            ready += 1
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            integrity_failures += 1
+    integrity_failures += len(set(drafts_by_name) - referenced_drafts)
+    return ready, integrity_failures
 
 
 def vision_sales_status(sales_root: Path | None = None) -> dict:
@@ -495,7 +684,11 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
     proposals = outbox / "proposals"
     replies = outbox / "reply-drafts"
     rejections = outbox / "rejections"
-    researched, research_integrity_failures = _prospect_research_status(sales / "research" / "prospects")
+    research_root = sales / "research"
+    research_inventory, research_integrity_failures = _prospect_research_inventory(research_root / "prospects")
+    outreach_drafts_ready, outreach_integrity_failures = _prospect_outreach_status(research_root, research_inventory)
+    research_integrity_failures += outreach_integrity_failures
+    researched = len(research_inventory)
 
     receipt_files, integrity_failures = _regular_json_files(receipts)
     artifact_directories_safe = all(
@@ -578,8 +771,10 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
         next_action = "Review qualified proposal and reply drafts; nothing has been sent."
     elif blocked:
         next_action = "Review blocked-lead questions and missing start gates; nothing has been sent."
-    elif researched:
-        next_action = "Review researched prospects and choose one for owner-controlled outreach; nothing has been sent or qualified."
+    elif researched and outreach_drafts_ready < researched:
+        next_action = "Generate the missing local prospect outreach drafts; nothing has been sent or qualified."
+    elif outreach_drafts_ready:
+        next_action = "Review one local outreach draft; nothing has been sent, qualified, or counted as revenue."
     else:
         next_action = "No Vision leads are ready; keep the local inbox available for contact events."
 
@@ -598,6 +793,7 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
         },
         "research": {
             "researched_unsent_unqualified": researched,
+            "outreach_drafts_ready": outreach_drafts_ready,
             "integrity_failures": research_integrity_failures,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         },
