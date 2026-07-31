@@ -1,11 +1,12 @@
 import json
+import hashlib
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from local_company.cli import parser
-from local_company.supermega import _vision_sales_bundle_digest, run_vision_sales
+from local_company.supermega import _vision_sales_bundle_digest, run_vision_sales, vision_sales_status
 
 
 class SuperMegaCapabilityTests(unittest.TestCase):
@@ -130,6 +131,82 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(args.supermega_command, "vision-sales")
         self.assertEqual(args.platform_root, self.platform)
         self.assertEqual(args.sales_root, self.sales)
+
+        status_args = parser().parse_args([
+            "supermega", "vision-sales-status", "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(status_args.supermega_command, "vision-sales-status")
+        self.assertEqual(status_args.sales_root, self.sales)
+
+    def _write_sales_artifact(self, lead_id, *, qualified, price, blockers):
+        proposals = self.sales / "outbox" / "proposals"
+        replies = self.sales / "outbox" / "reply-drafts"
+        receipts = self.sales / "outbox" / "receipts"
+        for directory in (proposals, replies, receipts):
+            directory.mkdir(parents=True, exist_ok=True)
+        proposal = f"proposal for {lead_id}\n".encode()
+        reply = f"reply for {lead_id}\n".encode()
+        (proposals / f"{lead_id}.proposal.md").write_bytes(proposal)
+        (replies / f"{lead_id}.reply.txt").write_bytes(reply)
+        receipt = {
+            "contract": "supermega.vision.lead_proposal_receipt.v2",
+            "lead_id": lead_id,
+            "proposal_sha256": hashlib.sha256(proposal).hexdigest(),
+            "reply_sha256": hashlib.sha256(reply).hexdigest(),
+            "qualified": qualified,
+            "blockers": blockers,
+            "price_usd": price,
+            "proposal_file": f"{lead_id}.proposal.md",
+            "reply_file": f"{lead_id}.reply.txt",
+        }
+        (receipts / f"{lead_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    def test_status_verifies_pipeline_value_and_remains_read_only(self):
+        qualified_id = "LEAD-AAAAAAAAAAAAAAAA"
+        blocked_id = "LEAD-BBBBBBBBBBBBBBBB"
+        pending_id = "LEAD-CCCCCCCCCCCCCCCC"
+        self._write_sales_artifact(qualified_id, qualified=True, price=1_500, blockers=[])
+        self._write_sales_artifact(
+            blocked_id, qualified=False, price=2_250,
+            blockers=["written_screenshot_rights_required"],
+        )
+        inbox = self.sales / "inbox"
+        inbox.mkdir(parents=True)
+        for lead_id in (qualified_id, pending_id):
+            event = {"event": "supermega.contact.created", "record": {"workflow": "vision", "lead_id": lead_id}}
+            (inbox / f"{lead_id}.json").write_text(json.dumps(event), encoding="utf-8")
+        rejections = self.sales / "outbox" / "rejections"
+        rejections.mkdir(parents=True)
+        (rejections / "one.json").write_text("{}", encoding="utf-8")
+        before = {path.relative_to(self.sales).as_posix(): path.read_bytes() for path in self.sales.rglob("*") if path.is_file()}
+
+        result = vision_sales_status(self.sales)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["pipeline"], {
+            "pending_events": 1,
+            "qualified_drafts": 1,
+            "blocked_drafts": 1,
+            "rejection_receipts": 1,
+            "integrity_failures": 0,
+            "input_attention": 0,
+            "draft_pipeline_value_usd": 1_500,
+            "value_label": "Draft proposal value only; not booked or collected revenue.",
+        })
+        self.assertIn("Run the bounded Vision sales worker", result["next_action"])
+        self.assertEqual(result["controls"]["files_modified"], 0)
+        after = {path.relative_to(self.sales).as_posix(): path.read_bytes() for path in self.sales.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
+        reply = self.sales / "outbox" / "reply-drafts" / f"{qualified_id}.reply.txt"
+        reply.write_text("tampered", encoding="utf-8")
+        (inbox / "malformed.json").write_text("{not json", encoding="utf-8")
+        attention = vision_sales_status(self.sales)
+        self.assertEqual(attention["status"], "attention")
+        self.assertEqual(attention["pipeline"]["integrity_failures"], 1)
+        self.assertEqual(attention["pipeline"]["input_attention"], 1)
+        self.assertEqual(attention["pipeline"]["draft_pipeline_value_usd"], 0)
+        self.assertIn("integrity failures", attention["next_action"])
 
 
 if __name__ == "__main__":

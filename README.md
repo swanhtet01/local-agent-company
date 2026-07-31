@@ -189,9 +189,10 @@ The coordinator can run the fixed, offline Vision sales worker without loading a
 
 ```powershell
 .\local-company.cmd supermega vision-sales
+.\local-company.cmd supermega vision-sales-status
 ```
 
-It reads contact-event JSON files from the local Vision sales inbox and produces owner-review proposals, reply drafts, receipts, and rejection evidence. The command runs serially, accepts no arbitrary executable or shell text, pins a domain-separated SHA-256 over both approved worker files, verifies the bundle again after execution, validates the worker contract, and rejects any result that claims network requests, external sends, payments, or input mutations. Override the checked platform and sales roots only when testing or moving the local workspace:
+The first command reads contact-event JSON files from the local Vision sales inbox and produces owner-review proposals, reply drafts, receipts, and rejection evidence. It runs serially, accepts no arbitrary executable or shell text, pins a domain-separated SHA-256 over both approved worker files, verifies the bundle again after execution, validates the worker contract, and rejects any result that claims network requests, external sends, payments, or input mutations. The status command is read-only: it verifies proposal and reply hashes, counts pending, qualified, blocked, and rejected items, labels draft pipeline value as neither booked nor collected revenue, and returns one next action without exposing local paths. Override the checked platform and sales roots only when testing or moving the local workspace:
 
 ```powershell
 .\local-company.cmd supermega vision-sales --platform-root C:\Users\you\Projects\supermega-platform --sales-root C:\local\vision-sales
