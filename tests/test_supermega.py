@@ -1,3 +1,4 @@
+import csv
 import json
 import hashlib
 import subprocess
@@ -9,6 +10,7 @@ from local_company.cli import _interactive_vision_sales_intake, parser
 from local_company.supermega import (
     _vision_sales_bundle_digest,
     create_vision_sales_intake,
+    import_vision_prospects,
     run_vision_sales,
     vision_sales_status,
 )
@@ -157,6 +159,89 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertTrue(interactive_args.interactive)
         self.assertIsNone(interactive_args.input)
 
+        prospect_args = parser().parse_args([
+            "supermega", "vision-prospect-import", "--input", str(self.root / "prospects.csv"),
+            "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(prospect_args.supermega_command, "vision-prospect-import")
+        self.assertEqual(prospect_args.input, self.root / "prospects.csv")
+
+    def _write_prospect_csv(self, rows=None):
+        rows = rows or [
+            {
+                "rank": 1, "organization": "Example POS", "route_type": "direct product team",
+                "fit_score_10": 10, "verified_public_signal": "Android and web POS",
+                "public_contact": "support@example.com", "source": "https://example.com/product",
+                "status": "researched_unsent_unqualified",
+            },
+            {
+                "rank": 2, "organization": "Example Apps", "route_type": "agency or channel partner",
+                "fit_score_10": 8, "verified_public_signal": "Native Android development",
+                "public_contact": "+95 9 000000000", "source": "https://example.org/services",
+                "status": "researched_unsent_unqualified",
+            },
+        ]
+        path = self.root / "prospects.csv"
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=[
+                "rank", "organization", "route_type", "fit_score_10", "verified_public_signal",
+                "public_contact", "source", "status",
+            ])
+            writer.writeheader()
+            writer.writerows(rows)
+        return path
+
+    def test_researched_prospect_import_is_idempotent_and_separate_from_leads(self):
+        source = self._write_prospect_csv()
+        original = source.read_bytes()
+
+        first = import_vision_prospects(source, self.sales)
+        second = import_vision_prospects(source, self.sales)
+        status = vision_sales_status(self.sales)
+
+        self.assertEqual(first["contract"], "local-company.supermega-vision-prospect-import.v1")
+        self.assertEqual(first["created"], 2)
+        self.assertEqual(first["replayed"], 0)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(second["replayed"], 2)
+        self.assertNotIn("Example POS", json.dumps(first))
+        self.assertEqual(status["research"], {
+            "researched_unsent_unqualified": 2,
+            "integrity_failures": 0,
+            "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
+        })
+        self.assertEqual(status["pipeline"]["qualified_drafts"], 0)
+        self.assertEqual(status["pipeline"]["draft_pipeline_value_usd"], 0)
+        self.assertIn("nothing has been sent or qualified", status["next_action"])
+        self.assertEqual(source.read_bytes(), original)
+
+        artifact = next((self.sales / "research" / "prospects").glob("*.json"))
+        artifact.write_text("{}", encoding="utf-8")
+        attention = vision_sales_status(self.sales)
+        self.assertEqual(attention["status"], "attention")
+        self.assertEqual(attention["research"]["integrity_failures"], 1)
+        (self.sales / "research" / "prospects" / "unexpected.txt").write_text("not a prospect", encoding="utf-8")
+        self.assertEqual(vision_sales_status(self.sales)["research"]["integrity_failures"], 2)
+
+    def test_researched_prospect_import_validates_every_row_before_writing(self):
+        rows = [
+            {
+                "rank": 1, "organization": "Example POS", "route_type": "direct product team",
+                "fit_score_10": 10, "verified_public_signal": "Android and web POS",
+                "public_contact": "support@example.com", "source": "https://example.com/product",
+                "status": "researched_unsent_unqualified",
+            },
+            {
+                "rank": 2, "organization": "Bad Prospect", "route_type": "direct product team",
+                "fit_score_10": 8, "verified_public_signal": "Unverified",
+                "public_contact": "nobody@example.com", "source": "http://insecure.example.com",
+                "status": "qualified",
+            },
+        ]
+        with self.assertRaisesRegex(ValueError, "source_must_be_https"):
+            import_vision_prospects(self._write_prospect_csv(rows), self.sales)
+        self.assertFalse((self.sales / "research").exists())
+
     def test_interactive_intake_collects_locally_without_command_argument_data(self):
         answers = iter([
             "Mya", "mya@example.com", "Example Works",
@@ -301,6 +386,11 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             "input_attention": 0,
             "draft_pipeline_value_usd": 1_500,
             "value_label": "Draft proposal value only; not booked or collected revenue.",
+        })
+        self.assertEqual(result["research"], {
+            "researched_unsent_unqualified": 0,
+            "integrity_failures": 0,
+            "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         })
         self.assertIn("Run the bounded Vision sales worker", result["next_action"])
         self.assertEqual(result["controls"]["files_modified"], 0)

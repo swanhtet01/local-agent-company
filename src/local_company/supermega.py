@@ -1,5 +1,7 @@
+import csv
 import json
 import hashlib
+import io
 import math
 import os
 import re
@@ -12,6 +14,8 @@ from typing import Callable
 VISION_SALES_CONTRACT = "local-company.supermega-vision-sales.v1"
 VISION_SALES_STATUS_CONTRACT = "local-company.supermega-vision-sales-status.v1"
 VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
+VISION_PROSPECT_IMPORT_CONTRACT = "local-company.supermega-vision-prospect-import.v1"
+PROSPECT_RESEARCH_CONTRACT = "supermega.vision.prospect_research.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
 VISION_SALES_BUNDLE_DOMAIN = b"supermega.vision-sales-worker.v1\0"
 VISION_SALES_BUNDLE_PATHS = (
@@ -29,6 +33,12 @@ MAX_STATUS_FILES = 1_000
 MAX_STATUS_FILE_BYTES = 256 * 1024
 MAX_INTAKE_FILE_BYTES = 64 * 1024
 MANUAL_INTAKE_DOMAIN = b"supermega.vision.manual-intake.v1\0"
+PROSPECT_RESEARCH_DOMAIN = b"supermega.vision.prospect-research.v1\0"
+MAX_PROSPECT_ROWS = 100
+PROSPECT_FIELDS = (
+    "rank", "organization", "route_type", "fit_score_10", "verified_public_signal",
+    "public_contact", "source", "status",
+)
 
 
 def default_supermega_platform_root() -> Path:
@@ -187,6 +197,145 @@ def create_vision_sales_intake(input_path: Path, sales_root: Path | None = None)
     return create_vision_sales_intake_fields(supplied, sales_root)
 
 
+def _normalized_prospect_row(supplied: dict) -> dict:
+    if not isinstance(supplied, dict) or set(supplied) != set(PROSPECT_FIELDS):
+        raise ValueError("vision_prospect_fields_invalid")
+
+    def whole_number(field: str, minimum: int, maximum: int) -> int:
+        value = supplied.get(field)
+        if isinstance(value, bool):
+            raise ValueError(f"{field}_invalid")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"{field}_invalid") from error
+        if parsed < minimum or parsed > maximum or (isinstance(value, str) and value.strip() != str(parsed)):
+            raise ValueError(f"{field}_invalid")
+        return parsed
+
+    rank = whole_number("rank", 1, MAX_PROSPECT_ROWS)
+    score = whole_number("fit_score_10", 1, 10)
+    organization = _bounded_text(supplied.get("organization"), "organization", 180)
+    route_type = _bounded_text(supplied.get("route_type"), "route_type", 120)
+    signal = _bounded_text(supplied.get("verified_public_signal"), "verified_public_signal", 1_000)
+    contact = _bounded_text(supplied.get("public_contact"), "public_contact", 500)
+    source = _bounded_text(supplied.get("source"), "source", 700)
+    if not re.fullmatch(r"https://[^\s]+", source):
+        raise ValueError("source_must_be_https")
+    if supplied.get("status") != "researched_unsent_unqualified":
+        raise ValueError("vision_prospect_status_invalid")
+    return {
+        "rank": rank,
+        "organization": organization,
+        "route_type": route_type,
+        "fit_score_10": score,
+        "verified_public_signal": signal,
+        "public_contact": contact,
+        "source": source,
+        "status": "researched_unsent_unqualified",
+    }
+
+
+def _prospect_research_artifact(record: dict) -> tuple[str, bytes]:
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    prospect_id = "PROSPECT-" + hashlib.sha256(PROSPECT_RESEARCH_DOMAIN + canonical).hexdigest()[:16].upper()
+    artifact = {
+        "contract": PROSPECT_RESEARCH_CONTRACT,
+        "prospect_id": prospect_id,
+        "record_sha256": hashlib.sha256(canonical).hexdigest(),
+        "record": record,
+    }
+    encoded = (json.dumps(artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return prospect_id, encoded
+
+
+def import_vision_prospects(input_path: Path, sales_root: Path | None = None) -> dict:
+    source_path = input_path.expanduser()
+    if not source_path.is_file() or source_path.is_symlink() or source_path.stat().st_size > MAX_STATUS_FILE_BYTES:
+        raise ValueError("vision_prospect_input_invalid")
+    try:
+        raw = source_path.read_bytes()
+        if len(raw) > MAX_STATUS_FILE_BYTES:
+            raise ValueError("vision_prospect_input_invalid")
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline=""))
+        if tuple(reader.fieldnames or ()) != PROSPECT_FIELDS:
+            raise ValueError("vision_prospect_headers_invalid")
+        supplied_rows = list(reader)
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ValueError("vision_prospect_input_invalid") from error
+    if not 1 <= len(supplied_rows) <= MAX_PROSPECT_ROWS:
+        raise ValueError("vision_prospect_row_count_invalid")
+
+    records = [_normalized_prospect_row(row) for row in supplied_rows]
+    ranks = [record["rank"] for record in records]
+    organizations = [record["organization"].casefold() for record in records]
+    if len(set(ranks)) != len(ranks) or len(set(organizations)) != len(organizations):
+        raise ValueError("vision_prospect_duplicates_invalid")
+    artifacts = [_prospect_research_artifact(record) for record in records]
+    if len({prospect_id for prospect_id, _ in artifacts}) != len(artifacts):
+        raise ValueError("vision_prospect_duplicates_invalid")
+
+    requested_sales = (sales_root or default_vision_sales_root()).expanduser()
+    if requested_sales.exists() and requested_sales.is_symlink():
+        raise RuntimeError("vision_sales_root_unsafe")
+    prospects = requested_sales.resolve() / "research" / "prospects"
+    for directory in (prospects.parent, prospects):
+        if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
+            raise RuntimeError("vision_prospect_store_unsafe")
+    prospects.mkdir(parents=True, exist_ok=True)
+    if prospects.is_symlink():
+        raise RuntimeError("vision_prospect_store_unsafe")
+
+    existing = set()
+    for prospect_id, encoded in artifacts:
+        destination = prospects / f"{prospect_id}.json"
+        if destination.exists():
+            if (
+                not destination.is_file()
+                or destination.is_symlink()
+                or destination.stat().st_size != len(encoded)
+                or destination.read_bytes() != encoded
+            ):
+                raise RuntimeError("vision_prospect_import_conflict")
+            existing.add(prospect_id)
+
+    created = 0
+    for prospect_id, encoded in artifacts:
+        if prospect_id in existing:
+            continue
+        destination = prospects / f"{prospect_id}.json"
+        try:
+            with destination.open("xb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            created += 1
+        except FileExistsError:
+            if (
+                not destination.is_file()
+                or destination.is_symlink()
+                or destination.stat().st_size != len(encoded)
+                or destination.read_bytes() != encoded
+            ):
+                raise RuntimeError("vision_prospect_import_conflict")
+
+    return {
+        "contract": VISION_PROSPECT_IMPORT_CONTRACT,
+        "status": "ready",
+        "created": created,
+        "replayed": len(artifacts) - created,
+        "researched_unsent_unqualified": len(artifacts),
+        "next_action": "Review one researched prospect; do not count it as a lead or revenue until factual qualification.",
+        "controls": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "input_files_modified": 0,
+        },
+    }
+
+
 def _validated_worker_result(stdout: str) -> dict:
     lines = [line for line in stdout.splitlines() if line.strip()]
     if len(lines) != 1:
@@ -301,12 +450,41 @@ def _regular_json_files(directory: Path) -> tuple[list[Path], int]:
     files = []
     for path in entries[:MAX_STATUS_FILES]:
         if path.suffix.lower() != ".json":
+            attention += 1
             continue
         if not path.is_file() or path.is_symlink():
             attention += 1
             continue
         files.append(path)
     return files, attention
+
+
+def _prospect_research_status(directory: Path) -> tuple[int, int]:
+    files, integrity_failures = _regular_json_files(directory)
+    researched = 0
+    for path in files:
+        try:
+            if path.stat().st_size > MAX_STATUS_FILE_BYTES:
+                raise ValueError("prospect_artifact_too_large")
+            encoded = path.read_bytes()
+            artifact = json.loads(encoded.decode("utf-8"))
+            record = artifact.get("record")
+            normalized = _normalized_prospect_row(record)
+            prospect_id, expected = _prospect_research_artifact(normalized)
+            canonical = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if (
+                artifact.get("contract") != PROSPECT_RESEARCH_CONTRACT
+                or artifact.get("prospect_id") != prospect_id
+                or artifact.get("record_sha256") != hashlib.sha256(canonical).hexdigest()
+                or record != normalized
+                or path.name != f"{prospect_id}.json"
+                or encoded != expected
+            ):
+                raise ValueError("prospect_artifact_invalid")
+            researched += 1
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            integrity_failures += 1
+    return researched, integrity_failures
 
 
 def vision_sales_status(sales_root: Path | None = None) -> dict:
@@ -317,6 +495,7 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
     proposals = outbox / "proposals"
     replies = outbox / "reply-drafts"
     rejections = outbox / "rejections"
+    researched, research_integrity_failures = _prospect_research_status(sales / "research" / "prospects")
 
     receipt_files, integrity_failures = _regular_json_files(receipts)
     artifact_directories_safe = all(
@@ -391,7 +570,7 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
 
     rejection_files, rejection_attention = _regular_json_files(rejections)
     integrity_failures += rejection_attention
-    if integrity_failures:
+    if integrity_failures or research_integrity_failures:
         next_action = "Inspect sales artifact integrity failures before using any draft."
     elif pending:
         next_action = "Run the bounded Vision sales worker for pending contact events."
@@ -399,12 +578,14 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
         next_action = "Review qualified proposal and reply drafts; nothing has been sent."
     elif blocked:
         next_action = "Review blocked-lead questions and missing start gates; nothing has been sent."
+    elif researched:
+        next_action = "Review researched prospects and choose one for owner-controlled outreach; nothing has been sent or qualified."
     else:
         next_action = "No Vision leads are ready; keep the local inbox available for contact events."
 
     return {
         "contract": VISION_SALES_STATUS_CONTRACT,
-        "status": "attention" if integrity_failures or input_attention else "ready",
+        "status": "attention" if integrity_failures or input_attention or research_integrity_failures else "ready",
         "pipeline": {
             "pending_events": pending,
             "qualified_drafts": qualified,
@@ -414,6 +595,11 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
             "input_attention": input_attention,
             "draft_pipeline_value_usd": draft_pipeline_value_usd,
             "value_label": "Draft proposal value only; not booked or collected revenue.",
+        },
+        "research": {
+            "researched_unsent_unqualified": researched,
+            "integrity_failures": research_integrity_failures,
+            "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         },
         "next_action": next_action,
         "controls": {

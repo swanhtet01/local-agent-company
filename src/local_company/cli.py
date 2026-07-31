@@ -25,6 +25,7 @@ from .focus import (
 from .supermega import (
     create_vision_sales_intake,
     create_vision_sales_intake_fields,
+    import_vision_prospects,
     run_vision_sales,
     vision_sales_status,
 )
@@ -61,6 +62,9 @@ def parser() -> argparse.ArgumentParser:
     vision_intake_source.add_argument("--input", type=Path)
     vision_intake_source.add_argument("--interactive", action="store_true", help="Prompt locally without placing prospect data in command arguments")
     vision_intake.add_argument("--sales-root", type=Path)
+    vision_prospect_import = supermega_sub.add_parser("vision-prospect-import", help="Import researched prospects without qualifying or contacting them")
+    vision_prospect_import.add_argument("--input", type=Path, required=True)
+    vision_prospect_import.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
@@ -518,6 +522,8 @@ def main() -> int:
                     else create_vision_sales_intake(args.input, args.sales_root)
                 )
                 print(json.dumps(result, indent=2))
+            elif args.supermega_command == "vision-prospect-import":
+                print(json.dumps(import_vision_prospects(args.input, args.sales_root), indent=2))
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)
