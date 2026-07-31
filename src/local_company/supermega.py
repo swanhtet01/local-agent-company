@@ -1,5 +1,6 @@
 import json
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ from typing import Callable
 
 VISION_SALES_CONTRACT = "local-company.supermega-vision-sales.v1"
 VISION_SALES_STATUS_CONTRACT = "local-company.supermega-vision-sales-status.v1"
+VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
 VISION_SALES_BUNDLE_DOMAIN = b"supermega.vision-sales-worker.v1\0"
 VISION_SALES_BUNDLE_PATHS = (
@@ -25,6 +27,8 @@ ZERO_EFFECTS = {
 }
 MAX_STATUS_FILES = 1_000
 MAX_STATUS_FILE_BYTES = 256 * 1024
+MAX_INTAKE_FILE_BYTES = 64 * 1024
+MANUAL_INTAKE_DOMAIN = b"supermega.vision.manual-intake.v1\0"
 
 
 def default_supermega_platform_root() -> Path:
@@ -39,6 +43,144 @@ def default_vision_sales_root() -> Path:
     local = os.getenv("LOCALAPPDATA")
     base = Path(local) if local else Path.home() / ".local" / "state"
     return base / "SuperMega" / "vision-sales"
+
+
+def _bounded_text(value: object, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field}_required")
+    normalized = value.strip()
+    if len(normalized) > maximum or any(ord(character) < 32 and character not in "\t\n\r" for character in normalized):
+        raise ValueError(f"{field}_invalid")
+    return normalized
+
+
+def _bounded_number(value: object, field: str, minimum: float, maximum: float, *, integer: bool = False) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field}_invalid")
+    if (isinstance(value, float) and not math.isfinite(value)) or value < minimum or value > maximum or (integer and not isinstance(value, int)):
+        raise ValueError(f"{field}_invalid")
+    return int(value) if integer else value
+
+
+def create_vision_sales_intake(input_path: Path, sales_root: Path | None = None) -> dict:
+    source = input_path.expanduser()
+    if not source.is_file() or source.is_symlink() or source.stat().st_size > MAX_INTAKE_FILE_BYTES:
+        raise ValueError("vision_sales_intake_input_invalid")
+    try:
+        supplied = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("vision_sales_intake_input_invalid") from error
+    allowed = {
+        "name", "email", "company", "goal", "platform", "state_count", "weekly_runs",
+        "minutes_per_run", "labor_hourly_usd", "screenshot_rights", "human_fallback", "observation_only",
+    }
+    if not isinstance(supplied, dict) or set(supplied) - allowed:
+        raise ValueError("vision_sales_intake_fields_invalid")
+
+    name = _bounded_text(supplied.get("name"), "name", 120)
+    email = _bounded_text(supplied.get("email"), "email", 180).lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise ValueError("email_invalid")
+    company = _bounded_text(supplied.get("company"), "company", 180)
+    goal = _bounded_text(supplied.get("goal"), "goal", 4_000)
+    platform = _bounded_text(supplied.get("platform"), "platform", 20).lower()
+    if platform not in {"windows", "android", "both"}:
+        raise ValueError("platform_invalid")
+    state_count = _bounded_number(supplied.get("state_count"), "state_count", 1, 12, integer=True)
+    weekly_runs = _bounded_number(supplied.get("weekly_runs"), "weekly_runs", 1, 10_000, integer=True)
+    minutes_per_run = _bounded_number(supplied.get("minutes_per_run"), "minutes_per_run", 1, 1_440)
+    labor_hourly_usd = _bounded_number(supplied.get("labor_hourly_usd", 0), "labor_hourly_usd", 0, 10_000)
+    gates = {}
+    for field in ("screenshot_rights", "human_fallback", "observation_only"):
+        value = supplied.get(field)
+        if type(value) is not bool:
+            raise ValueError(f"{field}_invalid")
+        gates[field] = value
+
+    normalized = {
+        "name": name,
+        "email": email,
+        "company": company,
+        "goal": goal,
+        "platform": platform,
+        "state_count": state_count,
+        "weekly_runs": weekly_runs,
+        "minutes_per_run": minutes_per_run,
+        "labor_hourly_usd": labor_hourly_usd,
+        **gates,
+    }
+    canonical = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    lead_id = "LEAD-" + hashlib.sha256(MANUAL_INTAKE_DOMAIN + canonical).hexdigest()[:16].upper()
+    event = {
+        "event": "supermega.contact.created",
+        "record": {
+            "lead_id": lead_id,
+            "source": "supermega-local-manual-intake",
+            "name": name,
+            "email": email,
+            "company": company,
+            "workflow": "vision",
+            "requested_package": "vision-founding-pilot",
+            "goal": goal,
+            "lead_stage": "new",
+            "status": "new",
+            "owner": "SuperMega",
+            "next_step": "Run local Vision qualification and review the generated drafts.",
+            "raw": {"vision": {
+                "platform": platform,
+                "state_count": state_count,
+                "weekly_runs": weekly_runs,
+                "minutes_per_run": minutes_per_run,
+                "labor_hourly_usd": labor_hourly_usd,
+                **gates,
+            }},
+        },
+    }
+    encoded = (json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+    requested_sales = (sales_root or default_vision_sales_root()).expanduser()
+    if requested_sales.exists() and requested_sales.is_symlink():
+        raise RuntimeError("vision_sales_root_unsafe")
+    sales = requested_sales.resolve()
+    inbox = sales / "inbox"
+    if inbox.exists() and (not inbox.is_dir() or inbox.is_symlink()):
+        raise RuntimeError("vision_sales_inbox_unsafe")
+    inbox.mkdir(parents=True, exist_ok=True)
+    if inbox.is_symlink():
+        raise RuntimeError("vision_sales_inbox_unsafe")
+    destination = inbox / f"{lead_id}.json"
+    created = False
+    try:
+        with destination.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        created = True
+    except FileExistsError:
+        if (
+            not destination.is_file()
+            or destination.is_symlink()
+            or destination.stat().st_size != len(encoded)
+            or destination.read_bytes() != encoded
+        ):
+            raise RuntimeError("vision_sales_intake_conflict")
+
+    return {
+        "contract": VISION_SALES_INTAKE_CONTRACT,
+        "status": "created" if created else "replayed",
+        "lead_id": lead_id,
+        "inbox_file": destination.name,
+        "event_sha256": hashlib.sha256(encoded).hexdigest(),
+        "next_action": "Run `local-company.cmd supermega vision-sales`, then review the proposal and reply draft.",
+        "controls": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "input_files_modified": 0,
+            "local_files_created": 1 if created else 0,
+        },
+    }
 
 
 def _validated_worker_result(stdout: str) -> dict:

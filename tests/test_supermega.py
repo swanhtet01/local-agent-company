@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from local_company.cli import parser
-from local_company.supermega import _vision_sales_bundle_digest, run_vision_sales, vision_sales_status
+from local_company.supermega import (
+    _vision_sales_bundle_digest,
+    create_vision_sales_intake,
+    run_vision_sales,
+    vision_sales_status,
+)
 
 
 class SuperMegaCapabilityTests(unittest.TestCase):
@@ -137,6 +142,72 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         ])
         self.assertEqual(status_args.supermega_command, "vision-sales-status")
         self.assertEqual(status_args.sales_root, self.sales)
+
+        intake_args = parser().parse_args([
+            "supermega", "vision-sales-intake", "--input", str(self.root / "prospect.json"),
+            "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(intake_args.supermega_command, "vision-sales-intake")
+        self.assertEqual(intake_args.input, self.root / "prospect.json")
+        self.assertEqual(intake_args.sales_root, self.sales)
+
+    def _write_intake(self, **overrides):
+        prospect = {
+            "name": "Mya",
+            "email": "mya@example.com",
+            "company": "Example Works",
+            "goal": "Review an owned application screen before release",
+            "platform": "windows",
+            "state_count": 6,
+            "weekly_runs": 10,
+            "minutes_per_run": 30,
+            "labor_hourly_usd": 8,
+            "screenshot_rights": True,
+            "human_fallback": True,
+            "observation_only": True,
+        }
+        prospect.update(overrides)
+        source = self.root / "prospect.json"
+        source.write_text(json.dumps(prospect), encoding="utf-8")
+        return source
+
+    def test_manual_intake_creates_one_worker_compatible_idempotent_event(self):
+        source = self._write_intake()
+        original = source.read_bytes()
+
+        first = create_vision_sales_intake(source, self.sales)
+        second = create_vision_sales_intake(source, self.sales)
+
+        self.assertEqual(first["contract"], "local-company.supermega-vision-sales-intake.v1")
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(second["status"], "replayed")
+        self.assertEqual(first["lead_id"], second["lead_id"])
+        self.assertEqual(first["controls"]["external_sends"], 0)
+        self.assertEqual(first["controls"]["local_files_created"], 1)
+        self.assertEqual(second["controls"]["local_files_created"], 0)
+        event_path = self.sales / "inbox" / first["inbox_file"]
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+        self.assertEqual(event["event"], "supermega.contact.created")
+        self.assertEqual(event["record"]["workflow"], "vision")
+        self.assertEqual(event["record"]["lead_id"], first["lead_id"])
+        self.assertEqual(event["record"]["raw"]["vision"]["state_count"], 6)
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_manual_intake_rejects_invalid_or_conflicting_input(self):
+        source = self._write_intake(email="not-an-email")
+        with self.assertRaisesRegex(ValueError, "email_invalid"):
+            create_vision_sales_intake(source, self.sales)
+
+        source = self._write_intake(minutes_per_run=float("nan"))
+        with self.assertRaisesRegex(ValueError, "minutes_per_run_invalid"):
+            create_vision_sales_intake(source, self.sales)
+
+        source = self._write_intake()
+        created = create_vision_sales_intake(source, self.sales)
+        destination = self.sales / "inbox" / created["inbox_file"]
+        destination.write_text("different", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "intake_conflict"):
+            create_vision_sales_intake(source, self.sales)
 
     def _write_sales_artifact(self, lead_id, *, qualified, price, blockers):
         proposals = self.sales / "outbox" / "proposals"

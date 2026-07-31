@@ -1,0 +1,14 @@
+{
+  "name": "Prospect name",
+  "email": "prospect@example.com",
+  "company": "Prospect company",
+  "goal": "Review an owned application screen and flag unexpected visual states before release.",
+  "platform": "windows",
+  "state_count": 6,
+  "weekly_runs": 10,
+  "minutes_per_run": 30,
+  "labor_hourly_usd": 8,
+  "screenshot_rights": true,
+  "human_fallback": true,
+  "observation_only": true
+}

@@ -22,7 +22,7 @@ from .focus import (
     read_execution_focus,
     set_execution_focus,
 )
-from .supermega import run_vision_sales, vision_sales_status
+from .supermega import create_vision_sales_intake, run_vision_sales, vision_sales_status
 
 
 DEFAULT_PROVIDER = os.getenv("LOCAL_COMPANY_PROVIDER", "ollama")
@@ -51,6 +51,9 @@ def parser() -> argparse.ArgumentParser:
     vision_sales.add_argument("--sales-root", type=Path)
     vision_status = supermega_sub.add_parser("vision-sales-status", help="Inspect the local Vision sales pipeline without processing it")
     vision_status.add_argument("--sales-root", type=Path)
+    vision_intake = supermega_sub.add_parser("vision-sales-intake", help="Validate one local prospect file and queue a Vision contact event")
+    vision_intake.add_argument("--input", type=Path, required=True)
+    vision_intake.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
@@ -450,6 +453,8 @@ def main() -> int:
                 print(json.dumps(run_vision_sales(args.platform_root, args.sales_root), indent=2))
             elif args.supermega_command == "vision-sales-status":
                 print(json.dumps(vision_sales_status(args.sales_root), indent=2))
+            elif args.supermega_command == "vision-sales-intake":
+                print(json.dumps(create_vision_sales_intake(args.input, args.sales_root), indent=2))
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)
