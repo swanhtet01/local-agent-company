@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from local_company.cli import parser
-from local_company.supermega import run_vision_sales
+from local_company.supermega import _vision_sales_bundle_digest, run_vision_sales
 
 
 class SuperMegaCapabilityTests(unittest.TestCase):
@@ -16,6 +16,9 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.worker = self.platform / "tools" / "process_vision_lead_inbox.mjs"
         self.worker.parent.mkdir(parents=True)
         self.worker.write_text("// fixed test worker\n", encoding="utf-8")
+        self.proposal = self.platform / "tools" / "create_vision_pilot_proposal.mjs"
+        self.proposal.write_text("// fixed test proposal\n", encoding="utf-8")
+        self.bundle_sha256 = _vision_sales_bundle_digest(self.platform.resolve())
         self.node = self.root / "node.exe"
         self.node.write_bytes(b"test runtime")
         self.sales = self.root / "sales"
@@ -51,6 +54,7 @@ class SuperMegaCapabilityTests(unittest.TestCase):
 
         result = run_vision_sales(
             self.platform, self.sales, node_executable=str(self.node), runner=runner,
+            expected_bundle_sha256=self.bundle_sha256,
         )
 
         self.assertEqual(result["contract"], "local-company.supermega-vision-sales.v1")
@@ -64,6 +68,11 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             "serial_execution": True,
         })
         self.assertEqual(result["workspace"]["reply_drafts"], "outbox/reply-drafts")
+        self.assertEqual(result["integrity"], {
+            "worker_bundle_sha256": self.bundle_sha256,
+            "pinned": True,
+            "stable_during_run": True,
+        })
         self.assertNotIn(str(self.root), json.dumps(result))
         self.assertEqual(observed["command"], [
             str(self.node.resolve()), str(self.worker.resolve()),
@@ -81,20 +90,36 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, json.dumps(result), "")
 
         with self.assertRaisesRegex(RuntimeError, "effects_invalid"):
-            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=unsafe_effects)
+            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=unsafe_effects, expected_bundle_sha256=self.bundle_sha256)
 
         def extra_output(command, **options):
             payload = json.dumps(self.worker_result())
             return subprocess.CompletedProcess(command, 0, f"noise\n{payload}\n", "")
 
         with self.assertRaisesRegex(RuntimeError, "output_ambiguous"):
-            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=extra_output)
+            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=extra_output, expected_bundle_sha256=self.bundle_sha256)
 
         def failed(command, **options):
             return subprocess.CompletedProcess(command, 1, "", "sensitive details")
 
         with self.assertRaisesRegex(RuntimeError, "worker_failed"):
-            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=failed)
+            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=failed, expected_bundle_sha256=self.bundle_sha256)
+
+    def test_rejects_unpinned_or_changed_worker_bundle(self):
+        calls = []
+
+        def runner(command, **options):
+            calls.append(command)
+            self.proposal.write_text("// changed during execution\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, json.dumps(self.worker_result()), "")
+
+        with self.assertRaisesRegex(RuntimeError, "digest_mismatch"):
+            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=runner, expected_bundle_sha256="0" * 64)
+        self.assertEqual(calls, [])
+
+        with self.assertRaisesRegex(RuntimeError, "changed_during_run"):
+            run_vision_sales(self.platform, self.sales, node_executable=str(self.node), runner=runner, expected_bundle_sha256=self.bundle_sha256)
+        self.assertEqual(len(calls), 1)
 
     def test_cli_exposes_one_bounded_supermega_vision_sales_command(self):
         args = parser().parse_args([

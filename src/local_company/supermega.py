@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -8,6 +9,12 @@ from typing import Callable
 
 VISION_SALES_CONTRACT = "local-company.supermega-vision-sales.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
+VISION_SALES_BUNDLE_DOMAIN = b"supermega.vision-sales-worker.v1\0"
+VISION_SALES_BUNDLE_PATHS = (
+    "tools/create_vision_pilot_proposal.mjs",
+    "tools/process_vision_lead_inbox.mjs",
+)
+VISION_SALES_BUNDLE_SHA256 = "e46bda95703b7255200eefb3719465a5878e942ed13d4841b6eab3389d9d0252"
 ZERO_EFFECTS = {
     "external_requests": 0,
     "messages_sent": 0,
@@ -49,22 +56,40 @@ def _validated_worker_result(stdout: str) -> dict:
     return result
 
 
+def _vision_sales_bundle_digest(platform: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(VISION_SALES_BUNDLE_DOMAIN)
+    for relative in VISION_SALES_BUNDLE_PATHS:
+        path = (platform / relative).resolve()
+        try:
+            path.relative_to(platform)
+        except ValueError as error:
+            raise RuntimeError("vision_sales_bundle_path_unsafe") from error
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError("vision_sales_bundle_file_missing_or_unsafe")
+        relative_bytes = relative.encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(relative_bytes).to_bytes(4, "big"))
+        digest.update(relative_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def run_vision_sales(
     platform_root: Path | None = None,
     sales_root: Path | None = None,
     *,
     node_executable: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    expected_bundle_sha256: str = VISION_SALES_BUNDLE_SHA256,
 ) -> dict:
     platform = (platform_root or default_supermega_platform_root()).expanduser().resolve()
     sales = (sales_root or default_vision_sales_root()).expanduser().resolve()
-    worker = (platform / "tools" / "process_vision_lead_inbox.mjs").resolve()
-    try:
-        worker.relative_to(platform)
-    except ValueError as error:
-        raise RuntimeError("vision_sales_worker_path_unsafe") from error
-    if not worker.is_file() or worker.is_symlink():
-        raise RuntimeError("vision_sales_worker_missing_or_unsafe")
+    worker = (platform / VISION_SALES_BUNDLE_PATHS[-1]).resolve()
+    bundle_before = _vision_sales_bundle_digest(platform)
+    if bundle_before != expected_bundle_sha256:
+        raise RuntimeError("vision_sales_bundle_digest_mismatch")
 
     node = node_executable or shutil.which("node")
     if not node or not Path(node).is_file():
@@ -84,6 +109,9 @@ def run_vision_sales(
     )
     if completed.returncode != 0:
         raise RuntimeError("vision_sales_worker_failed")
+    bundle_after = _vision_sales_bundle_digest(platform)
+    if bundle_after != bundle_before:
+        raise RuntimeError("vision_sales_bundle_changed_during_run")
     worker_result = _validated_worker_result(completed.stdout)
     return {
         "contract": VISION_SALES_CONTRACT,
@@ -96,6 +124,11 @@ def run_vision_sales(
             "reply_drafts": "outbox/reply-drafts",
             "receipts": "outbox/receipts",
             "rejections": "outbox/rejections",
+        },
+        "integrity": {
+            "worker_bundle_sha256": bundle_before,
+            "pinned": True,
+            "stable_during_run": True,
         },
         "controls": {
             "model_calls": 0,
