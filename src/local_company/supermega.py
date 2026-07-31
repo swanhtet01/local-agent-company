@@ -62,14 +62,7 @@ def _bounded_number(value: object, field: str, minimum: float, maximum: float, *
     return int(value) if integer else value
 
 
-def create_vision_sales_intake(input_path: Path, sales_root: Path | None = None) -> dict:
-    source = input_path.expanduser()
-    if not source.is_file() or source.is_symlink() or source.stat().st_size > MAX_INTAKE_FILE_BYTES:
-        raise ValueError("vision_sales_intake_input_invalid")
-    try:
-        supplied = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("vision_sales_intake_input_invalid") from error
+def create_vision_sales_intake_fields(supplied: dict, sales_root: Path | None = None) -> dict:
     allowed = {
         "name", "email", "company", "goal", "platform", "state_count", "weekly_runs",
         "minutes_per_run", "labor_hourly_usd", "screenshot_rights", "human_fallback", "observation_only",
@@ -181,6 +174,17 @@ def create_vision_sales_intake(input_path: Path, sales_root: Path | None = None)
             "local_files_created": 1 if created else 0,
         },
     }
+
+
+def create_vision_sales_intake(input_path: Path, sales_root: Path | None = None) -> dict:
+    source = input_path.expanduser()
+    if not source.is_file() or source.is_symlink() or source.stat().st_size > MAX_INTAKE_FILE_BYTES:
+        raise ValueError("vision_sales_intake_input_invalid")
+    try:
+        supplied = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("vision_sales_intake_input_invalid") from error
+    return create_vision_sales_intake_fields(supplied, sales_root)
 
 
 def _validated_worker_result(stdout: str) -> dict:

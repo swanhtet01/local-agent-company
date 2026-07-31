@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from local_company.cli import parser
+from local_company.cli import _interactive_vision_sales_intake, parser
 from local_company.supermega import (
     _vision_sales_bundle_digest,
     create_vision_sales_intake,
@@ -150,6 +150,44 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(intake_args.supermega_command, "vision-sales-intake")
         self.assertEqual(intake_args.input, self.root / "prospect.json")
         self.assertEqual(intake_args.sales_root, self.sales)
+
+        interactive_args = parser().parse_args([
+            "supermega", "vision-sales-intake", "--interactive", "--sales-root", str(self.sales),
+        ])
+        self.assertTrue(interactive_args.interactive)
+        self.assertIsNone(interactive_args.input)
+
+    def test_interactive_intake_collects_locally_without_command_argument_data(self):
+        answers = iter([
+            "Mya", "mya@example.com", "Example Works",
+            "Review an owned application screen before release", "windows",
+            "6", "10", "30", "", "yes", "y", "yes",
+        ])
+
+        result = _interactive_vision_sales_intake(self.sales, input_fn=lambda prompt: next(answers))
+
+        self.assertEqual(result["status"], "created")
+        event = json.loads((self.sales / "inbox" / result["inbox_file"]).read_text(encoding="utf-8"))
+        self.assertEqual(event["record"]["email"], "mya@example.com")
+        self.assertEqual(event["record"]["raw"]["vision"]["labor_hourly_usd"], 0)
+        self.assertEqual(result["controls"]["network_requests"], 0)
+        self.assertEqual(result["controls"]["external_sends"], 0)
+
+    def test_interactive_intake_fails_closed_on_cancel_or_invalid_answer(self):
+        def cancelled(prompt):
+            raise EOFError
+
+        with self.assertRaisesRegex(ValueError, "vision_sales_intake_cancelled"):
+            _interactive_vision_sales_intake(self.sales, input_fn=cancelled)
+        self.assertFalse((self.sales / "inbox").exists())
+
+        answers = iter([
+            "Mya", "mya@example.com", "Example Works", "Review a screen", "windows",
+            "6", "10", "30", "8", "maybe",
+        ])
+        with self.assertRaisesRegex(ValueError, "screenshot_rights_must_be_yes_or_no"):
+            _interactive_vision_sales_intake(self.sales, input_fn=lambda prompt: next(answers))
+        self.assertFalse((self.sales / "inbox").exists())
 
     def _write_intake(self, **overrides):
         prospect = {

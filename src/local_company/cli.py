@@ -22,7 +22,12 @@ from .focus import (
     read_execution_focus,
     set_execution_focus,
 )
-from .supermega import create_vision_sales_intake, run_vision_sales, vision_sales_status
+from .supermega import (
+    create_vision_sales_intake,
+    create_vision_sales_intake_fields,
+    run_vision_sales,
+    vision_sales_status,
+)
 
 
 DEFAULT_PROVIDER = os.getenv("LOCAL_COMPANY_PROVIDER", "ollama")
@@ -52,7 +57,9 @@ def parser() -> argparse.ArgumentParser:
     vision_status = supermega_sub.add_parser("vision-sales-status", help="Inspect the local Vision sales pipeline without processing it")
     vision_status.add_argument("--sales-root", type=Path)
     vision_intake = supermega_sub.add_parser("vision-sales-intake", help="Validate one local prospect file and queue a Vision contact event")
-    vision_intake.add_argument("--input", type=Path, required=True)
+    vision_intake_source = vision_intake.add_mutually_exclusive_group(required=True)
+    vision_intake_source.add_argument("--input", type=Path)
+    vision_intake_source.add_argument("--interactive", action="store_true", help="Prompt locally without placing prospect data in command arguments")
     vision_intake.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
@@ -436,6 +443,57 @@ def _focus_output(focus: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _interactive_vision_sales_intake(sales_root: Path | None, *, input_fn=None) -> dict:
+    reader = input_fn or input
+
+    def ask(prompt: str) -> str:
+        try:
+            return reader(prompt).strip()
+        except (EOFError, KeyboardInterrupt) as error:
+            raise ValueError("vision_sales_intake_cancelled") from error
+
+    def whole_number(prompt: str, field: str) -> int:
+        try:
+            return int(ask(prompt))
+        except ValueError as error:
+            if str(error) == "vision_sales_intake_cancelled":
+                raise
+            raise ValueError(f"{field}_invalid") from error
+
+    def decimal_number(prompt: str, field: str, *, default: float | None = None) -> float:
+        value = ask(prompt)
+        if not value and default is not None:
+            return default
+        try:
+            return float(value)
+        except ValueError as error:
+            raise ValueError(f"{field}_invalid") from error
+
+    def yes_no(prompt: str, field: str) -> bool:
+        value = ask(prompt).lower()
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        raise ValueError(f"{field}_must_be_yes_or_no")
+
+    fields = {
+        "name": ask("Prospect name: "),
+        "email": ask("Prospect work email: "),
+        "company": ask("Company: "),
+        "goal": ask("Visual workflow that should run better: "),
+        "platform": ask("Target device (windows/android/both): "),
+        "state_count": whole_number("Visual states to recognize (1-12): ", "state_count"),
+        "weekly_runs": whole_number("Runs per week: ", "weekly_runs"),
+        "minutes_per_run": decimal_number("Minutes per run: ", "minutes_per_run"),
+        "labor_hourly_usd": decimal_number("Estimated labor cost per hour in USD (blank for unknown): ", "labor_hourly_usd", default=0),
+        "screenshot_rights": yes_no("Written rights to use the screenshots? (yes/no): ", "screenshot_rights"),
+        "human_fallback": yes_no("Can a person review uncertain results? (yes/no): ", "human_fallback"),
+        "observation_only": yes_no("May the first pilot be observation-only? (yes/no): ", "observation_only"),
+    }
+    return create_vision_sales_intake_fields(fields, sales_root)
+
+
 def main() -> int:
     try:
         args = parser().parse_args()
@@ -454,7 +512,12 @@ def main() -> int:
             elif args.supermega_command == "vision-sales-status":
                 print(json.dumps(vision_sales_status(args.sales_root), indent=2))
             elif args.supermega_command == "vision-sales-intake":
-                print(json.dumps(create_vision_sales_intake(args.input, args.sales_root), indent=2))
+                result = (
+                    _interactive_vision_sales_intake(args.sales_root)
+                    if args.interactive
+                    else create_vision_sales_intake(args.input, args.sales_root)
+                )
+                print(json.dumps(result, indent=2))
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)
