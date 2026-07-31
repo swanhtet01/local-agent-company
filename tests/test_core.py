@@ -3714,6 +3714,7 @@ class CompanyTests(unittest.TestCase):
                 "src/local_company/config.py", "src/local_company/core.py",
                 "src/local_company/dashboard.py", "src/local_company/service.py",
                 "src/local_company/focus.py", "src/local_company/spreadsheet.py",
+                "src/local_company/supermega.py",
             },
         )
         expected = hashlib.sha256()

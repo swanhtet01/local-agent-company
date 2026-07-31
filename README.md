@@ -183,6 +183,20 @@ employment decisions, procurement never places orders or commits spend, and
 analytics never invents missing data; strategy never presents forecasts or
 assumptions as facts.
 
+## SuperMega local capabilities
+
+The coordinator can run the fixed, offline Vision sales worker without loading a model:
+
+```powershell
+.\local-company.cmd supermega vision-sales
+```
+
+It reads contact-event JSON files from the local Vision sales inbox and produces owner-review proposals, reply drafts, receipts, and rejection evidence. The command runs serially, accepts no arbitrary executable or shell text, validates the worker contract, and rejects any result that claims network requests, external sends, payments, or input mutations. Override the checked platform and sales roots only when testing or moving the local workspace:
+
+```powershell
+.\local-company.cmd supermega vision-sales --platform-root C:\Users\you\Projects\supermega-platform --sales-root C:\local\vision-sales
+```
+
 Before inference, every new mission freezes a versioned evidence manifest containing each retrieved source ID/path/hash, exact excerpt, character and line span, evidence ID, capture time, and a canonical manifest SHA-256. Prompts expose only those frozen `[EVIDENCE:id]` references. For objectives that request verified facts from imported evidence, a filename alone is insufficient: verification wording must carry a valid frozen evidence ID in the same sentence. A changed source, forged manifest, altered quote, invalid digest, or missing evidence citation fails closed. The dashboard shows the exact frozen excerpts for owner inspection.
 
 Project retrieval uses deterministic term frequency by default. When two current files carry different authority (for example, a sealed release handoff superseding an older operating note), set an explicit bounded project-scoped score adjustment with `knowledge authority SOURCE_ID --project PROJECT --level -100..100`. Explicitly named filenames still rank first; otherwise retrieval ranks by term score plus the authority adjustment, so strongly relevant evidence can still outrank a preferred but weak match. Level `0` removes the override. Search previews and frozen evidence expose the term, authority, and combined rank scores, and this command never calls a model or changes a source file.

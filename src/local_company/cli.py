@@ -22,6 +22,7 @@ from .focus import (
     read_execution_focus,
     set_execution_focus,
 )
+from .supermega import run_vision_sales
 
 
 DEFAULT_PROVIDER = os.getenv("LOCAL_COMPANY_PROVIDER", "ollama")
@@ -43,6 +44,11 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    supermega = sub.add_parser("supermega", help="Run bounded local SuperMega operating capabilities")
+    supermega_sub = supermega.add_subparsers(dest="supermega_command", required=True)
+    vision_sales = supermega_sub.add_parser("vision-sales", help="Process local Vision leads into owner-review sales drafts")
+    vision_sales.add_argument("--platform-root", type=Path)
+    vision_sales.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
@@ -437,6 +443,9 @@ def main() -> int:
         elif args.command == "roles":
             for name, purpose in ROLES.items():
                 print(f"{name:16} {purpose}")
+        elif args.command == "supermega":
+            if args.supermega_command == "vision-sales":
+                print(json.dumps(run_vision_sales(args.platform_root, args.sales_root), indent=2))
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)
