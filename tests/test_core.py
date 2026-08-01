@@ -3266,8 +3266,10 @@ class CompanyTests(unittest.TestCase):
             company.create_project("<script>alert(1)</script>")
             company.request_action("Review <unsafe> text")
             with patch("local_company.dashboard.vision_product_status", return_value={
+                "contract": "local-company.supermega-vision-product-status.v1",
                 "status": "collection_required",
                 "commercial_status": "hold",
+                "dataset_ready": False,
                 "dataset": {
                     "samples": 13, "minimum_samples": 90,
                     "minimum_new_samples_lower_bound": 77,
@@ -3277,6 +3279,17 @@ class CompanyTests(unittest.TestCase):
                     "blocking_gate_count": 18,
                 },
                 "next_action": "collect_review_and_reassess_owned_screenshots",
+            }), patch("local_company.dashboard.vision_sales_status", return_value={
+                "contract": "local-company.supermega-vision-sales-status.v1",
+                "status": "ready",
+                "pipeline": {
+                    "qualified_drafts": 0, "blocked_drafts": 0,
+                    "integrity_failures": 0, "input_attention": 0,
+                },
+                "research": {
+                    "researched_unsent_unqualified": 5,
+                    "outreach_drafts_ready": 5, "integrity_failures": 0,
+                },
             }):
                 page = render_dashboard(company, build_identity={
                     "schema": "local-company.runtime-build.v2",
@@ -3294,6 +3307,10 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("13/90", page)
             self.assertIn("commercial claims: <span class=\"gate\">hold</span>", page)
             self.assertIn("collect_review_and_reassess_owned_screenshots", page)
+            self.assertIn("founding_pilot_owned_data_collection_and_held_out_evaluation", page)
+            self.assertIn("founding_pilot_draft_internal_review", page)
+            self.assertIn("local drafts ready: 5", page)
+            self.assertIn("external send authorized: False", page)
 
     def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:

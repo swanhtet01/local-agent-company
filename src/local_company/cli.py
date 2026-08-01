@@ -28,6 +28,7 @@ from .supermega import (
     create_vision_prospect_drafts,
     import_vision_prospects,
     run_vision_sales,
+    vision_commercial_status,
     vision_product_status,
     vision_sales_status,
 )
@@ -74,6 +75,12 @@ def parser() -> argparse.ArgumentParser:
         help="Cross-check local Vision readiness and commercial-claim gates",
     )
     vision_product.add_argument("--product-root", type=Path)
+    vision_commercial = supermega_sub.add_parser(
+        "vision-commercial-status",
+        help="Combine local Vision product and sales evidence into one offer gate",
+    )
+    vision_commercial.add_argument("--product-root", type=Path)
+    vision_commercial.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")
@@ -537,6 +544,10 @@ def main() -> int:
                 print(json.dumps(create_vision_prospect_drafts(args.sales_root), indent=2))
             elif args.supermega_command == "vision-product-status":
                 print(json.dumps(vision_product_status(args.product_root), indent=2))
+            elif args.supermega_command == "vision-commercial-status":
+                print(json.dumps(vision_commercial_status(
+                    args.product_root, args.sales_root,
+                ), indent=2))
         elif args.command == "focus":
             if args.focus_command == "set":
                 project_id, project_name = _project_identity(company, args.project)

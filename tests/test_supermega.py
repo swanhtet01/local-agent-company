@@ -13,6 +13,7 @@ from local_company.supermega import (
     create_vision_sales_intake,
     import_vision_prospects,
     run_vision_sales,
+    vision_commercial_status,
     vision_product_status,
     vision_sales_status,
 )
@@ -196,6 +197,57 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(result["commercial_status"], "hold")
 
+    def test_commercial_status_allows_only_owner_reviewed_founding_pilot(self):
+        product = {
+            "contract": "local-company.supermega-vision-product-status.v1",
+            "status": "collection_required",
+            "commercial_status": "hold",
+            "dataset_ready": False,
+            "dataset": {
+                "samples": 13, "minimum_samples": 90,
+                "minimum_new_samples_lower_bound": 77,
+            },
+        }
+        sales = {
+            "contract": "local-company.supermega-vision-sales-status.v1",
+            "status": "ready",
+            "pipeline": {
+                "qualified_drafts": 0, "blocked_drafts": 0,
+                "integrity_failures": 0, "input_attention": 0,
+            },
+            "research": {
+                "researched_unsent_unqualified": 5,
+                "outreach_drafts_ready": 5, "integrity_failures": 0,
+            },
+        }
+        result = vision_commercial_status(product=product, sales=sales)
+        self.assertEqual(result["status"], "owner_review_ready")
+        self.assertEqual(
+            result["offer"]["name"],
+            "founding_pilot_owned_data_collection_and_held_out_evaluation",
+        )
+        self.assertEqual(
+            result["offer"]["stage"],
+            "founding_pilot_draft_internal_review",
+        )
+        self.assertFalse(result["offer"]["external_send_authorized"])
+        self.assertFalse(result["offer"]["pricing_committed"])
+        self.assertTrue(result["offer"]["owner_review_required"])
+        self.assertFalse(result["product"]["accuracy_claim_allowed"])
+        self.assertEqual(result["sales"]["outreach_drafts_ready"], 5)
+        self.assertEqual(result["sales"]["draft_claim_review_required"], 5)
+        self.assertEqual(result["sales"]["booked_revenue_usd"], 0)
+        self.assertIn("current_validated_accuracy", result["claims"]["prohibited"])
+        self.assertEqual(result["controls"]["external_sends"], 0)
+
+        unavailable = dict(product)
+        unavailable["status"] = "unavailable"
+        attention = vision_commercial_status(product=unavailable, sales=sales)
+        self.assertEqual(attention["status"], "attention")
+        self.assertEqual(
+            attention["offer"]["stage"], "product_evidence_restore_required",
+        )
+
     @staticmethod
     def worker_result(**overrides):
         value = {
@@ -339,6 +391,16 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         ])
         self.assertEqual(product_args.supermega_command, "vision-product-status")
         self.assertEqual(product_args.product_root, self.root)
+
+        commercial_args = parser().parse_args([
+            "supermega", "vision-commercial-status",
+            "--product-root", str(self.root), "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(
+            commercial_args.supermega_command, "vision-commercial-status",
+        )
+        self.assertEqual(commercial_args.product_root, self.root)
+        self.assertEqual(commercial_args.sales_root, self.sales)
 
     def _write_prospect_csv(self, rows=None):
         rows = rows or [

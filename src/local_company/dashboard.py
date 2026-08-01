@@ -20,7 +20,9 @@ from .core import (
     QUALITY_SUPERSESSION_LIST_SCHEMA,
     QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending, ROLES,
 )
-from .supermega import vision_product_status
+from .supermega import (
+    vision_commercial_status, vision_product_status, vision_sales_status,
+)
 
 
 MAX_FORM_BYTES = 16 * 1024
@@ -160,6 +162,8 @@ def dashboard_snapshot(
     queue_preflight = company.queue_preflight(
         str(next_due[0]) if next_due else None,
     )
+    vision_product = vision_product_status()
+    vision_sales = vision_sales_status()
     return {
         "projects": company.projects(),
         "jobs": company.jobs(),
@@ -173,7 +177,10 @@ def dashboard_snapshot(
         "queue_preflight": queue_preflight,
         "worker": worker.snapshot() if worker else {"status": "disabled"},
         "health": company.health_snapshot(),
-        "vision_product": vision_product_status(),
+        "vision_product": vision_product,
+        "vision_commercial": vision_commercial_status(
+            product=vision_product, sales=vision_sales,
+        ),
     }
 
 
@@ -448,6 +455,15 @@ def render_dashboard(
     vision = snapshot["vision_product"]
     vision_dataset = vision.get("dataset", {}) if isinstance(vision, dict) else {}
     vision_evidence = vision.get("evidence", {}) if isinstance(vision, dict) else {}
+    vision_commercial = snapshot["vision_commercial"]
+    vision_offer = (
+        vision_commercial.get("offer", {})
+        if isinstance(vision_commercial, dict) else {}
+    )
+    vision_sales = (
+        vision_commercial.get("sales", {})
+        if isinstance(vision_commercial, dict) else {}
+    )
     vision_samples = (
         vision_dataset.get("samples") if isinstance(vision_dataset, dict) else None
     )
@@ -471,7 +487,12 @@ def render_dashboard(
         f'{cell(vision_evidence.get("readiness_receipt_id", "unavailable") if isinstance(vision_evidence, dict) else "unavailable")} &middot; '
         f'blocking gates: {cell(vision_evidence.get("blocking_gate_count", "unknown") if isinstance(vision_evidence, dict) else "unknown")} &middot; '
         f'next action: <code>{cell(vision.get("next_action", "restore_and_verify_local_vision_product_evidence"))}</code>. '
-        'Dataset readiness alone never authorizes an accuracy or revenue claim.</p></section>'
+        'Dataset readiness alone never authorizes an accuracy or revenue claim.</p>'
+        f'<p>Offer: <code>{cell(vision_offer.get("name", "unavailable") if isinstance(vision_offer, dict) else "unavailable")}</code> &middot; '
+        f'stage: {cell(vision_offer.get("stage", "unavailable") if isinstance(vision_offer, dict) else "unavailable")} &middot; '
+        f'local drafts ready: {cell(vision_sales.get("outreach_drafts_ready", 0) if isinstance(vision_sales, dict) else 0)} &middot; '
+        f'external send authorized: {cell(vision_offer.get("external_send_authorized", False) if isinstance(vision_offer, dict) else False)}.</p>'
+        f'<p class="hint">Commercial next action: <code>{cell(vision_commercial.get("next_action", "restore_and_verify_local_vision_product_evidence") if isinstance(vision_commercial, dict) else "restore_and_verify_local_vision_product_evidence")}</code>.</p></section>'
     )
 
     project_options = "".join(
@@ -642,6 +663,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
 <div class="card"><div class="metric gate">{cell(vision_metric)}</div><div class="label">Vision reviewed samples / minimum</div></div>
+<div class="card"><div class="metric gate">{cell(vision_sales.get('outreach_drafts_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision local drafts ready, unsent</div></div>
 {quality_recovery_card}
 {supersession_review_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>

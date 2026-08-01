@@ -17,6 +17,7 @@ VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
 VISION_PROSPECT_IMPORT_CONTRACT = "local-company.supermega-vision-prospect-import.v1"
 VISION_PROSPECT_DRAFTS_CONTRACT = "local-company.supermega-vision-prospect-drafts.v1"
 VISION_PRODUCT_STATUS_CONTRACT = "local-company.supermega-vision-product-status.v1"
+VISION_COMMERCIAL_STATUS_CONTRACT = "local-company.supermega-vision-commercial-status.v1"
 PROSPECT_RESEARCH_CONTRACT = "supermega.vision.prospect_research.v1"
 PROSPECT_OUTREACH_RECEIPT_CONTRACT = "supermega.vision.prospect_outreach_receipt.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
@@ -1074,6 +1075,134 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
             "outreach_drafts_ready": outreach_drafts_ready,
             "integrity_failures": research_integrity_failures,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
+        },
+        "next_action": next_action,
+        "controls": {
+            "read_only": True,
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "files_modified": 0,
+        },
+    }
+
+
+def vision_commercial_status(
+    product_root: Path | None = None,
+    sales_root: Path | None = None,
+    *,
+    product: dict | None = None,
+    sales: dict | None = None,
+) -> dict:
+    """Combine verified product and sales evidence into one honest offer gate."""
+    product_status = product if product is not None else vision_product_status(product_root)
+    sales_status = sales if sales is not None else vision_sales_status(sales_root)
+    if (
+        not isinstance(product_status, dict)
+        or product_status.get("contract") != VISION_PRODUCT_STATUS_CONTRACT
+        or product_status.get("status") not in {
+            "unavailable", "collection_required", "dataset_ready",
+        }
+        or product_status.get("commercial_status") != "hold"
+        or not isinstance(sales_status, dict)
+        or sales_status.get("contract") != VISION_SALES_STATUS_CONTRACT
+        or sales_status.get("status") not in {"ready", "attention"}
+        or not isinstance(sales_status.get("pipeline"), dict)
+        or not isinstance(sales_status.get("research"), dict)
+    ):
+        raise RuntimeError("vision_commercial_inputs_invalid")
+    pipeline = sales_status["pipeline"]
+    research = sales_status["research"]
+    count_fields = (
+        pipeline.get("qualified_drafts"), pipeline.get("blocked_drafts"),
+        pipeline.get("integrity_failures"), pipeline.get("input_attention"),
+        research.get("researched_unsent_unqualified"),
+        research.get("outreach_drafts_ready"), research.get("integrity_failures"),
+    )
+    if any(type(value) is not int or value < 0 for value in count_fields):
+        raise RuntimeError("vision_commercial_inputs_invalid")
+    qualified, blocked, pipeline_integrity, input_attention, researched, outreach, research_integrity = count_fields
+    product_available = product_status["status"] != "unavailable"
+    sales_integrity_ready = (
+        sales_status["status"] == "ready"
+        and pipeline_integrity == 0 and input_attention == 0
+        and research_integrity == 0
+    )
+    if not product_available:
+        status = "attention"
+        offer_stage = "product_evidence_restore_required"
+        next_action = "restore_and_verify_local_vision_product_evidence"
+    elif not sales_integrity_ready:
+        status = "attention"
+        offer_stage = "sales_integrity_review_required"
+        next_action = "inspect_local_sales_integrity_before_using_any_draft"
+    elif qualified:
+        status = "owner_review_ready"
+        offer_stage = "qualified_proposal_internal_review"
+        next_action = "review_one_qualified_proposal_without_sending_or_claiming_revenue"
+    elif outreach:
+        status = "owner_review_ready"
+        offer_stage = "founding_pilot_draft_internal_review"
+        next_action = "review_one_existing_draft_and_restate_it_as_an_evidence_gated_founding_pilot"
+    elif researched:
+        status = "drafting_required"
+        offer_stage = "researched_prospects_need_local_drafts"
+        next_action = "generate_integrity_checked_local_prospect_drafts_without_sending"
+    else:
+        status = "research_required"
+        offer_stage = "no_verified_prospect_evidence"
+        next_action = "research_one_factual_prospect_without_contacting_them"
+    reviewed_samples = None
+    minimum_samples = None
+    remaining = None
+    product_dataset = product_status.get("dataset")
+    if isinstance(product_dataset, dict):
+        reviewed_samples = product_dataset.get("samples")
+        minimum_samples = product_dataset.get("minimum_samples")
+        remaining = product_dataset.get("minimum_new_samples_lower_bound")
+    return {
+        "contract": VISION_COMMERCIAL_STATUS_CONTRACT,
+        "status": status,
+        "offer": {
+            "name": "founding_pilot_owned_data_collection_and_held_out_evaluation",
+            "stage": offer_stage,
+            "external_send_authorized": False,
+            "pricing_committed": False,
+            "payment_authorized": False,
+            "owner_review_required": True,
+        },
+        "product": {
+            "status": product_status["status"],
+            "dataset_ready": product_status.get("dataset_ready") is True,
+            "reviewed_samples": reviewed_samples,
+            "minimum_samples": minimum_samples,
+            "minimum_new_samples_lower_bound": remaining,
+            "accuracy_claim_allowed": False,
+        },
+        "sales": {
+            "status": sales_status["status"],
+            "researched_unsent_unqualified": researched,
+            "outreach_drafts_ready": outreach,
+            "qualified_proposal_drafts": qualified,
+            "blocked_proposal_drafts": blocked,
+            "draft_claim_review_required": outreach + qualified,
+            "booked_revenue_usd": 0,
+            "collected_revenue_usd": 0,
+        },
+        "claims": {
+            "allowed": [
+                "local_observation_only_workflow",
+                "buyer_approved_owned_data_process",
+                "held_out_evaluation_method_available",
+                "founding_pilot_subject_to_acceptance_gates",
+            ],
+            "prohibited": [
+                "current_validated_accuracy",
+                "production_readiness",
+                "autonomous_consequential_actions",
+                "booked_or_collected_revenue",
+            ],
         },
         "next_action": next_action,
         "controls": {
