@@ -228,6 +228,31 @@ def parser() -> argparse.ArgumentParser:
         "--peak-memory-mb", type=int,
         help="Measured peak memory in MiB; omit only when the measurement is unavailable",
     )
+    evidence_experiment = evidence_sub.add_parser(
+        "experiment", help="Append a sealed review from another local agent or tool"
+    )
+    evidence_experiment.add_argument("label")
+    evidence_experiment.add_argument("--project", required=True)
+    evidence_experiment.add_argument("--experiment-id")
+    evidence_experiment.add_argument(
+        "--category", required=True,
+        choices=("coding", "business", "data-research"),
+    )
+    evidence_experiment.add_argument(
+        "--decision", required=True, choices=("accepted", "rejected"),
+    )
+    evidence_experiment.add_argument("--corrections", required=True, type=int)
+    evidence_experiment.add_argument(
+        "--paid-setup", required=True, choices=("yes", "no", "unknown"),
+    )
+    evidence_experiment.add_argument("--runtime-seconds", required=True, type=float)
+    evidence_experiment.add_argument("--peak-memory-mb", required=True, type=int)
+    evidence_experiment.add_argument("--exit-code", required=True, type=int)
+    checks = evidence_experiment.add_mutually_exclusive_group(required=True)
+    checks.add_argument("--checks-passed", dest="checks_passed", action="store_true")
+    checks.add_argument("--checks-failed", dest="checks_passed", action="store_false")
+    evidence_experiment.add_argument("--runner", required=True)
+    evidence_experiment.add_argument("--artifact-sha256", required=True)
     evidence_status = evidence_sub.add_parser(
         "status", help="Show integrity-checked progress toward the ten-mission milestone"
     )
@@ -721,6 +746,13 @@ def main() -> int:
                 result = company.record_product_evidence_review(
                     args.job_id, args.category, args.decision, args.corrections,
                     args.paid_setup, args.peak_memory_mb,
+                )
+            elif args.evidence_command == "experiment":
+                result = company.record_product_experiment_review(
+                    args.project, args.label, args.category, args.decision,
+                    args.corrections, args.paid_setup, args.runtime_seconds,
+                    args.peak_memory_mb, args.exit_code, args.checks_passed,
+                    args.runner, args.artifact_sha256, args.experiment_id,
                 )
             else:
                 result = company.product_evidence_status(args.project)

@@ -1777,6 +1777,7 @@ class CompanyTests(unittest.TestCase):
             audit_path, _, _ = company.export_audit(Path(tmp) / "audit")
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             self.assertEqual(len(audit["product_evidence_reviews"]), 2)
+            self.assertEqual(audit["product_experiment_reviews"], [])
 
             report.write_text(
                 report.read_text(encoding="utf-8") + "\nchanged after review\n",
@@ -1793,6 +1794,39 @@ class CompanyTests(unittest.TestCase):
                 failed_company.record_product_evidence_review(
                     failed_job, "business", "accepted", 1, "no", 512,
                 )
+
+    def test_external_product_experiment_is_sealed_and_failed_checks_cannot_be_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            project_id = company.create_project("Experiment Lab")
+            artifact_sha256 = "a" * 64
+            with self.assertRaisesRegex(ValueError, "failed product experiment"):
+                company.record_product_experiment_review(
+                    project_id, "Coding attempt", "coding", "accepted", 0,
+                    "unknown", 12.5, 256, 0, False, "local-agent/model",
+                    artifact_sha256,
+                )
+            result = company.record_product_experiment_review(
+                project_id, "Coding attempt", "coding", "rejected", 0,
+                "unknown", 12.5, 256, 0, False, "local-agent/model",
+                artifact_sha256,
+            )
+            self.assertRegex(result["experiment_id"], r"^[0-9a-f]{12}$")
+            self.assertRegex(result["observation_sha256"], r"^[0-9a-f]{64}$")
+            status = company.product_evidence_status("Experiment Lab")
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["complete_measurements"], 1)
+            self.assertEqual(status["category_counts"]["coding"], 1)
+            self.assertEqual(status["reviews"][0]["integrity"], "sealed_observation")
+            self.assertFalse(status["reviews"][0]["checks_passed"])
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE product_experiment_reviews SET runtime_seconds=99 WHERE id=?",
+                    (result["review_id"],),
+                )
+            stale = company.product_evidence_status("Experiment Lab")
+            self.assertEqual(stale["reviewed_missions"], 0)
+            self.assertEqual(stale["stale_review_count"], 1)
 
     def test_product_evidence_milestone_requires_ten_measured_cross_category_reviews(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1822,6 +1856,15 @@ class CompanyTests(unittest.TestCase):
             ])
             self.assertEqual(parsed.evidence_command, "record")
             self.assertEqual(parsed.peak_memory_mb, 512)
+            experiment = parser().parse_args([
+                "evidence", "experiment", "Coding attempt", "--project", "Product Lab",
+                "--category", "coding", "--decision", "rejected", "--corrections", "0",
+                "--paid-setup", "unknown", "--runtime-seconds", "12.5",
+                "--peak-memory-mb", "256", "--exit-code", "0", "--checks-failed",
+                "--runner", "local-agent/model", "--artifact-sha256", "a" * 64,
+            ])
+            self.assertEqual(experiment.evidence_command, "experiment")
+            self.assertFalse(experiment.checks_passed)
             self.assertEqual(
                 translate(["evidence", "status"]).command,
                 ("evidence", "status"),

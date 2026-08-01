@@ -234,6 +234,7 @@ MAX_DATASET_CONTRACT_DECLARATIONS = 256
 TEAM_ROUTE_SCHEMA = "local-company.team-route.v1"
 MAX_ROUTED_SPECIALISTS = 4
 PRODUCT_EVIDENCE_REVIEW_SCHEMA = "local-company.product-evidence-review.v1"
+PRODUCT_EXPERIMENT_REVIEW_SCHEMA = "local-company.product-experiment-review.v1"
 PRODUCT_EVIDENCE_STATUS_SCHEMA = "local-company.product-evidence-status.v1"
 PRODUCT_EVIDENCE_CATEGORIES = frozenset({"coding", "business", "data-research"})
 PRODUCT_EVIDENCE_DECISIONS = frozenset({"accepted", "rejected"})
@@ -1727,6 +1728,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def product_experiment_observation_digest(values: dict[str, object]) -> str:
+    framed = json.dumps(
+        values, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(b"local-company.product-experiment.v1\0" + framed).hexdigest()
+
+
 class ExecutionLeaseLost(RuntimeError):
     """Raised when a recovered or superseded worker tries to persist a late result."""
 
@@ -1884,6 +1892,18 @@ class Company:
                     evaluation_score INTEGER NOT NULL, evaluator_version TEXT NOT NULL,
                     reviewed_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
+                );
+                CREATE TABLE IF NOT EXISTS product_experiment_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    experiment_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                    label TEXT NOT NULL, category TEXT NOT NULL,
+                    decision TEXT NOT NULL, corrections INTEGER NOT NULL,
+                    paid_setup_signal TEXT NOT NULL, runtime_seconds REAL NOT NULL,
+                    peak_memory_mb INTEGER NOT NULL, exit_code INTEGER NOT NULL,
+                    checks_passed INTEGER NOT NULL, runner TEXT NOT NULL,
+                    artifact_sha256 TEXT NOT NULL, observation_sha256 TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
             """)
             self._ensure_column(db, "jobs", "parent_job_id", "TEXT")
@@ -5953,6 +5973,9 @@ class Company:
                 "product_evidence_reviews": rows(
                     "SELECT * FROM product_evidence_reviews ORDER BY id"
                 ),
+                "product_experiment_reviews": rows(
+                    "SELECT * FROM product_experiment_reviews ORDER BY id"
+                ),
             }
         serialized = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
         digest = hashlib.sha256(serialized).hexdigest()
@@ -8575,6 +8598,95 @@ class Company:
             "model_called": False,
         }
 
+    def record_product_experiment_review(
+        self, project: str, label: str, category: str, decision: str,
+        corrections: int, paid_setup_signal: str, runtime_seconds: float,
+        peak_memory_mb: int, exit_code: int, checks_passed: bool, runner: str,
+        artifact_sha256: str, experiment_id: str | None = None,
+    ) -> dict[str, object]:
+        """Append one sealed observation from a local tool outside the coordinator."""
+        self.initialize()
+        project_id, project_name = self._resolve_project(project)
+        normalized_label = " ".join(label.split()) if isinstance(label, str) else ""
+        normalized_runner = " ".join(runner.split()) if isinstance(runner, str) else ""
+        if not 1 <= len(normalized_label) <= 80:
+            raise ValueError("Product experiment label must contain 1 to 80 characters")
+        if not 1 <= len(normalized_runner) <= 80:
+            raise ValueError("Product experiment runner must contain 1 to 80 characters")
+        if category not in PRODUCT_EVIDENCE_CATEGORIES:
+            raise ValueError(
+                "Product evidence category must be coding, business, or data-research"
+            )
+        if decision not in PRODUCT_EVIDENCE_DECISIONS:
+            raise ValueError("Product evidence decision must be accepted or rejected")
+        if type(corrections) is not int or not 0 <= corrections <= 100:
+            raise ValueError("Product evidence corrections must be between 0 and 100")
+        if paid_setup_signal not in PRODUCT_EVIDENCE_PAID_SIGNALS:
+            raise ValueError("Paid setup signal must be yes, no, or unknown")
+        if (
+            type(runtime_seconds) not in {int, float}
+            or not math.isfinite(runtime_seconds)
+            or not 0 <= runtime_seconds <= 86_400
+        ):
+            raise ValueError("Product experiment runtime must be between 0 and 86400 seconds")
+        if type(peak_memory_mb) is not int or not 1 <= peak_memory_mb <= 1_000_000:
+            raise ValueError("Peak memory must be between 1 and 1000000 MiB")
+        if type(exit_code) is not int or not -2_147_483_648 <= exit_code <= 2_147_483_647:
+            raise ValueError("Product experiment exit code is invalid")
+        if type(checks_passed) is not bool:
+            raise ValueError("Product experiment checks result must be Boolean")
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256 or "") is None:
+            raise ValueError("Product experiment artifact SHA-256 is invalid")
+        if experiment_id is None:
+            experiment_id = uuid.uuid4().hex[:12]
+        elif re.fullmatch(r"[0-9a-f]{12}", experiment_id or "") is None:
+            raise ValueError("Product experiment ID must be 12 lowercase hexadecimal characters")
+        if decision == "accepted" and (exit_code != 0 or not checks_passed):
+            raise ValueError("A failed product experiment cannot be recorded as accepted")
+
+        runtime_seconds = round(float(runtime_seconds), 3)
+        observation = {
+            "artifact_sha256": artifact_sha256,
+            "category": category,
+            "checks_passed": checks_passed,
+            "corrections": corrections,
+            "decision": decision,
+            "exit_code": exit_code,
+            "experiment_id": experiment_id,
+            "label": normalized_label,
+            "paid_setup_signal": paid_setup_signal,
+            "peak_memory_mb": peak_memory_mb,
+            "project_id": project_id,
+            "runner": normalized_runner,
+            "runtime_seconds": runtime_seconds,
+        }
+        observation_sha256 = product_experiment_observation_digest(observation)
+        reviewed_at = utc_now()
+        with closing(self._connect(immediate=True)) as db, db:
+            cursor = db.execute(
+                "INSERT INTO product_experiment_reviews("
+                "experiment_id, project_id, label, category, decision, corrections, "
+                "paid_setup_signal, runtime_seconds, peak_memory_mb, exit_code, "
+                "checks_passed, runner, artifact_sha256, observation_sha256, reviewed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    experiment_id, project_id, normalized_label, category, decision,
+                    corrections, paid_setup_signal, runtime_seconds, peak_memory_mb,
+                    exit_code, int(checks_passed), normalized_runner, artifact_sha256,
+                    observation_sha256, reviewed_at,
+                ),
+            )
+            review_id = int(cursor.lastrowid)
+        return {
+            "schema": PRODUCT_EXPERIMENT_REVIEW_SCHEMA,
+            "review_id": review_id,
+            "project": {"id": project_id, "name": project_name},
+            **observation,
+            "observation_sha256": observation_sha256,
+            "external_action_performed": False,
+            "model_called_by_recorder": False,
+        }
+
     def product_evidence_status(self, project: str | None = None) -> dict[str, object]:
         """Summarize current, integrity-checked latest reviews for product validation."""
         self.initialize()
@@ -8583,7 +8695,7 @@ class Company:
         if project is not None:
             project_id, project_name = self._resolve_project(project)
         with closing(self._connect()) as db:
-            total = db.execute(
+            job_total = db.execute(
                 "SELECT COUNT(*) FROM (SELECT r.job_id FROM product_evidence_reviews r "
                 "JOIN jobs j ON j.id=r.job_id WHERE (? IS NULL OR j.project_id=?) "
                 "GROUP BY r.job_id)",
@@ -8607,6 +8719,25 @@ class Company:
                 " WHERE current.job_id=j.id) ORDER BY r.id DESC LIMIT ?",
                 (project_id, project_id, MAX_PRODUCT_EVIDENCE_REVIEWS),
             ))
+            experiment_total = db.execute(
+                "SELECT COUNT(*) FROM (SELECT experiment_id FROM product_experiment_reviews "
+                "WHERE (? IS NULL OR project_id=?) GROUP BY experiment_id)",
+                (project_id, project_id),
+            ).fetchone()[0]
+            experiment_rows = list(db.execute(
+                "WITH latest AS ("
+                " SELECT experiment_id, MAX(id) AS review_id "
+                " FROM product_experiment_reviews WHERE (? IS NULL OR project_id=?) "
+                " GROUP BY experiment_id"
+                ") SELECT r.id, r.experiment_id, r.project_id, r.label, r.category, "
+                "r.decision, r.corrections, r.paid_setup_signal, r.runtime_seconds, "
+                "r.peak_memory_mb, r.exit_code, r.checks_passed, r.runner, "
+                "r.artifact_sha256, r.observation_sha256 "
+                "FROM latest JOIN product_experiment_reviews r ON r.id=latest.review_id "
+                "ORDER BY r.id DESC LIMIT ?",
+                (project_id, project_id, MAX_PRODUCT_EVIDENCE_REVIEWS),
+            ))
+        total = job_total + experiment_total
 
         category_counts = {category: 0 for category in sorted(PRODUCT_EVIDENCE_CATEGORIES)}
         decision_counts = {decision: 0 for decision in sorted(PRODUCT_EVIDENCE_DECISIONS)}
@@ -8616,6 +8747,7 @@ class Company:
         complete_measurements = 0
         corrections_total = 0
         promotion_candidates: list[str] = []
+        promotion_candidate_items: list[dict[str, str]] = []
         for row in rows:
             integrity_valid = (
                 row[2] in PRODUCT_EVIDENCE_CATEGORIES
@@ -8653,11 +8785,66 @@ class Company:
                 complete_measurements += 1
             if row[3] == "accepted" and row[5] == "yes" and row[4] <= 1 and row[7] is not None:
                 promotion_candidates.append(row[1])
+                promotion_candidate_items.append({
+                    "source": "coordinator_job", "id": row[1],
+                })
             valid_items.append({
-                "review_id": row[0], "job_id": row[1], "category": row[2],
+                "source": "coordinator_job", "review_id": row[0],
+                "job_id": row[1], "category": row[2],
                 "decision": row[3], "corrections": row[4],
                 "paid_setup_signal": row[5], "runtime_seconds": row[6],
                 "peak_memory_mb": row[7], "integrity": "current",
+            })
+
+        for row in experiment_rows:
+            observation = {
+                "artifact_sha256": row[13], "category": row[4],
+                "checks_passed": bool(row[11]), "corrections": row[6],
+                "decision": row[5], "exit_code": row[10],
+                "experiment_id": row[1], "label": row[3],
+                "paid_setup_signal": row[7], "peak_memory_mb": row[9],
+                "project_id": row[2], "runner": row[12],
+                "runtime_seconds": row[8],
+            }
+            integrity_valid = (
+                re.fullmatch(r"[0-9a-f]{12}", row[1] or "") is not None
+                and isinstance(row[3], str) and 1 <= len(row[3]) <= 80
+                and row[4] in PRODUCT_EVIDENCE_CATEGORIES
+                and row[5] in PRODUCT_EVIDENCE_DECISIONS
+                and type(row[6]) is int and 0 <= row[6] <= 100
+                and row[7] in PRODUCT_EVIDENCE_PAID_SIGNALS
+                and type(row[8]) in {int, float} and math.isfinite(row[8])
+                and 0 <= row[8] <= 86_400
+                and type(row[9]) is int and 1 <= row[9] <= 1_000_000
+                and type(row[10]) is int
+                and type(row[11]) is int and row[11] in {0, 1}
+                and isinstance(row[12], str) and 1 <= len(row[12]) <= 80
+                and re.fullmatch(r"[0-9a-f]{64}", row[13] or "") is not None
+                and re.fullmatch(r"[0-9a-f]{64}", row[14] or "") is not None
+                and product_experiment_observation_digest(observation) == row[14]
+                and (row[5] != "accepted" or (row[10] == 0 and row[11] == 1))
+            )
+            if not integrity_valid:
+                stale_review_count += 1
+                continue
+            category_counts[row[4]] += 1
+            decision_counts[row[5]] += 1
+            paid_counts[row[7]] += 1
+            corrections_total += row[6]
+            complete_measurements += 1
+            if row[5] == "accepted" and row[7] == "yes" and row[6] <= 1:
+                promotion_candidate_items.append({
+                    "source": "external_experiment", "id": row[1],
+                })
+            valid_items.append({
+                "source": "external_experiment", "review_id": row[0],
+                "experiment_id": row[1], "label": row[3], "category": row[4],
+                "decision": row[5], "corrections": row[6],
+                "paid_setup_signal": row[7], "runtime_seconds": row[8],
+                "peak_memory_mb": row[9], "exit_code": row[10],
+                "checks_passed": bool(row[11]), "runner": row[12],
+                "artifact_sha256": row[13], "observation_sha256": row[14],
+                "integrity": "sealed_observation",
             })
 
         reviewed = len(valid_items)
@@ -8702,6 +8889,7 @@ class Company:
             "milestone_reached": milestone_reached,
             "missing_proof": missing_proof,
             "promotion_candidate_job_ids": promotion_candidates,
+            "promotion_candidates": promotion_candidate_items,
             "promotion_candidate_rule": (
                 "current accepted review, paid-setup signal yes, at most one correction, "
                 "and recorded peak memory"
