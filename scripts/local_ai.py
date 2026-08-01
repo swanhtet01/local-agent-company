@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 
 
 SCHEMA = "local-ai.launchpad.v1"
+WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
+JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,66 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
+def run_work(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    environment = os.environ.copy()
+    source = str(project_root / "src")
+    current = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = source if not current else os.pathsep.join((source, current))
+    completed = subprocess.run(
+        [sys.executable, "-m", "local_company.cli", *action.command],
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    if completed.returncode != 0:
+        return completed.returncode
+    matched = JOB_ID_PATTERN.search(completed.stdout)
+    if not matched:
+        print(json.dumps({"schema": WORK_RESULT_SCHEMA, "ok": False, "reason": "completed_job_id_missing"}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
+        return 2
+    job_id = matched.group(1)
+    inspected = subprocess.run(
+        [sys.executable, "-m", "local_company.cli", "show", job_id],
+        cwd=project_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode != 0:
+        sys.stderr.write(inspected.stderr)
+        print(json.dumps({"schema": WORK_RESULT_SCHEMA, "ok": False, "jobId": job_id, "reason": "quality_receipt_unavailable"}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
+        return 2
+    try:
+        detail = json.loads(inspected.stdout)
+        evaluation = detail["evaluation"]
+        passed = evaluation["passed"] is True
+        score = evaluation["score"]
+        report_path = detail["job"][4]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+        print(json.dumps({"schema": WORK_RESULT_SCHEMA, "ok": False, "jobId": job_id, "reason": "quality_receipt_invalid"}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
+        return 2
+    receipt = {
+        "schema": WORK_RESULT_SCHEMA,
+        "ok": passed,
+        "jobId": job_id,
+        "executionCompleted": True,
+        "qualityPassed": passed,
+        "qualityScore": score,
+        "report": report_path,
+        "recommendedAction": "review_accepted_report" if passed else "review_failure_then_retry_with_better_model_or_tighter_task",
+        "modelUnloadedAfterRun": evaluation.get("checks", {}).get("model_stopped_cleanly") is True,
+        "externalActionPerformed": False,
+    }
+    print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
+    return 0 if passed else 1
+
+
 def switch_project(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     environment = os.environ.copy()
@@ -210,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("code_mode_requires_local_ai_cmd")
         if action.mode == "use":
             return switch_project(action)
+        if action.mode == "work":
+            return run_work(action)
         return run_company(action)
     except ValueError as error:
         print(json.dumps({"schema": SCHEMA, "ok": False, "reason": str(error)}, separators=(",", ":"), sort_keys=True), file=sys.stderr)

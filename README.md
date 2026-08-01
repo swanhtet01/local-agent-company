@@ -24,6 +24,8 @@ Use `new` to create a project and `use` to select its one bounded execution slot
 
 The dashboard is available on `http://127.0.0.1:8765` after a successful start. The advanced `local-company.cmd` interface remains available, and `local-ai.cmd company ...` forwards to it for capabilities not yet given a friendly alias.
 
+`work` does not equate model completion with useful output. It reads the sealed job evaluation after every run, prints a `local-ai.work-result.v1` receipt, and exits nonzero when quality fails or the evaluation cannot be verified. Review the report, tighten the task or knowledge, or use a measured stronger local model before retrying.
+
 See `PRODUCT.md` for what can be built, packaged, and sold from this foundation.
 
 A zero-subscription, local-first AI company for general work—not only development. It recruits role-based specialists, lets later specialists build on earlier work, retrieves local reference files, keeps an audit trail in SQLite, and writes reviewable Markdown reports.

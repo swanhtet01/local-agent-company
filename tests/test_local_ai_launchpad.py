@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_company, switch_project, translate
+from scripts.local_ai import explain, main, run_company, run_work, switch_project, translate
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -89,6 +89,41 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertIn("111111111111", mutation)
             self.assertIn(f"sha256:{'a' * 64}", mutation)
             self.assertIn("HANDOFF ACTIVE EXECUTION FOCUS", mutation)
+
+    def test_work_returns_nonzero_and_a_receipt_when_quality_fails(self) -> None:
+        completed = "Completed job 0123456789ab\nReport: C:\\private\\report.md\n"
+        inspected = {
+            "job": ["0123456789ab", "private objective", "complete", "time", "C:\\private\\report.md"],
+            "evaluation": {"passed": False, "score": 88, "checks": {"model_stopped_cleanly": False}},
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, completed, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(inspected), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 1)
+            lines = output.getvalue().splitlines()
+            receipt = json.loads(lines[-1])
+            self.assertFalse(receipt["ok"])
+            self.assertFalse(receipt["qualityPassed"])
+            self.assertEqual(receipt["qualityScore"], 88)
+            self.assertFalse(receipt["externalActionPerformed"])
+
+    def test_work_fails_closed_when_completion_cannot_be_inspected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.return_value = subprocess.CompletedProcess([], 0, "unexpected output", "")
+            error = io.StringIO()
+            output = io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 2)
+            self.assertEqual(output.getvalue(), "unexpected output")
+            self.assertIn("completed_job_id_missing", error.getvalue())
 
 
 if __name__ == "__main__":
