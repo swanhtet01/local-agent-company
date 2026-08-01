@@ -41,7 +41,6 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         product.mkdir()
         dataset_digest = "a" * 64
         spec_digest = "b" * 64
-        receipt_id = "c" * 24
         samples = 90 if ready else 13
         blockers = [] if ready else ["total_samples", "split_samples:test"]
         required = [] if ready else [
@@ -51,7 +50,6 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             "schema": "supermega.vision.dataset-readiness.v1",
             "status": "ready" if ready else "attention",
             "ready": ready,
-            "receipt_id": receipt_id,
             "dataset": {"digest": dataset_digest},
             "spec": {"digest": spec_digest},
             "counts": {"samples": samples},
@@ -61,10 +59,13 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             "network_requests": 0,
             "actions_performed": 0,
         }
+        readiness["receipt_id"] = hashlib.sha256(json.dumps(
+            readiness, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
+        receipt_id = readiness["receipt_id"]
         plan = {
             "schema": "supermega.vision.dataset-collection-plan.v1",
             "status": "ready" if ready else "attention",
-            "plan_id": "d" * 24,
             "readiness_receipt_id": receipt_id,
             "dataset": {"digest": dataset_digest},
             "spec": {"digest": spec_digest},
@@ -85,17 +86,35 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             "network_requests": 0,
             "actions_performed": 0,
         }
+        plan["plan_id"] = hashlib.sha256(json.dumps(
+            plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
         (product / "dataset-readiness-reviewed-013-v2.json").write_text(
             json.dumps(readiness), encoding="utf-8",
         )
         (product / "collection-plan-reviewed-013-v2.json").write_text(
             json.dumps(plan), encoding="utf-8",
         )
-        return product
+        return product, readiness, plan
+
+    @staticmethod
+    def _passing_plan_verifier(readiness, plan):
+        return lambda _: {
+            "schema": "supermega.vision.dataset-collection-plan-verification.v1",
+            "status": "verified",
+            "passed": True,
+            "plan_id": plan["plan_id"],
+            "ready": readiness["ready"],
+            "required_tasks": len(plan["required"]),
+            "recommended_tasks": len(plan["recommended"]),
+            "network_requests": 0,
+            "actions_performed": 0,
+        }
 
     def test_vision_product_status_cross_checks_pathless_commercial_gate(self):
-        product = self._write_product_evidence()
-        result = vision_product_status(product)
+        product, readiness, plan = self._write_product_evidence()
+        verifier = self._passing_plan_verifier(readiness, plan)
+        result = vision_product_status(product, plan_verifier=verifier)
         self.assertEqual(result["contract"], "local-company.supermega-vision-product-status.v1")
         self.assertEqual(result["status"], "collection_required")
         self.assertFalse(result["dataset_ready"])
@@ -113,15 +132,17 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan["dataset"]["digest"] = "e" * 64
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
-        invalid = vision_product_status(product)
+        invalid = vision_product_status(product, plan_verifier=verifier)
         self.assertEqual(invalid["status"], "unavailable")
         self.assertEqual(invalid["commercial_status"], "hold")
         self.assertEqual(invalid["reason"], "vision_product_evidence_inconsistent")
         self.assertNotIn(str(self.root), json.dumps(invalid))
 
     def test_dataset_ready_still_requires_held_out_model_evidence(self):
-        product = self._write_product_evidence(ready=True)
-        result = vision_product_status(product)
+        product, readiness, plan = self._write_product_evidence(ready=True)
+        result = vision_product_status(
+            product, plan_verifier=self._passing_plan_verifier(readiness, plan),
+        )
         self.assertEqual(result["status"], "dataset_ready")
         self.assertTrue(result["dataset_ready"])
         self.assertEqual(result["commercial_status"], "hold")
@@ -129,6 +150,51 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(
             result["next_action"], "train_and_verify_held_out_model_evidence",
         )
+
+    def test_vision_product_status_fails_closed_when_source_replay_fails(self):
+        product, _, _ = self._write_product_evidence()
+
+        def failed_verifier(_):
+            raise RuntimeError("private verifier detail")
+
+        result = vision_product_status(product, plan_verifier=failed_verifier)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["commercial_status"], "hold")
+        self.assertEqual(
+            result["reason"], "vision_product_source_verification_failed",
+        )
+        self.assertNotIn("private verifier detail", json.dumps(result))
+
+    def test_source_replay_rejects_coordinated_identity_rehash(self):
+        product, original_readiness, original_plan = self._write_product_evidence()
+        original_verifier = self._passing_plan_verifier(
+            original_readiness, original_plan,
+        )
+        readiness_path = product / "dataset-readiness-reviewed-013-v2.json"
+        plan_path = product / "collection-plan-reviewed-013-v2.json"
+        readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        readiness["counts"]["samples"] = 14
+        readiness.pop("receipt_id")
+        readiness["receipt_id"] = hashlib.sha256(json.dumps(
+            readiness, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
+        plan["readiness_receipt_id"] = readiness["receipt_id"]
+        plan.pop("plan_id")
+        plan["plan_id"] = hashlib.sha256(json.dumps(
+            plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
+        readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+        result = vision_product_status(
+            product, plan_verifier=original_verifier,
+        )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(
+            result["reason"], "vision_product_source_verification_failed",
+        )
+        self.assertEqual(result["commercial_status"], "hold")
 
     @staticmethod
     def worker_result(**overrides):

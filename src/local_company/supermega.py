@@ -69,6 +69,82 @@ def default_vision_product_root() -> Path:
     )
 
 
+def default_vision_repo_root() -> Path:
+    configured = os.getenv("SUPERMEGA_VISION_REPO_ROOT")
+    return Path(configured) if configured else Path.home() / "Projects" / "supermega-vision"
+
+
+def _canonical_contract_id(value: dict, identity_field: str) -> str:
+    body = {key: item for key, item in value.items() if key != identity_field}
+    encoded = json.dumps(
+        body, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _verify_vision_collection_plan(product_root: Path) -> dict:
+    repo_requested = default_vision_repo_root().expanduser()
+    if (
+        not repo_requested.is_dir() or repo_requested.is_symlink()
+        or not (repo_requested / "src" / "supermega_vision").is_dir()
+    ):
+        raise RuntimeError("vision_verifier_unavailable")
+    repo = repo_requested.resolve(strict=True)
+    python_candidates = (
+        repo / ".venv" / "Scripts" / "python.exe",
+        repo / ".venv" / "bin" / "python",
+    )
+    python = next((path for path in python_candidates if path.is_file() and not path.is_symlink()), None)
+    if python is None:
+        raise RuntimeError("vision_verifier_unavailable")
+    plan = product_root / "collection-plan-reviewed-013-v2.json"
+    dataset = product_root / "dataset-reviewed-013-v2" / "dataset.json"
+    spec = product_root / "release-qa-readiness-spec-v1.json"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(repo / "src")
+    completed = subprocess.run(
+        [
+            str(python), "-m", "supermega_vision.cli",
+            "dataset-collection-plan-verify", str(plan), str(dataset), str(spec),
+        ],
+        cwd=repo,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        timeout=20,
+        check=False,
+        shell=False,
+    )
+    if (
+        completed.returncode != 0
+        or not 1 <= len(completed.stdout.encode("utf-8")) <= 64 * 1024
+        or len(completed.stderr.encode("utf-8")) > 64 * 1024
+    ):
+        raise RuntimeError("vision_source_verification_failed")
+    try:
+        value = json.loads(
+            completed.stdout,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError("vision_source_verification_failed") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "supermega.vision.dataset-collection-plan-verification.v1"
+        or value.get("status") != "verified"
+        or value.get("passed") is not True
+        or value.get("network_requests") != 0
+        or value.get("actions_performed") != 0
+    ):
+        raise RuntimeError("vision_source_verification_failed")
+    return value
+
+
 def _unavailable_vision_product_status(reason: str) -> dict:
     return {
         "contract": VISION_PRODUCT_STATUS_CONTRACT,
@@ -90,7 +166,11 @@ def _unavailable_vision_product_status(reason: str) -> dict:
     }
 
 
-def vision_product_status(product_root: Path | None = None) -> dict:
+def vision_product_status(
+    product_root: Path | None = None,
+    *,
+    plan_verifier: Callable[[Path], dict] | None = None,
+) -> dict:
     """Cross-check pathless Vision readiness and collection evidence read-only."""
     requested = (product_root or default_vision_product_root()).expanduser()
     try:
@@ -107,7 +187,10 @@ def vision_product_status(product_root: Path | None = None) -> dict:
                 or not 1 <= path.stat().st_size <= MAX_PRODUCT_EVIDENCE_BYTES
             ):
                 raise ValueError("vision_product_evidence_unavailable")
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(
+                path.read_text(encoding="utf-8"),
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            )
             if not isinstance(value, dict):
                 raise ValueError("vision_product_evidence_invalid")
             return value
@@ -132,6 +215,12 @@ def vision_product_status(product_root: Path | None = None) -> dict:
         digest_pattern = re.compile(r"[0-9a-f]{64}")
         id_pattern = re.compile(r"[0-9a-f]{24}")
         if (
+            set(readiness) != {
+                "schema", "status", "dataset", "spec", "counts", "thresholds",
+                "gates", "blockers", "ready", "network_requests",
+                "actions_performed", "receipt_id",
+            }
+            or
             readiness.get("schema") != "supermega.vision.dataset-readiness.v1"
             or readiness.get("status") not in {"ready", "attention"}
             or type(ready) is not bool
@@ -144,6 +233,11 @@ def vision_product_status(product_root: Path | None = None) -> dict:
             or not isinstance(gates, dict) or not isinstance(blockers, list)
             or any(not isinstance(item, str) or len(item) > 160 for item in blockers)
             or plan.get("schema") != "supermega.vision.dataset-collection-plan.v1"
+            or set(plan) != {
+                "schema", "status", "dataset", "spec", "readiness_receipt_id",
+                "summary", "required", "recommended", "privacy",
+                "network_requests", "actions_performed", "plan_id",
+            }
             or plan.get("status") not in {"ready", "attention"}
             or plan.get("readiness_receipt_id") != receipt_id
             or not isinstance(plan_id, str) or id_pattern.fullmatch(plan_id) is None
@@ -173,8 +267,32 @@ def vision_product_status(product_root: Path | None = None) -> dict:
             or thresholds["min_total_samples"] < counts["samples"]
             or readiness.get("status") != ("ready" if ready else "attention")
             or plan.get("status") != ("ready" if ready else "attention")
+            or _canonical_contract_id(readiness, "receipt_id") != receipt_id
+            or _canonical_contract_id(plan, "plan_id") != plan_id
         ):
             return _unavailable_vision_product_status("vision_product_evidence_inconsistent")
+        try:
+            verification = (plan_verifier or _verify_vision_collection_plan)(root)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RuntimeError):
+            return _unavailable_vision_product_status(
+                "vision_product_source_verification_failed"
+            )
+        if (
+            not isinstance(verification, dict)
+            or verification.get("schema")
+            != "supermega.vision.dataset-collection-plan-verification.v1"
+            or verification.get("status") != "verified"
+            or verification.get("passed") is not True
+            or verification.get("plan_id") != plan_id
+            or verification.get("ready") is not ready
+            or verification.get("required_tasks") != len(required)
+            or verification.get("recommended_tasks") != len(recommended)
+            or verification.get("network_requests") != 0
+            or verification.get("actions_performed") != 0
+        ):
+            return _unavailable_vision_product_status(
+                "vision_product_source_verification_failed"
+            )
         remaining = summary["minimum_new_samples_lower_bound"]
         return {
             "contract": VISION_PRODUCT_STATUS_CONTRACT,
