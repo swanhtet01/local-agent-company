@@ -3135,10 +3135,12 @@ class Company:
             raise ValueError("Knowledge search limit must be positive")
         project_id = self._resolve_project(project)[0] if project else None
         query_lower = query.lower()
-        terms = set(re.findall(r"[a-z0-9]{3,}", query_lower))
+        query_tokens = re.findall(r"[a-z]{3,}|\d+", query_lower)
+        terms = set(query_tokens)
         if not terms:
             return []
-        hits: list[SourceHit] = []
+        primary_hits: list[SourceHit] = []
+        extra_hits: list[SourceHit] = []
         named_positions: dict[str, int] = {}
         authorities: dict[str, int] = {}
         with closing(self._connect()) as db:
@@ -3158,32 +3160,73 @@ class Company:
                 ).fetchall()
         for source_id, path, source_sha256, content, authority in rows:
             lower = content.lower()
-            score = sum(lower.count(term) for term in terms)
+            source_score = sum(lower.count(term) for term in terms)
             basename = Path(path).name.lower()
             named_match = re.search(
                 rf"(?<![\w.-]){re.escape(basename)}(?![\w.-])", query_lower,
             )
             named_position = named_match.start() if named_match else -1
             explicitly_named = named_match is not None
-            if not score and not explicitly_named:
+            if not source_score and not explicitly_named:
                 continue
-            positions = [lower.find(term) for term in terms if lower.find(term) >= 0]
-            start = max(0, min(positions) - 180) if positions else 0
-            end = min(len(content), start + 700)
-            excerpt = content[start:end]
-            line_start = content.count("\n", 0, start) + 1
-            line_end = content.count("\n", 0, end) + 1
-            evidence_basis = {
-                "source_id": source_id, "source_sha256": source_sha256,
-                "char_start": start, "char_end": end, "quote": excerpt,
+            phrases = {
+                " ".join(query_tokens[index:index + size])
+                for size in (3, 2)
+                for index in range(len(query_tokens) - size + 1)
             }
-            evidence_id = hashlib.sha256(json.dumps(
-                evidence_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            ).encode("utf-8")).hexdigest()[:16]
-            hits.append(SourceHit(
-                path, excerpt, score, source_id, source_sha256, start, end,
-                line_start, line_end, evidence_id, int(authority),
-            ))
+            candidate_starts = {0}
+            for term in terms:
+                offset = 0
+                for _ in range(32):
+                    position = lower.find(term, offset)
+                    if position < 0:
+                        break
+                    candidate_starts.add(max(0, position - 180))
+                    offset = position + len(term)
+            ranked_windows: list[tuple[int, int, int, str]] = []
+            for rough_start in sorted(candidate_starts)[:512]:
+                line_boundary = content.rfind("\n", 0, rough_start)
+                start = 0 if line_boundary < 0 else line_boundary + 1
+                hard_end = min(len(content), start + 700)
+                end_boundary = content.rfind("\n", start + 200, hard_end)
+                end = end_boundary + 1 if end_boundary >= start + 200 else hard_end
+                excerpt = content[start:end]
+                excerpt_lower = excerpt.lower()
+                unique_matches = sum(term in excerpt_lower for term in terms)
+                frequency = sum(min(excerpt_lower.count(term), 8) for term in terms)
+                phrase_matches = sum(phrase in excerpt_lower for phrase in phrases)
+                heading_matches = sum(
+                    1 for line in excerpt_lower.splitlines()
+                    if line.lstrip().startswith("#") and any(phrase in line for phrase in phrases)
+                )
+                score = unique_matches * 100 + phrase_matches * 30 + heading_matches * 120 + frequency
+                if score or explicitly_named:
+                    ranked_windows.append((score, start, end, excerpt))
+            selected: list[tuple[int, int, int, str]] = []
+            for candidate in sorted(ranked_windows, key=lambda item: (-item[0], item[1])):
+                _, start, end, _ = candidate
+                if any(max(start, chosen[1]) < min(end, chosen[2]) for chosen in selected):
+                    continue
+                selected.append(candidate)
+                if len(selected) == 2:
+                    break
+            if not selected:
+                selected = [(0, 0, min(len(content), 700), content[:700])]
+            for index, (score, start, end, excerpt) in enumerate(selected):
+                line_start = content.count("\n", 0, start) + 1
+                line_end = content.count("\n", 0, end) + 1
+                evidence_basis = {
+                    "source_id": source_id, "source_sha256": source_sha256,
+                    "char_start": start, "char_end": end, "quote": excerpt,
+                }
+                evidence_id = hashlib.sha256(json.dumps(
+                    evidence_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()[:16]
+                hit = SourceHit(
+                    path, excerpt, score, source_id, source_sha256, start, end,
+                    line_start, line_end, evidence_id, int(authority),
+                )
+                (primary_hits if index == 0 else extra_hits).append(hit)
             authorities[source_id] = int(authority)
             if explicitly_named:
                 named_positions[source_id] = named_position
@@ -3192,16 +3235,21 @@ class Company:
                 f"Objective names {len(named_positions)} available knowledge sources, "
                 f"exceeding the bounded context limit of {limit}"
             )
-        return sorted(
-            hits,
-            key=lambda hit: (
-                0 if hit.source_id in named_positions else 1,
-                named_positions.get(hit.source_id, 0),
-                -(hit.score + authorities.get(hit.source_id, 0)),
-                -authorities.get(hit.source_id, 0),
-                hit.path,
-            ),
-        )[:limit]
+        sort_key = lambda hit: (
+            0 if hit.source_id in named_positions else 1,
+            named_positions.get(hit.source_id, 0),
+            -(hit.score + authorities.get(hit.source_id, 0)),
+            -authorities.get(hit.source_id, 0),
+            hit.path,
+            hit.char_start,
+        )
+        return (sorted(
+            primary_hits,
+            key=sort_key,
+        ) + sorted(
+            extra_hits,
+            key=sort_key,
+        ))[:limit]
 
     @staticmethod
     def _canonical_json(payload: dict[str, object]) -> str:

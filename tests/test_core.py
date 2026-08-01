@@ -2581,6 +2581,35 @@ class CompanyTests(unittest.TestCase):
             _, report = company.run("Create a bakery marketing budget")
             self.assertIn(str(source.resolve()), report.read_text(encoding="utf-8"))
 
+    def test_knowledge_retrieval_selects_distant_exact_headings_instead_of_opening_boilerplate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "product.md"
+            source.write_text(
+                "# Product\n\nGeneral project evidence and product overview.\n\n"
+                + ("general local product context\n" * 80)
+                + "## Stage 1: one-machine product\n\nUse the launchpad. Record correction effort. Track memory.\n\n"
+                + ("general platform context\n" * 80)
+                + "## Next measurable milestone\n\nRun ten real missions across three categories.\n",
+                encoding="utf-8",
+            )
+            company = Company(root / "state", MockModel())
+            project = company.create_project("Retrieval Lab")
+            company.add_knowledge(source, project)
+
+            hits = company.search_knowledge(
+                "Identify the Stage 1 actions and next measurable milestone",
+                limit=4,
+                project=project,
+            )
+
+            self.assertEqual(len(hits), 2)
+            excerpts = "\n".join(hit.excerpt for hit in hits)
+            self.assertIn("## Stage 1: one-machine product", excerpts)
+            self.assertIn("## Next measurable milestone", excerpts)
+            self.assertNotIn("# Product\n\nGeneral project evidence", excerpts)
+            self.assertNotEqual(hits[0].evidence_id, hits[1].evidence_id)
+
     def test_named_knowledge_sources_are_reserved_and_run_context_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
