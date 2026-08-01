@@ -1,5 +1,31 @@
 # Local Agent Company
 
+## One-command launchpad
+
+Start with the general launchpad instead of memorizing the complete internal CLI:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+.\local-ai.cmd help
+.\local-ai.cmd check
+.\local-ai.cmd plan "Design a useful product I can validate and sell"
+.\local-ai.cmd new "Future Product" --description "General product R&D"
+.\local-ai.cmd use "Future Product"
+.\local-ai.cmd work "Create a 30-day validation plan for that product"
+.\local-ai.cmd code C:\path\to\any-project
+.\local-ai.cmd dashboard
+```
+
+Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `explain` reports whether a command can call a model or change local state without running it:
+
+```powershell
+.\local-ai.cmd explain work "Research a new product"
+```
+
+The dashboard is available on `http://127.0.0.1:8765` after a successful start. The advanced `local-company.cmd` interface remains available, and `local-ai.cmd company ...` forwards to it for capabilities not yet given a friendly alias.
+
+See `PRODUCT.md` for what can be built, packaged, and sold from this foundation.
+
 A zero-subscription, local-first AI company for general work—not only development. It recruits role-based specialists, lets later specialists build on earlier work, retrieves local reference files, keeps an audit trail in SQLite, and writes reviewable Markdown reports.
 
 Measured machine-specific results and current limitations are recorded in `ACCEPTANCE.md`.
