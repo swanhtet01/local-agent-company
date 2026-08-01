@@ -233,6 +233,13 @@ MAX_DATASET_CONTRACT_COLUMNS = 64
 MAX_DATASET_CONTRACT_DECLARATIONS = 256
 TEAM_ROUTE_SCHEMA = "local-company.team-route.v1"
 MAX_ROUTED_SPECIALISTS = 4
+PRODUCT_EVIDENCE_REVIEW_SCHEMA = "local-company.product-evidence-review.v1"
+PRODUCT_EVIDENCE_STATUS_SCHEMA = "local-company.product-evidence-status.v1"
+PRODUCT_EVIDENCE_CATEGORIES = frozenset({"coding", "business", "data-research"})
+PRODUCT_EVIDENCE_DECISIONS = frozenset({"accepted", "rejected"})
+PRODUCT_EVIDENCE_PAID_SIGNALS = frozenset({"yes", "no", "unknown"})
+PRODUCT_EVIDENCE_MISSION_TARGET = 10
+MAX_PRODUCT_EVIDENCE_REVIEWS = 100
 
 
 def count_words(text: str) -> int:
@@ -1866,6 +1873,17 @@ class Company:
                     brief_path TEXT NOT NULL, added_at TEXT NOT NULL,
                     UNIQUE(project_id, path),
                     FOREIGN KEY(project_id) REFERENCES projects(id)
+                );
+                CREATE TABLE IF NOT EXISTS product_evidence_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL, category TEXT NOT NULL,
+                    decision TEXT NOT NULL, corrections INTEGER NOT NULL,
+                    paid_setup_signal TEXT NOT NULL, runtime_seconds REAL NOT NULL,
+                    peak_memory_mb INTEGER,
+                    report_sha256 TEXT NOT NULL, manifest_sha256 TEXT NOT NULL,
+                    evaluation_score INTEGER NOT NULL, evaluator_version TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
             """)
             self._ensure_column(db, "jobs", "parent_job_id", "TEXT")
@@ -5932,6 +5950,9 @@ class Company:
                 ),
                 "schedules": rows("SELECT * FROM schedules ORDER BY created_at"),
                 "datasets": rows("SELECT * FROM datasets ORDER BY added_at"),
+                "product_evidence_reviews": rows(
+                    "SELECT * FROM product_evidence_reviews ORDER BY id"
+                ),
             }
         serialized = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
         digest = hashlib.sha256(serialized).hexdigest()
@@ -8444,6 +8465,253 @@ class Company:
         self.initialize()
         with closing(self._connect()) as db:
             return list(db.execute("SELECT id, status, created_at, objective FROM jobs ORDER BY created_at DESC"))
+
+    def record_product_evidence_review(
+        self, job_id: str, category: str, decision: str, corrections: int,
+        paid_setup_signal: str, peak_memory_mb: int | None = None,
+    ) -> dict[str, object]:
+        """Append one human review bound to the current sealed job evidence."""
+        if not isinstance(job_id, str) or re.fullmatch(r"[0-9a-f]{12}", job_id) is None:
+            raise ValueError("Product evidence job ID must be 12 lowercase hexadecimal characters")
+        if category not in PRODUCT_EVIDENCE_CATEGORIES:
+            raise ValueError(
+                "Product evidence category must be coding, business, or data-research"
+            )
+        if decision not in PRODUCT_EVIDENCE_DECISIONS:
+            raise ValueError("Product evidence decision must be accepted or rejected")
+        if type(corrections) is not int or not 0 <= corrections <= 100:
+            raise ValueError("Product evidence corrections must be between 0 and 100")
+        if paid_setup_signal not in PRODUCT_EVIDENCE_PAID_SIGNALS:
+            raise ValueError("Paid setup signal must be yes, no, or unknown")
+        if (
+            peak_memory_mb is not None
+            and (type(peak_memory_mb) is not int or not 1 <= peak_memory_mb <= 1_000_000)
+        ):
+            raise ValueError("Peak memory must be between 1 and 1000000 MiB")
+
+        self.initialize()
+        with closing(self._connect(immediate=True)) as db, db:
+            row = db.execute(
+                "SELECT j.status, j.output_path, j.report_sha256, "
+                "j.evidence_manifest_sha256, e.passed, e.score, "
+                "h.evaluator_version, h.report_sha256, h.manifest_sha256, "
+                "(SELECT created_at FROM events WHERE job_id=j.id AND kind='job_started' "
+                " ORDER BY id LIMIT 1), "
+                "(SELECT created_at FROM events WHERE job_id=j.id AND kind='job_complete' "
+                " ORDER BY id DESC LIMIT 1) "
+                "FROM jobs j LEFT JOIN evaluations e ON e.job_id=j.id "
+                "LEFT JOIN evaluation_history h ON h.id=("
+                " SELECT MAX(latest.id) FROM evaluation_history latest WHERE latest.job_id=j.id) "
+                "WHERE j.id=?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown job: {job_id}")
+            if row[0] != "complete":
+                raise ValueError("Product evidence requires a completed job")
+            if (
+                type(row[4]) is not int or row[4] not in {0, 1}
+                or type(row[5]) is not int or not 0 <= row[5] <= 100
+                or not isinstance(row[6], str) or not row[6]
+                or not isinstance(row[2], str) or re.fullmatch(r"[0-9a-f]{64}", row[2]) is None
+                or not isinstance(row[3], str) or re.fullmatch(r"[0-9a-f]{64}", row[3]) is None
+                or row[7] != row[2] or row[8] != row[3]
+            ):
+                raise ValueError("Product evidence requires a current report-bound evaluation")
+            if decision == "accepted" and row[4] != 1:
+                raise ValueError("A quality-failed job cannot be recorded as accepted")
+            try:
+                report_bytes = self._read_local_report_bytes(row[1])
+            except (OSError, ValueError) as exc:
+                raise ValueError("Product evidence report integrity is unavailable") from exc
+            if hashlib.sha256(report_bytes).hexdigest() != row[2]:
+                raise ValueError("Product evidence report integrity does not match its seal")
+            try:
+                started = datetime.fromisoformat(row[9])
+                completed = datetime.fromisoformat(row[10])
+                runtime_seconds = round((completed - started).total_seconds(), 3)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Product evidence runtime events are unavailable") from exc
+            if not math.isfinite(runtime_seconds) or runtime_seconds < 0:
+                raise ValueError("Product evidence runtime is invalid")
+
+            reviewed_at = utc_now()
+            cursor = db.execute(
+                "INSERT INTO product_evidence_reviews("
+                "job_id, category, decision, corrections, paid_setup_signal, "
+                "runtime_seconds, peak_memory_mb, report_sha256, manifest_sha256, "
+                "evaluation_score, evaluator_version, reviewed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id, category, decision, corrections, paid_setup_signal,
+                    runtime_seconds, peak_memory_mb, row[2], row[3], row[5], row[6],
+                    reviewed_at,
+                ),
+            )
+            review_id = int(cursor.lastrowid)
+            self._event(db, job_id, "product_evidence_review_recorded", json.dumps({
+                "review_id": review_id,
+                "category": category,
+                "decision": decision,
+                "corrections": corrections,
+                "paid_setup_signal": paid_setup_signal,
+                "peak_memory_recorded": peak_memory_mb is not None,
+            }, sort_keys=True))
+        return {
+            "schema": PRODUCT_EVIDENCE_REVIEW_SCHEMA,
+            "review_id": review_id,
+            "job_id": job_id,
+            "category": category,
+            "decision": decision,
+            "corrections": corrections,
+            "paid_setup_signal": paid_setup_signal,
+            "runtime_seconds": runtime_seconds,
+            "peak_memory_mb": peak_memory_mb,
+            "quality_score": row[5],
+            "report_sha256": row[2],
+            "manifest_sha256": row[3],
+            "evaluator_version": row[6],
+            "external_action_performed": False,
+            "model_called": False,
+        }
+
+    def product_evidence_status(self, project: str | None = None) -> dict[str, object]:
+        """Summarize current, integrity-checked latest reviews for product validation."""
+        self.initialize()
+        project_id = None
+        project_name = None
+        if project is not None:
+            project_id, project_name = self._resolve_project(project)
+        with closing(self._connect()) as db:
+            total = db.execute(
+                "SELECT COUNT(*) FROM (SELECT r.job_id FROM product_evidence_reviews r "
+                "JOIN jobs j ON j.id=r.job_id WHERE (? IS NULL OR j.project_id=?) "
+                "GROUP BY r.job_id)",
+                (project_id, project_id),
+            ).fetchone()[0]
+            rows = list(db.execute(
+                "WITH latest AS ("
+                " SELECT r.job_id, MAX(r.id) AS review_id FROM product_evidence_reviews r "
+                " JOIN jobs j ON j.id=r.job_id WHERE (? IS NULL OR j.project_id=?) "
+                " GROUP BY r.job_id"
+                ") SELECT r.id, r.job_id, r.category, r.decision, r.corrections, "
+                "r.paid_setup_signal, r.runtime_seconds, r.peak_memory_mb, "
+                "r.report_sha256, r.manifest_sha256, r.evaluation_score, "
+                "r.evaluator_version, j.status, j.output_path, j.report_sha256, "
+                "j.evidence_manifest_sha256, e.passed, e.score, h.evaluator_version, "
+                "h.report_sha256, h.manifest_sha256 "
+                "FROM latest JOIN product_evidence_reviews r ON r.id=latest.review_id "
+                "JOIN jobs j ON j.id=r.job_id LEFT JOIN evaluations e ON e.job_id=j.id "
+                "LEFT JOIN evaluation_history h ON h.id=("
+                " SELECT MAX(current.id) FROM evaluation_history current "
+                " WHERE current.job_id=j.id) ORDER BY r.id DESC LIMIT ?",
+                (project_id, project_id, MAX_PRODUCT_EVIDENCE_REVIEWS),
+            ))
+
+        category_counts = {category: 0 for category in sorted(PRODUCT_EVIDENCE_CATEGORIES)}
+        decision_counts = {decision: 0 for decision in sorted(PRODUCT_EVIDENCE_DECISIONS)}
+        paid_counts = {signal: 0 for signal in sorted(PRODUCT_EVIDENCE_PAID_SIGNALS)}
+        valid_items: list[dict[str, object]] = []
+        stale_review_count = 0
+        complete_measurements = 0
+        corrections_total = 0
+        promotion_candidates: list[str] = []
+        for row in rows:
+            integrity_valid = (
+                row[2] in PRODUCT_EVIDENCE_CATEGORIES
+                and row[3] in PRODUCT_EVIDENCE_DECISIONS
+                and type(row[4]) is int and 0 <= row[4] <= 100
+                and row[5] in PRODUCT_EVIDENCE_PAID_SIGNALS
+                and type(row[6]) in {int, float} and math.isfinite(row[6]) and row[6] >= 0
+                and (
+                    row[7] is None
+                    or (type(row[7]) is int and 1 <= row[7] <= 1_000_000)
+                )
+                and row[12] == "complete"
+                and row[8] == row[14] == row[19]
+                and row[9] == row[15] == row[20]
+                and row[10] == row[17]
+                and row[11] == row[18]
+                and (row[3] != "accepted" or row[16] == 1)
+            )
+            if integrity_valid:
+                try:
+                    integrity_valid = (
+                        hashlib.sha256(self._read_local_report_bytes(row[13])).hexdigest()
+                        == row[8]
+                    )
+                except (OSError, ValueError):
+                    integrity_valid = False
+            if not integrity_valid:
+                stale_review_count += 1
+                continue
+            category_counts[row[2]] += 1
+            decision_counts[row[3]] += 1
+            paid_counts[row[5]] += 1
+            corrections_total += row[4]
+            if row[7] is not None:
+                complete_measurements += 1
+            if row[3] == "accepted" and row[5] == "yes" and row[4] <= 1 and row[7] is not None:
+                promotion_candidates.append(row[1])
+            valid_items.append({
+                "review_id": row[0], "job_id": row[1], "category": row[2],
+                "decision": row[3], "corrections": row[4],
+                "paid_setup_signal": row[5], "runtime_seconds": row[6],
+                "peak_memory_mb": row[7], "integrity": "current",
+            })
+
+        reviewed = len(valid_items)
+        covered_categories = [name for name, count in category_counts.items() if count]
+        missing_categories = [name for name, count in category_counts.items() if not count]
+        capped = total > MAX_PRODUCT_EVIDENCE_REVIEWS
+        milestone_reached = (
+            not capped
+            and reviewed >= PRODUCT_EVIDENCE_MISSION_TARGET
+            and not missing_categories
+            and complete_measurements >= PRODUCT_EVIDENCE_MISSION_TARGET
+        )
+        missing_proof: list[str] = []
+        if reviewed < PRODUCT_EVIDENCE_MISSION_TARGET:
+            missing_proof.append("ten_current_reviewed_missions")
+        if missing_categories:
+            missing_proof.append("all_required_categories")
+        if complete_measurements < PRODUCT_EVIDENCE_MISSION_TARGET:
+            missing_proof.append("ten_peak_memory_measurements")
+        if stale_review_count:
+            missing_proof.append("stale_review_bindings")
+        if capped:
+            missing_proof.append("review_limit_exceeded")
+        return {
+            "schema": PRODUCT_EVIDENCE_STATUS_SCHEMA,
+            "project": {"id": project_id, "name": project_name} if project_id else None,
+            "mission_target": PRODUCT_EVIDENCE_MISSION_TARGET,
+            "reviewed_missions": reviewed,
+            "remaining_missions": max(0, PRODUCT_EVIDENCE_MISSION_TARGET - reviewed),
+            "stored_reviewed_missions": total,
+            "review_limit": MAX_PRODUCT_EVIDENCE_REVIEWS,
+            "review_limit_exceeded": capped,
+            "category_counts": category_counts,
+            "covered_categories": covered_categories,
+            "missing_categories": missing_categories,
+            "decision_counts": decision_counts,
+            "paid_setup_signal_counts": paid_counts,
+            "complete_measurements": complete_measurements,
+            "corrections_total": corrections_total,
+            "average_corrections": round(corrections_total / reviewed, 2) if reviewed else None,
+            "stale_review_count": stale_review_count,
+            "milestone_reached": milestone_reached,
+            "missing_proof": missing_proof,
+            "promotion_candidate_job_ids": promotion_candidates,
+            "promotion_candidate_rule": (
+                "current accepted review, paid-setup signal yes, at most one correction, "
+                "and recorded peak memory"
+            ),
+            "reviews": valid_items,
+            "effects": {
+                "database_mutated": False, "model_called": False,
+                "external_action_performed": False,
+            },
+        }
 
     @staticmethod
     def _quality_repair_actions(

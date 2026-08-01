@@ -54,6 +54,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd data ...                        Profile local datasets read-only
   local-ai.cmd playbooks ...                   List reusable specialist teams
   local-ai.cmd roles                           List available business roles
+  local-ai.cmd evidence ...                    Record and inspect product proof
   local-ai.cmd explain COMMAND ...             Show effects without running it
   local-ai.cmd company ...                     Access the complete advanced CLI
 
@@ -118,9 +119,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         "projects": "projects", "knowledge": "knowledge", "data": "datasets",
         "playbooks": "playbooks", "roles": "roles", "approvals": "approvals",
         "schedules": "schedules", "focus": "focus", "export": "export",
+        "evidence": "evidence",
     }
     if name in passthrough:
-        mutating = name in {"projects", "knowledge", "approvals", "schedules", "focus", "export"}
+        mutating = name in {"projects", "knowledge", "approvals", "schedules", "focus", "export", "evidence"}
         return LaunchAction((passthrough[name], *tail), name, f"Use the {name} capability.", False, mutating)
     if name == "company":
         if not tail:

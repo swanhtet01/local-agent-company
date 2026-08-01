@@ -205,6 +205,34 @@ def parser() -> argparse.ArgumentParser:
         schedule_action = schedule_sub.add_parser(action, help=f"{action.title()} a schedule")
         schedule_action.add_argument("schedule_id")
 
+    evidence = sub.add_parser(
+        "evidence", help="Record and inspect sellability evidence for completed missions"
+    )
+    evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_record = evidence_sub.add_parser(
+        "record", help="Append one human review bound to a sealed completed job"
+    )
+    evidence_record.add_argument("job_id")
+    evidence_record.add_argument(
+        "--category", required=True,
+        choices=("coding", "business", "data-research"),
+    )
+    evidence_record.add_argument(
+        "--decision", required=True, choices=("accepted", "rejected"),
+    )
+    evidence_record.add_argument("--corrections", required=True, type=int)
+    evidence_record.add_argument(
+        "--paid-setup", required=True, choices=("yes", "no", "unknown"),
+    )
+    evidence_record.add_argument(
+        "--peak-memory-mb", type=int,
+        help="Measured peak memory in MiB; omit only when the measurement is unavailable",
+    )
+    evidence_status = evidence_sub.add_parser(
+        "status", help="Show integrity-checked progress toward the ten-mission milestone"
+    )
+    evidence_status.add_argument("--project")
+
     sub.add_parser("status", help="List local jobs")
     show = sub.add_parser("show", help="Show a job plan and audit events")
     show.add_argument("job_id")
@@ -688,6 +716,15 @@ def main() -> int:
                 enabled = args.schedule_command == "enable"
                 company.set_schedule_enabled(args.schedule_id, enabled)
                 print(f"Schedule {args.schedule_id} {'enabled' if enabled else 'disabled'}.")
+        elif args.command == "evidence":
+            if args.evidence_command == "record":
+                result = company.record_product_evidence_review(
+                    args.job_id, args.category, args.decision, args.corrections,
+                    args.paid_setup, args.peak_memory_mb,
+                )
+            else:
+                result = company.product_evidence_status(args.project)
+            print(json.dumps(result, indent=2))
         elif args.command == "status":
             rows = company.jobs()
             if not rows:

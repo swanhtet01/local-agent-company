@@ -65,6 +65,7 @@ from local_company.service import (
     _startup_lock, _write_state, service_status,
     start_service, stop_service,
 )
+from scripts.local_ai import translate
 
 
 class RecordingModel:
@@ -1753,6 +1754,78 @@ class CompanyTests(unittest.TestCase):
                         [row[1] for row in company.job_detail(job_id)["assignments"]],
                         PLAYBOOKS[playbook]["roles"],
                     )
+
+    def test_product_evidence_reviews_are_append_only_bound_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, report = company.run("Review local inventory")
+            first = company.record_product_evidence_review(
+                job_id, "business", "accepted", 2, "unknown",
+            )
+            second = company.record_product_evidence_review(
+                job_id, "business", "accepted", 0, "yes", 512,
+            )
+            self.assertGreater(second["review_id"], first["review_id"])
+            self.assertFalse(second["model_called"])
+            status = company.product_evidence_status()
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["stored_reviewed_missions"], 1)
+            self.assertEqual(status["corrections_total"], 0)
+            self.assertEqual(status["complete_measurements"], 1)
+            self.assertEqual(status["promotion_candidate_job_ids"], [job_id])
+            self.assertFalse(status["milestone_reached"])
+            audit_path, _, _ = company.export_audit(Path(tmp) / "audit")
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(audit["product_evidence_reviews"]), 2)
+
+            report.write_text(
+                report.read_text(encoding="utf-8") + "\nchanged after review\n",
+                encoding="utf-8",
+            )
+            stale = company.product_evidence_status()
+            self.assertEqual(stale["reviewed_missions"], 0)
+            self.assertEqual(stale["stale_review_count"], 1)
+            self.assertIn("stale_review_bindings", stale["missing_proof"])
+
+            failed_company = Company(Path(tmp) / "failed", TruncatedModel())
+            failed_job, _ = failed_company.run("Review local inventory")
+            with self.assertRaisesRegex(ValueError, "quality-failed"):
+                failed_company.record_product_evidence_review(
+                    failed_job, "business", "accepted", 1, "no", 512,
+                )
+
+    def test_product_evidence_milestone_requires_ten_measured_cross_category_reviews(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            project_id = company.create_project("Product Lab")
+            categories = ("coding", "business", "data-research")
+            for index in range(10):
+                job_id, _ = company.run(
+                    f"Review local inventory experiment {index}",
+                    roles=["operations"], project=project_id,
+                )
+                company.record_product_evidence_review(
+                    job_id, categories[index % len(categories)], "accepted", 0,
+                    "unknown", 512,
+                )
+            status = company.product_evidence_status("Product Lab")
+            self.assertTrue(status["milestone_reached"])
+            self.assertEqual(status["reviewed_missions"], 10)
+            self.assertEqual(status["complete_measurements"], 10)
+            self.assertEqual(status["missing_categories"], [])
+            self.assertEqual(status["missing_proof"], [])
+
+            parsed = parser().parse_args([
+                "evidence", "record", "0123456789ab", "--category", "coding",
+                "--decision", "accepted", "--corrections", "0",
+                "--paid-setup", "unknown", "--peak-memory-mb", "512",
+            ])
+            self.assertEqual(parsed.evidence_command, "record")
+            self.assertEqual(parsed.peak_memory_mb, 512)
+            self.assertEqual(
+                translate(["evidence", "status"]).command,
+                ("evidence", "status"),
+            )
 
     def test_recent_identical_direct_mission_reuses_output_without_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:
