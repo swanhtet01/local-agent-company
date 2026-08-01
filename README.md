@@ -67,6 +67,27 @@ large repository edits. When the interrupted quality-model download can resume,
 run `ollama pull qwen3.5:4b`. The launcher automatically prefers the 4B model
 when it is installed and otherwise falls back to the 0.8B bootstrap model.
 
+## Use Bionic and LM Studio
+
+Bionic is a separate agent app, not merely another model server. Create a **Code
+Project** and select a local repository when you want a graphical coding agent;
+create a **Work Project** for documents, research, analysis, slides, or sheets.
+Choose a local model in the session to keep inference on-device and free of
+per-token charges. Bionic cloud models are optional and consume paid credits, so
+they are not part of this repository's free-local default.
+
+LM Studio remains useful for downloading and comparing models or serving one
+model to local applications. Its optional OpenAI-compatible server is enabled
+from the Developer page and normally uses `http://127.0.0.1:1234/v1`. Keep
+**Serve on Local Network** disabled. Enable API-token authentication before
+giving another local application access. Do not run LM Studio/Bionic inference
+and Ollama inference at the same time on the ROG Ally; unload one model before
+switching runtimes.
+
+Use Bionic and OpenCode as alternative interfaces over focused tasks, not as two
+agents editing the same checkout simultaneously. The shared `AGENTS.md` gives
+both local and Codex agents the same scope, verification, and approval rules.
+
 ## Use a real local model
 
 After installing Ollama, download a model once:
