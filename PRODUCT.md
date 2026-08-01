@@ -66,6 +66,8 @@ Treat this as product engineering and trade-secret know-how today. Before publis
 
 Useful autonomy means repeatedly completing reviewed local work, recovering safely, and presenting decisions with evidence. It does not mean unlimited permissions. The current platform deliberately requires explicit local commands to materialize schedules and run queued missions. A future always-on executor should be added only after mission budgets, cancellation, leases, recovery, resource admission, and owner gates are proven under real use.
 
+The product now exposes `local-ai.cmd cycle` as its safe autonomous unit: materialize due schedules, bind review to the exact next queue ID, and execute no more than one local mission if every current gate passes. Each invocation stops after one decision and one possible mission. Scaling means scheduling more bounded cycles or moving admitted work to additional machines, not creating an uncontrolled infinite agent.
+
 ## Next measurable milestone
 
 Use the launchpad for ten real missions across at least three categories—coding, business planning, and data or research. Record whether each result was accepted, how many corrections it required, runtime, peak memory, and whether the task would have justified a paid setup. Promote only the workflows with repeatable acceptance evidence into sellable kits.

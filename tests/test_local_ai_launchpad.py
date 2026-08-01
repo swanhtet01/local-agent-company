@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_company, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_company, run_cycle, run_work, switch_project, translate
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -19,6 +19,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["later", "Research market"]).command, ("queue", "add", "Research market"))
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
         self.assertEqual(translate(["run-next"]).command, ("queue", "run-next"))
+        self.assertEqual(translate(["cycle", "--model", "local"]).command, ("--model", "local"))
         self.assertEqual(translate(["dashboard"]).command, ("service", "start"))
         self.assertEqual(translate(["data", "list"]).command, ("datasets", "list"))
         self.assertEqual(translate(["new", "Future Lab"]).command, ("projects", "create", "Future Lab"))
@@ -124,6 +125,127 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 2)
             self.assertEqual(output.getvalue(), "unexpected output")
             self.assertIn("completed_job_id_missing", error.getvalue())
+
+    def test_cycle_with_no_due_work_never_runs_a_model(self) -> None:
+        preflight = {
+            "schema": "local-company.queue-preflight.v1", "status": "no_due_mission",
+            "queue_id": None, "blockers": ["no_due_mission"], "owner_gate_categories": [],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(preflight), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["missionsRun"], 0)
+            self.assertFalse(receipt["modelCalled"])
+            self.assertEqual(run.call_count, 2)
+
+    def test_cycle_owner_gate_stops_before_execution(self) -> None:
+        preflight = {
+            "schema": "local-company.queue-preflight.v1", "status": "owner_gate_required",
+            "queue_id": "0123456789ab", "blockers": [],
+            "owner_gate_categories": ["external_send"],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(preflight), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["ownerGateCategories"], ["external_send"])
+            self.assertEqual(run.call_count, 2)
+
+    def test_cycle_runs_exactly_one_id_bound_ready_mission(self) -> None:
+        queue_id, job_id = "0123456789ab", "abcdef012345"
+        ready = {
+            "schema": "local-company.queue-preflight.v1", "status": "ready",
+            "queue_id": queue_id, "reviewed_queue_matches": None,
+            "submission_allowed": True, "model_execution_ready": True,
+            "owner_gate_categories": [],
+        }
+        bound = {**ready, "reviewed_queue_matches": True}
+        detail = {
+            "job": [job_id, "objective", "complete", "time", "C:\\report.md"],
+            "evaluation": {"passed": True, "score": 100, "checks": {"model_stopped_cleanly": True}},
+        }
+        completion = f"Queue item {queue_id} completed as job {job_id}; quality=passed\nReport: C:\\report.md\n"
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 1 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(ready), ""),
+                subprocess.CompletedProcess([], 0, json.dumps(bound), ""),
+                subprocess.CompletedProcess([], 0, completion, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(detail), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle", "--keep-alive", "0s"]), root), 0)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["missionsRun"], 1)
+            self.assertEqual(receipt["qualityScore"], 100)
+            execution = run.call_args_list[3].args[0]
+            self.assertEqual(
+                execution[-6:],
+                ["queue", "run-next", "--queue-id", queue_id, "--keep-alive", "0s"],
+            )
+
+    def test_cycle_rejects_malformed_preflight_and_user_selected_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cycle_queue_id"):
+            translate(["cycle", "--queue-id", "0123456789ab"])
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, "not-json", ""),
+            ]
+            error = io.StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(run_cycle(translate(["cycle"]), root), 2)
+            self.assertIn("queue_preflight_invalid", error.getvalue())
+
+    def test_cycle_returns_nonzero_for_completed_quality_failure(self) -> None:
+        queue_id, job_id = "0123456789ab", "abcdef012345"
+        ready = {
+            "schema": "local-company.queue-preflight.v1", "status": "ready",
+            "queue_id": queue_id, "reviewed_queue_matches": None,
+            "submission_allowed": True, "model_execution_ready": True,
+            "owner_gate_categories": [],
+        }
+        detail = {
+            "job": [job_id, "objective", "complete", "time", "C:\\report.md"],
+            "evaluation": {"passed": False, "score": 75, "checks": {"model_stopped_cleanly": True}},
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(ready), ""),
+                subprocess.CompletedProcess([], 0, json.dumps({**ready, "reviewed_queue_matches": True}), ""),
+                subprocess.CompletedProcess([], 0, f"Queue item {queue_id} completed as job {job_id}; quality=failed\nReport: C:\\report.md\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(detail), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle"]), root), 1)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["status"], "quality_failed")
+            self.assertEqual(receipt["missionsRun"], 1)
+            self.assertEqual(receipt["qualityScore"], 75)
 
 
 if __name__ == "__main__":
