@@ -16,7 +16,9 @@ GIB = 1024**3
 SUPPORTED_MODELS = ("qwen3.5:4b", "qwen3.5:0.8b")
 MINIMUM_AVAILABLE_BYTES = {
     "qwen3.5:4b": 5 * GIB,
-    "qwen3.5:0.8b": 1 * GIB,
+    # A measured OpenCode cold start consumed about 0.91 GiB after admission.
+    # Keep another full GiB available for the OS, launcher, and review tools.
+    "qwen3.5:0.8b": 2 * GIB,
 }
 MODEL_NAME = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,79}$")
 

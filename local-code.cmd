@@ -8,6 +8,8 @@ if not exist "%OPENCODE_EXE%" (
   exit /b 1
 )
 
+if /I "%~1"=="--run" goto RUN_HEADLESS
+
 set "CHECK_ONLY=0"
 set "TARGET_DIR=%CD%"
 if /I "%~1"=="--check" (
@@ -48,3 +50,7 @@ call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 exit /b %EXIT_CODE%
+
+:RUN_HEADLESS
+python "%~dp0scripts\run_local_code_agent.py" %*
+exit /b %ERRORLEVEL%
