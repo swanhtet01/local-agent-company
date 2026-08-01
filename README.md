@@ -40,6 +40,33 @@ The default provider is now the installed local Ollama runtime. Use `--provider 
 The readiness command is the authoritative release gate for accepting a new local mission. `doctor` checks only the local Python/Ollama/model dependency: exit 0 means that dependency is ready, exit 1 names a known setup action, and exit 2 is an invalid or indeterminate diagnostic. It does not check build identity, company work state, or the queue worker.
 The company home no longer depends on the current directory. An explicit `--home` wins, then `LOCAL_COMPANY_HOME`, then the fixed per-user `~\.local-company` default. A relative environment value is anchored under the user home; root-relative, drive-relative, and parent-traversal environment values are rejected. A relative explicit `--home` remains relative to the invoking directory for compatibility.
 
+## Use the local coding agent
+
+OpenCode is the interactive coding harness and Ollama is its local model
+runtime. Start it in the current repository, or pass one explicit project
+directory:
+
+```powershell
+cd C:\Users\thesw\Projects\supermega-platform
+C:\Users\thesw\Projects\local-agent-company\local-code.cmd
+
+# Or start it from anywhere:
+C:\Users\thesw\Projects\local-agent-company\local-code.cmd C:\Users\thesw\Projects\supermega-vision
+```
+
+The launcher checks that Ollama, OpenCode, the target directory, and the local
+bootstrap model are available before opening the agent. OpenCode is permanently
+configured in `C:\Users\thesw\.config\opencode\opencode.json` to use only the
+loopback Ollama endpoint by default. It does not require an API key or paid
+inference. Review diffs and focused test output before keeping agent changes.
+Run `local-code.cmd --check C:\path\to\project` for a non-interactive readiness
+check.
+
+The current `qwen3.5:0.8b` model proves the workflow but is slow and weak for
+large repository edits. When the interrupted quality-model download can resume,
+run `ollama pull qwen3.5:4b`. The launcher automatically prefers the 4B model
+when it is installed and otherwise falls back to the 0.8B bootstrap model.
+
 ## Use a real local model
 
 After installing Ollama, download a model once:
