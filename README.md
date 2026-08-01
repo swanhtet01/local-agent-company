@@ -85,9 +85,10 @@ C:\Users\thesw\Projects\local-agent-company\local-code.cmd C:\Users\thesw\Projec
 
 The launcher checks that Ollama, OpenCode, the target directory, an installed
 supported model, and current available memory are ready before opening the agent. OpenCode is permanently
-configured in `C:\Users\thesw\.config\opencode\opencode.json` to use only the
-loopback Ollama endpoint by default. It does not require an API key or paid
-inference. Review diffs and focused test output before keeping agent changes.
+configured in `C:\Users\thesw\.config\opencode\opencode.json` to use the
+loopback Ollama endpoint by default, with a separate loopback LM Studio provider
+for the bounded 4B launcher. Neither provider requires a paid inference API.
+Review diffs and focused test output before keeping agent changes.
 Run `local-code.cmd --check C:\path\to\project` for a non-interactive readiness
 check.
 
@@ -97,6 +98,28 @@ repository edits. When the interrupted quality-model download can resume, run
 at least 5 GiB of physical memory is currently available; otherwise it keeps the
 0.8B bootstrap model. Set `LOCAL_CODE_MODEL` to request either supported model
 explicitly, but installation and memory gates still apply and cannot be bypassed.
+
+This Ally already has the Qwen 3.5 4B Q4_K_M GGUF in LM Studio, so it can be
+reused without a second multi-gigabyte Ollama download. Check current admission
+without starting a server or loading the model:
+
+```powershell
+local-code.cmd --lmstudio --check C:\path\to\project
+```
+
+When the receipt is `ready`, start the interactive 4B coding agent with:
+
+```powershell
+local-code.cmd --lmstudio C:\path\to\project
+```
+
+The launcher refuses an active Ollama model, an existing LM Studio server or
+loaded model, an unrecognized OpenCode provider, or less than 5 GiB currently
+available memory. An admitted run starts LM Studio only on `127.0.0.1:1234`
+without CORS, loads one `supermega-qwen35-4b` instance with a 4,096-token context,
+runs OpenCode, and unloads the model and stops the server after OpenCode closes.
+Closing other large applications may be necessary before the memory gate admits
+4B. A blocked check does not start a listener or load a model.
 
 Inspect the read-only selection without opening a model:
 
@@ -114,12 +137,14 @@ per-token charges. Bionic cloud models are optional and consume paid credits, so
 they are not part of this repository's free-local default.
 
 LM Studio remains useful for downloading and comparing models or serving one
-model to local applications. Its optional OpenAI-compatible server is enabled
-from the Developer page and normally uses `http://127.0.0.1:1234/v1`. Keep
+model to local applications. Its optional OpenAI-compatible server normally
+uses `http://127.0.0.1:1234/v1`; the bounded `--lmstudio` launcher manages that
+server automatically for the existing 4B model. Keep
 **Serve on Local Network** disabled. Enable API-token authentication before
-giving another local application access. Do not run LM Studio/Bionic inference
-and Ollama inference at the same time on the ROG Ally; unload one model before
-switching runtimes.
+giving a persistent or non-loopback application access. The bounded launcher
+uses an ephemeral loopback-only server with CORS disabled and stops it when
+OpenCode closes. Do not run LM Studio/Bionic inference and Ollama inference at
+the same time on the ROG Ally; unload one model before switching runtimes.
 
 Use Bionic and OpenCode as alternative interfaces over focused tasks, not as two
 agents editing the same checkout simultaneously. The shared `AGENTS.md` gives
@@ -136,7 +161,11 @@ ollama pull qwen3.5:0.8b
 .\local-company.cmd run "Build a practical plan for my objective" --model qwen3.5:0.8b
 ```
 
-After the model download, inference is local and does not use a paid API. The installed 0.8B model is the reliable bootstrap model. `qwen3.5:4b` remains the planned quality upgrade for this machine's roughly 12 GB of shared memory once its larger download succeeds.
+After the model download, inference is local and does not use a paid API. The
+installed Ollama 0.8B model is the reliable bootstrap model. The separate
+Ollama 4B download remains incomplete, but the existing LM Studio Qwen 3.5 4B
+Q4_K_M file is now the no-duplicate quality path through `local-code.cmd
+--lmstudio` whenever the 5 GiB current-memory gate passes.
 
 An identical direct mission reuses a report for 24 hours only when the routed team, project, retrieved evidence, evaluator version, stable model identity/configuration, latest passing evaluation, and sealed report SHA-256 all match. Uncacheable models, changed/tampered reports, and failed or legacy evaluations always run fresh. Change the objective or evidence when the work genuinely changed; use the explicit retry command when a failed result needs another attempt.
 

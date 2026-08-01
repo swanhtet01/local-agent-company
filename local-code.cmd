@@ -9,6 +9,7 @@ if not exist "%OPENCODE_EXE%" (
 )
 
 if /I "%~1"=="--run" goto RUN_HEADLESS
+if /I "%~1"=="--lmstudio" goto RUN_LMSTUDIO
 
 set "CHECK_ONLY=0"
 set "TARGET_DIR=%CD%"
@@ -53,4 +54,8 @@ exit /b %EXIT_CODE%
 
 :RUN_HEADLESS
 python "%~dp0scripts\run_local_code_agent.py" %*
+exit /b %ERRORLEVEL%
+
+:RUN_LMSTUDIO
+python "%~dp0scripts\run_lmstudio_code.py" %*
 exit /b %ERRORLEVEL%
