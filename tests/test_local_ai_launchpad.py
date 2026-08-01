@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_company, run_cycle, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_code, run_company, run_cycle, run_work, switch_project, translate
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -66,11 +66,25 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["cwd"], root)
             self.assertFalse(run.call_args.kwargs["check"])
 
-    def test_windows_wrapper_routes_code_to_existing_local_launcher(self) -> None:
+    def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")
-        self.assertIn('if /I "%~1"=="code"', source)
-        self.assertIn('call "%LAUNCHPAD_ROOT%local-code.cmd" %*', source)
         self.assertIn('python "%LAUNCHPAD_ROOT%scripts\\local_ai.py" %*', source)
+        self.assertNotIn("shift", source.lower())
+
+    def test_code_mode_forwards_exact_arguments_without_a_shell(self) -> None:
+        action = translate([
+            "code", "--run", "C:\\Project With Spaces", "TASK.md",
+            "--test", "python", "-m", "unittest", "-v",
+        ])
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "local-code.cmd").write_text("@exit /b 0\n", encoding="utf-8")
+            run.return_value = subprocess.CompletedProcess([], 2)
+            self.assertEqual(run_code(action, root), 2)
+            command = run.call_args.args[0]
+            self.assertEqual(command[1:], list(action.command))
+            self.assertEqual(command[2], "C:\\Project With Spaces")
+            self.assertFalse(run.call_args.kwargs["check"])
 
     def test_use_project_performs_digest_bound_handoff_through_existing_cli(self) -> None:
         observed = {

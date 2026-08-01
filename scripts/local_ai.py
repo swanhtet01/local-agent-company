@@ -164,6 +164,15 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
+def run_code(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    completed = subprocess.run(
+        [str(project_root / "local-code.cmd"), *action.command],
+        cwd=project_root, check=False,
+    )
+    return completed.returncode
+
+
 def run_work(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     environment = os.environ.copy()
@@ -429,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             print(HELP)
             return 0
         if action.mode == "code":
-            raise ValueError("code_mode_requires_local_ai_cmd")
+            return run_code(action)
         if action.mode == "use":
             return switch_project(action)
         if action.mode == "work":
