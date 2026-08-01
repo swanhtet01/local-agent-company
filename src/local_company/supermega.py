@@ -16,6 +16,7 @@ VISION_SALES_STATUS_CONTRACT = "local-company.supermega-vision-sales-status.v1"
 VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
 VISION_PROSPECT_IMPORT_CONTRACT = "local-company.supermega-vision-prospect-import.v1"
 VISION_PROSPECT_DRAFTS_CONTRACT = "local-company.supermega-vision-prospect-drafts.v1"
+VISION_PRODUCT_STATUS_CONTRACT = "local-company.supermega-vision-product-status.v1"
 PROSPECT_RESEARCH_CONTRACT = "supermega.vision.prospect_research.v1"
 PROSPECT_OUTREACH_RECEIPT_CONTRACT = "supermega.vision.prospect_outreach_receipt.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
@@ -34,6 +35,7 @@ ZERO_EFFECTS = {
 MAX_STATUS_FILES = 1_000
 MAX_STATUS_FILE_BYTES = 256 * 1024
 MAX_INTAKE_FILE_BYTES = 64 * 1024
+MAX_PRODUCT_EVIDENCE_BYTES = 512 * 1024
 MANUAL_INTAKE_DOMAIN = b"supermega.vision.manual-intake.v1\0"
 PROSPECT_RESEARCH_DOMAIN = b"supermega.vision.prospect-research.v1\0"
 MAX_PROSPECT_ROWS = 100
@@ -55,6 +57,164 @@ def default_vision_sales_root() -> Path:
     local = os.getenv("LOCALAPPDATA")
     base = Path(local) if local else Path.home() / ".local" / "state"
     return base / "SuperMega" / "vision-sales"
+
+
+def default_vision_product_root() -> Path:
+    configured = os.getenv("SUPERMEGA_VISION_PRODUCT_ROOT")
+    if configured:
+        return Path(configured)
+    return (
+        Path.home() / "OneDrive - BDA" / "SuperMega"
+        / "vision-workflow-capture-demo-20260731"
+    )
+
+
+def _unavailable_vision_product_status(reason: str) -> dict:
+    return {
+        "contract": VISION_PRODUCT_STATUS_CONTRACT,
+        "status": "unavailable",
+        "dataset_ready": False,
+        "commercial_status": "hold",
+        "reason": reason,
+        "next_action": "restore_and_verify_local_vision_product_evidence",
+        "controls": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "files_written": 0,
+            "paths_included": False,
+            "pixels_included": False,
+            "annotations_included": False,
+        },
+    }
+
+
+def vision_product_status(product_root: Path | None = None) -> dict:
+    """Cross-check pathless Vision readiness and collection evidence read-only."""
+    requested = (product_root or default_vision_product_root()).expanduser()
+    try:
+        if (
+            not requested.exists() or not requested.is_dir() or requested.is_symlink()
+        ):
+            return _unavailable_vision_product_status("vision_product_root_unavailable")
+        root = requested.resolve(strict=True)
+
+        def read_evidence(name: str) -> dict:
+            path = root / name
+            if (
+                not path.is_file() or path.is_symlink()
+                or not 1 <= path.stat().st_size <= MAX_PRODUCT_EVIDENCE_BYTES
+            ):
+                raise ValueError("vision_product_evidence_unavailable")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("vision_product_evidence_invalid")
+            return value
+
+        readiness = read_evidence("dataset-readiness-reviewed-013-v2.json")
+        plan = read_evidence("collection-plan-reviewed-013-v2.json")
+        dataset = readiness.get("dataset")
+        spec = readiness.get("spec")
+        counts = readiness.get("counts")
+        thresholds = readiness.get("thresholds")
+        plan_dataset = plan.get("dataset")
+        plan_spec = plan.get("spec")
+        summary = plan.get("summary")
+        privacy = plan.get("privacy")
+        required = plan.get("required")
+        recommended = plan.get("recommended")
+        blockers = readiness.get("blockers")
+        gates = readiness.get("gates")
+        ready = readiness.get("ready")
+        receipt_id = readiness.get("receipt_id")
+        plan_id = plan.get("plan_id")
+        digest_pattern = re.compile(r"[0-9a-f]{64}")
+        id_pattern = re.compile(r"[0-9a-f]{24}")
+        if (
+            readiness.get("schema") != "supermega.vision.dataset-readiness.v1"
+            or readiness.get("status") not in {"ready", "attention"}
+            or type(ready) is not bool
+            or readiness.get("network_requests") != 0
+            or readiness.get("actions_performed") != 0
+            or not isinstance(receipt_id, str) or id_pattern.fullmatch(receipt_id) is None
+            or not isinstance(dataset, dict) or not isinstance(plan_dataset, dict)
+            or not isinstance(spec, dict) or not isinstance(plan_spec, dict)
+            or not isinstance(counts, dict) or not isinstance(thresholds, dict)
+            or not isinstance(gates, dict) or not isinstance(blockers, list)
+            or any(not isinstance(item, str) or len(item) > 160 for item in blockers)
+            or plan.get("schema") != "supermega.vision.dataset-collection-plan.v1"
+            or plan.get("status") not in {"ready", "attention"}
+            or plan.get("readiness_receipt_id") != receipt_id
+            or not isinstance(plan_id, str) or id_pattern.fullmatch(plan_id) is None
+            or plan.get("network_requests") != 0
+            or plan.get("actions_performed") != 0
+            or not isinstance(summary, dict)
+            or not isinstance(privacy, dict)
+            or set(privacy) != {
+                "annotations_included", "paths_included", "pixels_included",
+                "sample_ids_included",
+            }
+            or any(value is not False for value in privacy.values())
+            or not isinstance(required, list) or not isinstance(recommended, list)
+            or summary.get("ready") is not ready
+            or summary.get("required_tasks") != len(required)
+            or summary.get("recommended_tasks") != len(recommended)
+            or type(summary.get("minimum_new_samples_lower_bound")) is not int
+            or summary["minimum_new_samples_lower_bound"] < 0
+            or not isinstance(dataset.get("digest"), str)
+            or digest_pattern.fullmatch(dataset["digest"]) is None
+            or plan_dataset.get("digest") != dataset["digest"]
+            or not isinstance(spec.get("digest"), str)
+            or digest_pattern.fullmatch(spec["digest"]) is None
+            or plan_spec.get("digest") != spec["digest"]
+            or type(counts.get("samples")) is not int or counts["samples"] < 0
+            or type(thresholds.get("min_total_samples")) is not int
+            or thresholds["min_total_samples"] < counts["samples"]
+            or readiness.get("status") != ("ready" if ready else "attention")
+            or plan.get("status") != ("ready" if ready else "attention")
+        ):
+            return _unavailable_vision_product_status("vision_product_evidence_inconsistent")
+        remaining = summary["minimum_new_samples_lower_bound"]
+        return {
+            "contract": VISION_PRODUCT_STATUS_CONTRACT,
+            "status": "dataset_ready" if ready else "collection_required",
+            "dataset_ready": ready,
+            "commercial_status": "hold",
+            "commercial_reason": (
+                "held_out_model_evidence_required"
+                if ready else "dataset_readiness_blocked"
+            ),
+            "dataset": {
+                "digest": dataset["digest"],
+                "samples": counts["samples"],
+                "minimum_samples": thresholds["min_total_samples"],
+                "minimum_new_samples_lower_bound": remaining,
+            },
+            "evidence": {
+                "readiness_receipt_id": receipt_id,
+                "collection_plan_id": plan_id,
+                "blocking_gate_count": len(blockers),
+                "required_task_count": len(required),
+                "recommended_task_count": len(recommended),
+            },
+            "next_action": (
+                "train_and_verify_held_out_model_evidence"
+                if ready else "collect_review_and_reassess_owned_screenshots"
+            ),
+            "controls": {
+                "model_calls": 0,
+                "network_requests": 0,
+                "external_sends": 0,
+                "payments": 0,
+                "files_written": 0,
+                "paths_included": False,
+                "pixels_included": False,
+                "annotations_included": False,
+            },
+        }
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _unavailable_vision_product_status("vision_product_evidence_invalid")
 
 
 def _bounded_text(value: object, field: str, maximum: int) -> str:

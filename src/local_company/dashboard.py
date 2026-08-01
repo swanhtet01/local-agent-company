@@ -20,6 +20,7 @@ from .core import (
     QUALITY_SUPERSESSION_LIST_SCHEMA,
     QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending, ROLES,
 )
+from .supermega import vision_product_status
 
 
 MAX_FORM_BYTES = 16 * 1024
@@ -172,6 +173,7 @@ def dashboard_snapshot(
         "queue_preflight": queue_preflight,
         "worker": worker.snapshot() if worker else {"status": "disabled"},
         "health": company.health_snapshot(),
+        "vision_product": vision_product_status(),
     }
 
 
@@ -443,6 +445,35 @@ def render_dashboard(
         for row in snapshot["pending_approvals"]
     ) or '<tr><td colspan="3" class="empty">No pending approvals</td></tr>'
 
+    vision = snapshot["vision_product"]
+    vision_dataset = vision.get("dataset", {}) if isinstance(vision, dict) else {}
+    vision_evidence = vision.get("evidence", {}) if isinstance(vision, dict) else {}
+    vision_samples = (
+        vision_dataset.get("samples") if isinstance(vision_dataset, dict) else None
+    )
+    vision_minimum = (
+        vision_dataset.get("minimum_samples")
+        if isinstance(vision_dataset, dict) else None
+    )
+    vision_metric = (
+        f"{vision_samples}/{vision_minimum}"
+        if type(vision_samples) is int and type(vision_minimum) is int
+        else "unavailable"
+    )
+    vision_product_html = (
+        '<section class="vision-banner"><h2>SuperMega Vision product evidence</h2>'
+        f'<p><strong>{cell(vision.get("status", "unavailable"))}</strong> &middot; '
+        f'commercial claims: <span class="gate">{cell(vision.get("commercial_status", "hold"))}</span></p>'
+        f'<p>Owned reviewed samples: {cell(vision_metric)} &middot; '
+        f'minimum new screenshot lower bound: '
+        f'{cell(vision_dataset.get("minimum_new_samples_lower_bound", "unknown") if isinstance(vision_dataset, dict) else "unknown")}</p>'
+        f'<p class="hint">Readiness receipt: '
+        f'{cell(vision_evidence.get("readiness_receipt_id", "unavailable") if isinstance(vision_evidence, dict) else "unavailable")} &middot; '
+        f'blocking gates: {cell(vision_evidence.get("blocking_gate_count", "unknown") if isinstance(vision_evidence, dict) else "unknown")} &middot; '
+        f'next action: <code>{cell(vision.get("next_action", "restore_and_verify_local_vision_product_evidence"))}</code>. '
+        'Dataset readiness alone never authorizes an accuracy or revenue claim.</p></section>'
+    )
+
     project_options = "".join(
         f'<option value="{cell(row[0])}"'
         f'{" selected" if str(row[0]) == draft_project else ""}>{cell(row[1])}</option>'
@@ -589,6 +620,8 @@ code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }
 .completion-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
 .build-banner {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
 .build-banner h2 {{ margin-bottom:8px; }} .build-banner p {{ margin:6px 0; }}
+.vision-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
+.vision-banner h2 {{ margin-bottom:8px; }} .vision-banner p {{ margin:6px 0; }}
 .build-hash code {{ overflow-wrap:anywhere; }}
 .hint {{ color:#9aa7bd; margin-top:-6px; }} label {{ display:block; color:#cbd5e1; font-size:13px; }}
 textarea,input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
@@ -599,7 +632,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 @media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} th:nth-child(4),td:nth-child(4) {{ display:none; }} }}
 </style></head><body>
 <h1>Local Agent Company</h1><p class="sub">Owner-controlled task intake &middot; localhost only <a class="refresh" href="/">Refresh</a><br>Scores are automated format, safety, and evidence-consistency checks—not factual or production verification.</p>
-{notice_html}{completion_html}{build_html}{intake}
+{notice_html}{completion_html}{build_html}{vision_product_html}{intake}
 <div class="grid">
 <div class="card"><div class="metric">{len(snapshot['projects'])}</div><div class="label">Projects</div></div>
 <div class="card"><div class="metric">{len(snapshot['jobs'])}</div><div class="label">Missions</div></div>
@@ -608,6 +641,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{snapshot['health']['disk_free_bytes'] / (1024 ** 3):.1f}</div><div class="label">Free disk GiB</div></div>
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
+<div class="card"><div class="metric gate">{cell(vision_metric)}</div><div class="label">Vision reviewed samples / minimum</div></div>
 {quality_recovery_card}
 {supersession_review_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>

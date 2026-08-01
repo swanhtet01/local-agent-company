@@ -3265,18 +3265,35 @@ class CompanyTests(unittest.TestCase):
             company = Company(Path(tmp), MockModel())
             company.create_project("<script>alert(1)</script>")
             company.request_action("Review <unsafe> text")
-            page = render_dashboard(company, build_identity={
-                "schema": "local-company.runtime-build.v2",
-                "package_version": "0.1.0",
-                "build_id": "<script>build</script>",
-                "source_sha256": "a" * 64,
-            })
+            with patch("local_company.dashboard.vision_product_status", return_value={
+                "status": "collection_required",
+                "commercial_status": "hold",
+                "dataset": {
+                    "samples": 13, "minimum_samples": 90,
+                    "minimum_new_samples_lower_bound": 77,
+                },
+                "evidence": {
+                    "readiness_receipt_id": "c" * 24,
+                    "blocking_gate_count": 18,
+                },
+                "next_action": "collect_review_and_reassess_owned_screenshots",
+            }):
+                page = render_dashboard(company, build_identity={
+                    "schema": "local-company.runtime-build.v2",
+                    "package_version": "0.1.0",
+                    "build_id": "<script>build</script>",
+                    "source_sha256": "a" * 64,
+                })
             self.assertIn("Local Agent Company", page)
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
             self.assertIn("Review &lt;unsafe&gt; text", page)
             self.assertNotIn("<script>alert(1)</script>", page)
             self.assertIn("&lt;script&gt;build&lt;/script&gt;", page)
             self.assertNotIn("<script>build</script>", page)
+            self.assertIn("SuperMega Vision product evidence", page)
+            self.assertIn("13/90", page)
+            self.assertIn("commercial claims: <span class=\"gate\">hold</span>", page)
+            self.assertIn("collect_review_and_reassess_owned_screenshots", page)
 
     def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -13,6 +13,7 @@ from local_company.supermega import (
     create_vision_sales_intake,
     import_vision_prospects,
     run_vision_sales,
+    vision_product_status,
     vision_sales_status,
 )
 
@@ -34,6 +35,100 @@ class SuperMegaCapabilityTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def _write_product_evidence(self, *, ready=False):
+        product = self.root / "vision-product"
+        product.mkdir()
+        dataset_digest = "a" * 64
+        spec_digest = "b" * 64
+        receipt_id = "c" * 24
+        samples = 90 if ready else 13
+        blockers = [] if ready else ["total_samples", "split_samples:test"]
+        required = [] if ready else [
+            {"kind": "split_samples"}, {"kind": "total_samples"},
+        ]
+        readiness = {
+            "schema": "supermega.vision.dataset-readiness.v1",
+            "status": "ready" if ready else "attention",
+            "ready": ready,
+            "receipt_id": receipt_id,
+            "dataset": {"digest": dataset_digest},
+            "spec": {"digest": spec_digest},
+            "counts": {"samples": samples},
+            "thresholds": {"min_total_samples": 90},
+            "gates": {"total_samples": ready},
+            "blockers": blockers,
+            "network_requests": 0,
+            "actions_performed": 0,
+        }
+        plan = {
+            "schema": "supermega.vision.dataset-collection-plan.v1",
+            "status": "ready" if ready else "attention",
+            "plan_id": "d" * 24,
+            "readiness_receipt_id": receipt_id,
+            "dataset": {"digest": dataset_digest},
+            "spec": {"digest": spec_digest},
+            "required": required,
+            "recommended": [],
+            "summary": {
+                "ready": ready,
+                "required_tasks": len(required),
+                "recommended_tasks": 0,
+                "minimum_new_samples_lower_bound": 0 if ready else 77,
+            },
+            "privacy": {
+                "annotations_included": False,
+                "paths_included": False,
+                "pixels_included": False,
+                "sample_ids_included": False,
+            },
+            "network_requests": 0,
+            "actions_performed": 0,
+        }
+        (product / "dataset-readiness-reviewed-013-v2.json").write_text(
+            json.dumps(readiness), encoding="utf-8",
+        )
+        (product / "collection-plan-reviewed-013-v2.json").write_text(
+            json.dumps(plan), encoding="utf-8",
+        )
+        return product
+
+    def test_vision_product_status_cross_checks_pathless_commercial_gate(self):
+        product = self._write_product_evidence()
+        result = vision_product_status(product)
+        self.assertEqual(result["contract"], "local-company.supermega-vision-product-status.v1")
+        self.assertEqual(result["status"], "collection_required")
+        self.assertFalse(result["dataset_ready"])
+        self.assertEqual(result["commercial_status"], "hold")
+        self.assertEqual(result["commercial_reason"], "dataset_readiness_blocked")
+        self.assertEqual(result["dataset"]["samples"], 13)
+        self.assertEqual(result["dataset"]["minimum_samples"], 90)
+        self.assertEqual(result["dataset"]["minimum_new_samples_lower_bound"], 77)
+        self.assertEqual(result["evidence"]["blocking_gate_count"], 2)
+        self.assertFalse(result["controls"]["paths_included"])
+        self.assertEqual(result["controls"]["network_requests"], 0)
+        self.assertNotIn(str(self.root), json.dumps(result))
+
+        plan_path = product / "collection-plan-reviewed-013-v2.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["dataset"]["digest"] = "e" * 64
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        invalid = vision_product_status(product)
+        self.assertEqual(invalid["status"], "unavailable")
+        self.assertEqual(invalid["commercial_status"], "hold")
+        self.assertEqual(invalid["reason"], "vision_product_evidence_inconsistent")
+        self.assertNotIn(str(self.root), json.dumps(invalid))
+
+    def test_dataset_ready_still_requires_held_out_model_evidence(self):
+        product = self._write_product_evidence(ready=True)
+        result = vision_product_status(product)
+        self.assertEqual(result["status"], "dataset_ready")
+        self.assertTrue(result["dataset_ready"])
+        self.assertEqual(result["commercial_status"], "hold")
+        self.assertEqual(result["commercial_reason"], "held_out_model_evidence_required")
+        self.assertEqual(
+            result["next_action"], "train_and_verify_held_out_model_evidence",
+        )
 
     @staticmethod
     def worker_result(**overrides):
@@ -172,6 +267,12 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         ])
         self.assertEqual(draft_args.supermega_command, "vision-prospect-drafts")
         self.assertEqual(draft_args.sales_root, self.sales)
+
+        product_args = parser().parse_args([
+            "supermega", "vision-product-status", "--product-root", str(self.root),
+        ])
+        self.assertEqual(product_args.supermega_command, "vision-product-status")
+        self.assertEqual(product_args.product_root, self.root)
 
     def _write_prospect_csv(self, rows=None):
         rows = rows or [
