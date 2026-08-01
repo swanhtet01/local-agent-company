@@ -27,25 +27,22 @@ if errorlevel 1 (
   exit /b 3
 )
 
-set "LOCAL_MODEL=qwen3.5:0.8b"
-ollama list | findstr /C:"qwen3.5:4b" >nul
-if not errorlevel 1 set "LOCAL_MODEL=qwen3.5:4b"
-
-ollama list | findstr /C:"%LOCAL_MODEL%" >nul
-if errorlevel 1 (
-  echo ERROR: Required local model qwen3.5:0.8b is not installed.
-  echo Run: ollama pull qwen3.5:0.8b
+set "LOCAL_MODEL="
+for /f "usebackq delims=" %%M in (`python "%~dp0scripts\select_local_code_model.py" --model-only`) do set "LOCAL_MODEL=%%M"
+if errorlevel 1 exit /b 4
+if not defined LOCAL_MODEL (
+  echo ERROR: Local coding model selection returned no model.
   exit /b 4
 )
 
 if "%CHECK_ONLY%"=="1" (
-  echo READY: SuperMega Local Code Agent can open %TARGET_DIR%
+  echo READY: Local AI Code Agent can open %TARGET_DIR%
   echo Model: %LOCAL_MODEL% via local Ollama. No paid API required.
   exit /b 0
 )
 
 pushd "%TARGET_DIR%" || exit /b 5
-echo Starting SuperMega Local Code Agent in %CD%
+echo Starting Local AI Code Agent in %CD%
 echo Model: %LOCAL_MODEL% via local Ollama. No paid API required.
 call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
 set "EXIT_CODE=%ERRORLEVEL%"

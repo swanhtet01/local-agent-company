@@ -82,18 +82,26 @@ C:\Users\thesw\Projects\local-agent-company\local-code.cmd
 C:\Users\thesw\Projects\local-agent-company\local-code.cmd C:\Users\thesw\Projects\supermega-vision
 ```
 
-The launcher checks that Ollama, OpenCode, the target directory, and the local
-bootstrap model are available before opening the agent. OpenCode is permanently
+The launcher checks that Ollama, OpenCode, the target directory, an installed
+supported model, and current available memory are ready before opening the agent. OpenCode is permanently
 configured in `C:\Users\thesw\.config\opencode\opencode.json` to use only the
 loopback Ollama endpoint by default. It does not require an API key or paid
 inference. Review diffs and focused test output before keeping agent changes.
 Run `local-code.cmd --check C:\path\to\project` for a non-interactive readiness
 check.
 
-The current `qwen3.5:0.8b` model proves the workflow but is slow and weak for
-large repository edits. When the interrupted quality-model download can resume,
-run `ollama pull qwen3.5:4b`. The launcher automatically prefers the 4B model
-when it is installed and otherwise falls back to the 0.8B bootstrap model.
+The current `qwen3.5:0.8b` model proves the workflow but is weak for large
+repository edits. When the interrupted quality-model download can resume, run
+`ollama pull qwen3.5:4b`. The launcher prefers the installed 4B model only when
+at least 5 GiB of physical memory is currently available; otherwise it keeps the
+0.8B bootstrap model. Set `LOCAL_CODE_MODEL` to request either supported model
+explicitly, but installation and memory gates still apply and cannot be bypassed.
+
+Inspect the read-only selection without opening a model:
+
+```powershell
+python .\scripts\select_local_code_model.py
+```
 
 ## Use Bionic and LM Studio
 
