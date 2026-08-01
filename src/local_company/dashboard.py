@@ -1993,6 +1993,92 @@ th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; ve
 </body></html>"""
 
 
+def render_vision_capture_fixture(state: str, variant: int) -> str:
+    """Render a deterministic, data-free owned screen for Vision collection."""
+    if state not in {"ready", "loading", "error", "degraded"}:
+        raise ValueError("Unknown Vision capture fixture state")
+    if type(variant) is not int or not 1 <= variant <= 32:
+        raise ValueError("Vision capture fixture variant must be between 1 and 32")
+    palettes = (
+        ("#09111f", "#11233d", "#59c3ff"),
+        ("#11101d", "#262044", "#a99cff"),
+        ("#071916", "#10342c", "#61d6b3"),
+        ("#18120b", "#352615", "#ffc96b"),
+    )
+    background, panel, accent = palettes[(variant - 1) % len(palettes)]
+    columns = 2 + ((variant - 1) % 3)
+    rail = 164 + ((variant * 17) % 92)
+    gap = 12 + ((variant * 5) % 13)
+    status_markup = {
+        "ready": (
+            '<div class="state ready"><span class="dot"></span>'
+            '<strong>Release view ready</strong><span>All controlled checks rendered.</span></div>'
+        ),
+        "loading": (
+            '<div class="state loading"><span class="spinner"></span>'
+            '<strong>Loading release view</strong><span>Controlled pending state.</span></div>'
+        ),
+        "error": (
+            '<div class="state error"><span class="mark">!</span>'
+            '<strong>Release data unavailable</strong><span>Controlled failure fixture - no live request failed.</span></div>'
+        ),
+        "degraded": (
+            '<div class="state degraded"><span class="mark">-</span>'
+            '<strong>Required panel incomplete</strong><span>Controlled degraded fixture.</span></div>'
+        ),
+    }[state]
+    cards = []
+    for index, label in enumerate(("Build", "Checks", "Evidence", "Devices", "Queue", "Review"), 1):
+        card_class = "card"
+        value = f"{(variant * 7 + index * 11) % 97:02d}"
+        detail = "controlled sample"
+        if state == "loading" and index in {2, 5}:
+            card_class += " skeleton"
+            value, detail = "--", "pending"
+        elif state == "error" and index == 3:
+            card_class += " failed"
+            value, detail = "ERR", "fixture only"
+        elif state == "degraded" and index in {4, 6}:
+            card_class += " empty"
+            value, detail = "--", "intentionally empty"
+        cards.append(
+            f'<article class="{card_class}"><span>{label}</span>'
+            f'<strong>{value}</strong><small>{detail}</small></article>'
+        )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperMega controlled Vision fixture</title><style>
+:root {{ color-scheme:dark; font-family:Inter,Segoe UI,system-ui,sans-serif; background:{background}; color:#eef5ff; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; min-height:100vh; background:radial-gradient(circle at {20 + variant % 60}% 8%,{panel},transparent 42%),{background}; }}
+.shell {{ min-height:100vh; display:grid; grid-template-columns:{rail}px 1fr; }}
+aside {{ padding:24px 18px; border-right:1px solid {accent}55; background:#050a13bb; }}
+.brand {{ font-weight:900; font-size:22px; letter-spacing:.04em; color:{accent}; }}
+.fixture {{ display:block; margin-top:8px; font:11px ui-monospace,monospace; color:#9db0c9; }}
+nav {{ margin-top:42px; display:grid; gap:12px; }} nav span {{ padding:10px 12px; border-radius:8px; background:#ffffff08; }}
+nav span:nth-child({1 + variant % 4}) {{ background:{accent}22; color:{accent}; }}
+main {{ padding:{24 + variant % 17}px; }} header {{ display:flex; align-items:flex-end; justify-content:space-between; gap:20px; border-bottom:1px solid #ffffff18; padding-bottom:18px; }}
+h1 {{ margin:0; font-size:clamp(24px,4vw,46px); }} .meta {{ color:#9db0c9; font:12px ui-monospace,monospace; }}
+.state {{ margin:24px 0; min-height:74px; display:grid; grid-template-columns:38px 1fr; align-items:center; column-gap:12px; padding:16px 18px; border:1px solid; border-radius:{8 + variant % 12}px; }}
+.state strong,.state span:last-child {{ grid-column:2; }} .state span:last-child {{ color:#c2cee0; font-size:13px; }}
+.ready {{ background:#0d422d; border-color:#55e5a0; }} .loading {{ background:#4a3510; border-color:#ffd36b; }}
+.error {{ background:#4a1820; border-color:#ff7185; }} .degraded {{ background:#34224d; border-color:#c49aff; }}
+.dot {{ width:20px; height:20px; border-radius:50%; background:#55e5a0; box-shadow:0 0 0 8px #55e5a022; }}
+.spinner {{ width:24px; height:24px; border:5px solid #ffffff33; border-top-color:#ffd36b; border-radius:50%; transform:rotate({variant * 37 % 360}deg); }}
+.mark {{ display:grid; place-items:center; width:28px; height:28px; border:2px solid currentColor; border-radius:50%; font-weight:900; }}
+.grid {{ display:grid; grid-template-columns:repeat({columns},minmax(0,1fr)); gap:{gap}px; }}
+.card {{ min-height:{118 + variant % 35}px; padding:18px; background:{panel}; border:1px solid #ffffff17; border-radius:{8 + variant % 9}px; display:flex; flex-direction:column; justify-content:space-between; }}
+.card span,.card small {{ color:#9db0c9; }} .card strong {{ font-size:clamp(26px,4vw,48px); color:{accent}; }}
+.skeleton {{ background:repeating-linear-gradient({35 + variant * 7 % 120}deg,{panel},{panel} 18px,#ffffff0b 18px,#ffffff0b 36px); }}
+.failed {{ border:2px solid #ff7185; }} .failed strong {{ color:#ff7185; }} .empty {{ border:2px dashed #c49aff88; opacity:.74; }}
+footer {{ margin-top:24px; color:#7e91ad; font:11px ui-monospace,monospace; }}
+@media(max-width:760px) {{ .shell {{ grid-template-columns:1fr; }} aside {{ display:none; }} .grid {{ grid-template-columns:1fr 1fr; }} }}
+</style></head><body><div class="shell"><aside><div class="brand">SUPERMEGA</div><span class="fixture">CONTROLLED VISION FIXTURE</span><nav><span>Overview</span><span>Release</span><span>Evidence</span><span>Recovery</span></nav></aside><main>
+<header><div><p class="meta">OWNED LOCAL FIXTURE / {state.upper()} / V{variant:02d}</p><h1>Release operations</h1></div><p class="meta">No customer or operator data</p></header>
+{status_markup}<section class="grid">{"".join(cards)}</section>
+<footer>Observation only - deterministic controlled training material - not production evidence</footer>
+</main></div></body></html>"""
+
+
 def create_dashboard_server(
     company: Company, port: int = 0, service_token: str | None = None,
     service_instance_id: str | None = None,
@@ -2082,6 +2168,22 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif match := re.fullmatch(
+                r"/vision-capture-lab/(ready|loading|error|degraded)/([0-9]{1,2})",
+                parsed.path,
+            ):
+                try:
+                    body = render_vision_capture_fixture(
+                        match.group(1), int(match.group(2)),
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("X-Robots-Tag", "noindex, nofollow")
+                    self.send_header("X-SuperMega-Vision-Fixture", "controlled-owned-local")
+                except ValueError:
+                    body = b"Vision capture fixture not found"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif parsed.path == "/__service/health.json" and service_instance_id is not None:
                 body = json.dumps(
                     {

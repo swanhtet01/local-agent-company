@@ -55,6 +55,7 @@ from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
     health_endpoint_snapshot, render_dashboard, render_dataset_quality_detail,
     render_mission_detail, render_quality_failure_overview,
+    render_vision_capture_fixture,
     runtime_build_identity, runtime_model_identity,
 )
 from local_company.service import (
@@ -3315,6 +3316,55 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("claim-safe packages ready: 2", page)
             self.assertIn("Vision claim-safe pilot packages", page)
             self.assertIn("external send authorized: False", page)
+
+    def test_vision_capture_lab_is_static_local_and_contains_no_company_data(self):
+        rendered = {
+            state: render_vision_capture_fixture(state, index)
+            for index, state in enumerate(
+                ("ready", "loading", "error", "degraded"), 1,
+            )
+        }
+        self.assertEqual(len({hashlib.sha256(value.encode()).hexdigest() for value in rendered.values()}), 4)
+        for state, page in rendered.items():
+            self.assertIn("CONTROLLED VISION FIXTURE", page)
+            self.assertIn(f"/ {state.upper()} /", page)
+            self.assertIn("No customer or operator data", page)
+            self.assertIn("not production evidence", page)
+            self.assertNotIn("<script", page)
+        with self.assertRaisesRegex(ValueError, "Unknown Vision"):
+            render_vision_capture_fixture("private", 1)
+        with self.assertRaisesRegex(ValueError, "between 1 and 32"):
+            render_vision_capture_fixture("ready", 33)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            company.create_project("PRIVATE PROJECT MUST NOT APPEAR")
+            server = create_dashboard_server(company, 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(
+                    base + "/vision-capture-lab/error/7", timeout=3,
+                ) as response:
+                    body = response.read().decode("utf-8")
+                    self.assertEqual(
+                        response.headers["X-SuperMega-Vision-Fixture"],
+                        "controlled-owned-local",
+                    )
+                    self.assertEqual(response.headers["X-Robots-Tag"], "noindex, nofollow")
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertIn("CONTROLLED VISION FIXTURE", body)
+                self.assertNotIn("PRIVATE PROJECT MUST NOT APPEAR", body)
+                with self.assertRaises(urllib.error.HTTPError) as invalid:
+                    opener.open(base + "/vision-capture-lab/ready/33", timeout=3)
+                self.assertEqual(invalid.exception.code, 404)
+                invalid.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
 
     def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
