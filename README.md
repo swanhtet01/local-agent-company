@@ -239,6 +239,12 @@ owner-reviewed founding pilot for buyer-approved data collection and held-out
 evaluation. It explicitly prohibits current accuracy, production-readiness,
 autonomous consequential-action, and revenue claims; existing drafts remain
 unsent and receive claim-review attention while product evidence is incomplete.
+Vision product evidence may be advanced without overwriting prior receipts by a
+canonical `active-product-evidence.json` selector. The selector binds exact
+root-relative dataset, readiness, and collection-plan files with a recomputed
+identity. Absolute paths, traversal, links, missing files, coordinated selector
+rehashes, or failed source replay all fail closed; the dashboard exposes only
+aggregate verified counts and evidence identities.
 The founding-pilot-packages command derives deterministic, integrity-receipted internal packages from verified research and outreach evidence. Each package explicitly says that current accuracy and production readiness are unproven, proposes buyer-owned local collection plus held-out evaluation, keeps actions disabled, and leaves scope, timing, and price uncommitted. It never rewrites the source drafts or research. The command never creates a lead, edits a draft, commits pricing, sends outreach,
 accepts payment, or counts pipeline value as revenue.
 

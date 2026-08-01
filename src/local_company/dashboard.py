@@ -480,7 +480,7 @@ def render_dashboard(
         '<section class="vision-banner"><h2>SuperMega Vision product evidence</h2>'
         f'<p><strong>{cell(vision.get("status", "unavailable"))}</strong> &middot; '
         f'commercial claims: <span class="gate">{cell(vision.get("commercial_status", "hold"))}</span></p>'
-        f'<p>Owned reviewed samples: {cell(vision_metric)} &middot; '
+        f'<p>Owned verified samples: {cell(vision_metric)} &middot; '
         f'minimum new screenshot lower bound: '
         f'{cell(vision_dataset.get("minimum_new_samples_lower_bound", "unknown") if isinstance(vision_dataset, dict) else "unknown")}</p>'
         f'<p class="hint">Readiness receipt: '

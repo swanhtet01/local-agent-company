@@ -86,6 +86,64 @@ def _canonical_contract_id(value: dict, identity_field: str) -> str:
     return hashlib.sha256(encoded).hexdigest()[:24]
 
 
+def _vision_evidence_selection(product_root: Path) -> dict[str, str]:
+    fallback = {
+        "dataset": "dataset-reviewed-013-v2/dataset.json",
+        "readiness": "dataset-readiness-reviewed-013-v2.json",
+        "collection_plan": "collection-plan-reviewed-013-v2.json",
+    }
+    selection_path = product_root / "active-product-evidence.json"
+    if not selection_path.exists():
+        return fallback
+    if (
+        not selection_path.is_file() or selection_path.is_symlink()
+        or not 1 <= selection_path.stat().st_size <= 16 * 1024
+    ):
+        raise ValueError("vision_product_selection_invalid")
+    selection = json.loads(
+        selection_path.read_text(encoding="utf-8"),
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+    )
+    if (
+        not isinstance(selection, dict)
+        or set(selection) != {
+            "schema", "status", "dataset", "readiness", "collection_plan",
+            "selection_id",
+        }
+        or selection.get("schema") != "supermega.vision.product-evidence-selection.v1"
+        or selection.get("status") != "selected_local_verified_evidence"
+        or not isinstance(selection.get("selection_id"), str)
+        or re.fullmatch(r"[0-9a-f]{24}", selection["selection_id"]) is None
+        or _canonical_contract_id(selection, "selection_id") != selection["selection_id"]
+    ):
+        raise ValueError("vision_product_selection_invalid")
+    relative_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,239}")
+    result = {}
+    for key in ("dataset", "readiness", "collection_plan"):
+        relative = selection.get(key)
+        if (
+            not isinstance(relative, str)
+            or relative_pattern.fullmatch(relative) is None
+            or "\\" in relative
+            or "//" in relative
+            or any(part in {"", ".", ".."} for part in relative.split("/"))
+        ):
+            raise ValueError("vision_product_selection_invalid")
+        candidate = product_root.joinpath(*relative.split("/"))
+        if (
+            not candidate.is_file() or candidate.is_symlink()
+            or not 1 <= candidate.stat().st_size <= MAX_PRODUCT_EVIDENCE_BYTES
+        ):
+            raise ValueError("vision_product_selection_invalid")
+        resolved = candidate.resolve(strict=True)
+        try:
+            resolved.relative_to(product_root)
+        except ValueError as exc:
+            raise ValueError("vision_product_selection_invalid") from exc
+        result[key] = relative
+    return result
+
+
 def _verify_vision_collection_plan(product_root: Path) -> dict:
     repo_requested = default_vision_repo_root().expanduser()
     if (
@@ -101,8 +159,9 @@ def _verify_vision_collection_plan(product_root: Path) -> dict:
     python = next((path for path in python_candidates if path.is_file() and not path.is_symlink()), None)
     if python is None:
         raise RuntimeError("vision_verifier_unavailable")
-    plan = product_root / "collection-plan-reviewed-013-v2.json"
-    dataset = product_root / "dataset-reviewed-013-v2" / "dataset.json"
+    selection = _vision_evidence_selection(product_root)
+    plan = product_root.joinpath(*selection["collection_plan"].split("/"))
+    dataset = product_root.joinpath(*selection["dataset"].split("/"))
     spec = product_root / "release-qa-readiness-spec-v1.json"
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(repo / "src")
@@ -182,9 +241,10 @@ def vision_product_status(
         ):
             return _unavailable_vision_product_status("vision_product_root_unavailable")
         root = requested.resolve(strict=True)
+        selection = _vision_evidence_selection(root)
 
-        def read_evidence(name: str) -> dict:
-            path = root / name
+        def read_evidence(relative: str) -> dict:
+            path = root.joinpath(*relative.split("/"))
             if (
                 not path.is_file() or path.is_symlink()
                 or not 1 <= path.stat().st_size <= MAX_PRODUCT_EVIDENCE_BYTES
@@ -198,8 +258,8 @@ def vision_product_status(
                 raise ValueError("vision_product_evidence_invalid")
             return value
 
-        readiness = read_evidence("dataset-readiness-reviewed-013-v2.json")
-        plan = read_evidence("collection-plan-reviewed-013-v2.json")
+        readiness = read_evidence(selection["readiness"])
+        plan = read_evidence(selection["collection_plan"])
         dataset = readiness.get("dataset")
         spec = readiness.get("spec")
         counts = readiness.get("counts")

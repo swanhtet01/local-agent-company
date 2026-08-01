@@ -3308,6 +3308,7 @@ class CompanyTests(unittest.TestCase):
             self.assertNotIn("<script>build</script>", page)
             self.assertIn("SuperMega Vision product evidence", page)
             self.assertIn("13/90", page)
+            self.assertIn("Owned verified samples", page)
             self.assertIn("commercial claims: <span class=\"gate\">hold</span>", page)
             self.assertIn("collect_review_and_reassess_owned_screenshots", page)
             self.assertIn("founding_pilot_owned_data_collection_and_held_out_evaluation", page)

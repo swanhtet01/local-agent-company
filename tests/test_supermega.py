@@ -153,6 +153,43 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             result["next_action"], "train_and_verify_held_out_model_evidence",
         )
 
+    def test_product_status_uses_tamper_evident_active_evidence_selection(self):
+        product, readiness, plan = self._write_product_evidence()
+        selected_dataset = product / "dataset-reviewed-035" / "dataset.json"
+        selected_dataset.parent.mkdir()
+        selected_dataset.write_text("{}", encoding="utf-8")
+        selected_readiness = product / "readiness-035.json"
+        selected_plan = product / "plan-035.json"
+        selected_readiness.write_text(json.dumps(readiness), encoding="utf-8")
+        selected_plan.write_text(json.dumps(plan), encoding="utf-8")
+        selection = {
+            "schema": "supermega.vision.product-evidence-selection.v1",
+            "status": "selected_local_verified_evidence",
+            "dataset": "dataset-reviewed-035/dataset.json",
+            "readiness": "readiness-035.json",
+            "collection_plan": "plan-035.json",
+        }
+        selection["selection_id"] = hashlib.sha256(json.dumps(
+            selection, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:24]
+        selection_path = product / "active-product-evidence.json"
+        selection_path.write_text(json.dumps(selection), encoding="utf-8")
+
+        result = vision_product_status(
+            product, plan_verifier=self._passing_plan_verifier(readiness, plan),
+        )
+        self.assertEqual(result["status"], "collection_required")
+        self.assertEqual(result["dataset"]["samples"], 13)
+        self.assertNotIn("selected_dataset", json.dumps(result))
+
+        selection["readiness"] = "../readiness-035.json"
+        selection_path.write_text(json.dumps(selection), encoding="utf-8")
+        invalid = vision_product_status(
+            product, plan_verifier=self._passing_plan_verifier(readiness, plan),
+        )
+        self.assertEqual(invalid["status"], "unavailable")
+        self.assertEqual(invalid["reason"], "vision_product_evidence_invalid")
+
     def test_vision_product_status_fails_closed_when_source_replay_fails(self):
         product, _, _ = self._write_product_evidence()
 
