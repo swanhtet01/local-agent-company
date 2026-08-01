@@ -9,6 +9,7 @@ from pathlib import Path
 from local_company.cli import _interactive_vision_sales_intake, parser
 from local_company.supermega import (
     _vision_sales_bundle_digest,
+    create_vision_founding_pilot_packages,
     create_vision_prospect_drafts,
     create_vision_sales_intake,
     import_vision_prospects,
@@ -217,7 +218,9 @@ class SuperMegaCapabilityTests(unittest.TestCase):
             },
             "research": {
                 "researched_unsent_unqualified": 5,
-                "outreach_drafts_ready": 5, "integrity_failures": 0,
+                "outreach_drafts_ready": 5,
+                "founding_pilot_packages_ready": 0,
+                "integrity_failures": 0,
             },
         }
         result = vision_commercial_status(product=product, sales=sales)
@@ -239,6 +242,18 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(result["sales"]["booked_revenue_usd"], 0)
         self.assertIn("current_validated_accuracy", result["claims"]["prohibited"])
         self.assertEqual(result["controls"]["external_sends"], 0)
+
+        sales["research"]["founding_pilot_packages_ready"] = 3
+        packaged = vision_commercial_status(product=product, sales=sales)
+        self.assertEqual(
+            packaged["offer"]["stage"],
+            "founding_pilot_package_internal_review",
+        )
+        self.assertEqual(packaged["sales"]["founding_pilot_packages_ready"], 3)
+        self.assertEqual(
+            packaged["next_action"],
+            "review_one_evidence_gated_founding_pilot_package_without_sending_or_pricing",
+        )
 
         unavailable = dict(product)
         unavailable["status"] = "unavailable"
@@ -386,6 +401,15 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(draft_args.supermega_command, "vision-prospect-drafts")
         self.assertEqual(draft_args.sales_root, self.sales)
 
+        package_args = parser().parse_args([
+            "supermega", "vision-founding-pilot-packages",
+            "--sales-root", str(self.sales),
+        ])
+        self.assertEqual(
+            package_args.supermega_command, "vision-founding-pilot-packages",
+        )
+        self.assertEqual(package_args.sales_root, self.sales)
+
         product_args = parser().parse_args([
             "supermega", "vision-product-status", "--product-root", str(self.root),
         ])
@@ -444,6 +468,7 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(status["research"], {
             "researched_unsent_unqualified": 2,
             "outreach_drafts_ready": 0,
+            "founding_pilot_packages_ready": 0,
             "integrity_failures": 0,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         })
@@ -512,6 +537,44 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(attention["research"]["integrity_failures"], 1)
         with self.assertRaisesRegex(RuntimeError, "outreach_conflict"):
             create_vision_prospect_drafts(self.sales)
+
+    def test_founding_pilot_packages_are_claim_safe_idempotent_and_integrity_checked(self):
+        import_vision_prospects(self._write_prospect_csv(), self.sales)
+        create_vision_prospect_drafts(self.sales)
+        drafts = self.sales / "research" / "outreach-drafts"
+        drafts_before = {path.name: path.read_bytes() for path in drafts.glob("*.txt")}
+
+        first = create_vision_founding_pilot_packages(self.sales)
+        second = create_vision_founding_pilot_packages(self.sales)
+        status = vision_sales_status(self.sales)
+
+        self.assertEqual(
+            first["contract"],
+            "local-company.supermega-vision-founding-pilot-packages.v1",
+        )
+        self.assertEqual(first["packages_created"], 2)
+        self.assertEqual(first["receipts_created"], 2)
+        self.assertEqual(second["packages_created"], 0)
+        self.assertEqual(second["packages_replayed"], 2)
+        self.assertEqual(first["controls"]["external_sends"], 0)
+        self.assertEqual(first["controls"]["pricing_commitments"], 0)
+        self.assertEqual(status["research"]["founding_pilot_packages_ready"], 2)
+        self.assertIn("nothing has been sent, priced", status["next_action"])
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in drafts.glob("*.txt")},
+            drafts_before,
+        )
+
+        package = next((self.sales / "research" / "founding-pilot-packages").glob("*.txt"))
+        text = package.read_text(encoding="utf-8")
+        self.assertIn("We do not currently claim validated accuracy", text)
+        self.assertIn("price remain uncommitted", text)
+        self.assertIn("Nothing has been sent, sold, booked, or collected", text)
+        self.assertNotIn("reports held-out accuracy", text)
+        package.write_text("tampered", encoding="utf-8")
+        self.assertEqual(vision_sales_status(self.sales)["status"], "attention")
+        with self.assertRaisesRegex(RuntimeError, "package_conflict"):
+            create_vision_founding_pilot_packages(self.sales)
 
     def test_interactive_intake_collects_locally_without_command_argument_data(self):
         answers = iter([
@@ -661,6 +724,7 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(result["research"], {
             "researched_unsent_unqualified": 0,
             "outreach_drafts_ready": 0,
+            "founding_pilot_packages_ready": 0,
             "integrity_failures": 0,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         })

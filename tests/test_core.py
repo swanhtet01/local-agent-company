@@ -3288,7 +3288,9 @@ class CompanyTests(unittest.TestCase):
                 },
                 "research": {
                     "researched_unsent_unqualified": 5,
-                    "outreach_drafts_ready": 5, "integrity_failures": 0,
+                    "outreach_drafts_ready": 5,
+                    "founding_pilot_packages_ready": 2,
+                    "integrity_failures": 0,
                 },
             }):
                 page = render_dashboard(company, build_identity={
@@ -3308,8 +3310,10 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("commercial claims: <span class=\"gate\">hold</span>", page)
             self.assertIn("collect_review_and_reassess_owned_screenshots", page)
             self.assertIn("founding_pilot_owned_data_collection_and_held_out_evaluation", page)
-            self.assertIn("founding_pilot_draft_internal_review", page)
+            self.assertIn("founding_pilot_package_internal_review", page)
             self.assertIn("local drafts ready: 5", page)
+            self.assertIn("claim-safe packages ready: 2", page)
+            self.assertIn("Vision claim-safe pilot packages", page)
             self.assertIn("external send authorized: False", page)
 
     def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):

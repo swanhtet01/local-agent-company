@@ -16,10 +16,12 @@ VISION_SALES_STATUS_CONTRACT = "local-company.supermega-vision-sales-status.v1"
 VISION_SALES_INTAKE_CONTRACT = "local-company.supermega-vision-sales-intake.v1"
 VISION_PROSPECT_IMPORT_CONTRACT = "local-company.supermega-vision-prospect-import.v1"
 VISION_PROSPECT_DRAFTS_CONTRACT = "local-company.supermega-vision-prospect-drafts.v1"
+VISION_FOUNDING_PILOT_PACKAGES_CONTRACT = "local-company.supermega-vision-founding-pilot-packages.v1"
 VISION_PRODUCT_STATUS_CONTRACT = "local-company.supermega-vision-product-status.v1"
 VISION_COMMERCIAL_STATUS_CONTRACT = "local-company.supermega-vision-commercial-status.v1"
 PROSPECT_RESEARCH_CONTRACT = "supermega.vision.prospect_research.v1"
 PROSPECT_OUTREACH_RECEIPT_CONTRACT = "supermega.vision.prospect_outreach_receipt.v1"
+FOUNDING_PILOT_PACKAGE_RECEIPT_CONTRACT = "supermega.vision.founding_pilot_package_receipt.v1"
 WORKER_CONTRACT = "supermega.vision.lead_inbox_run.v1"
 VISION_SALES_BUNDLE_DOMAIN = b"supermega.vision-sales-worker.v1\0"
 VISION_SALES_BUNDLE_PATHS = (
@@ -750,6 +752,135 @@ def create_vision_prospect_drafts(sales_root: Path | None = None) -> dict:
     }
 
 
+def _render_founding_pilot_package(record: dict) -> bytes:
+    organization = " ".join(record["organization"].split())
+    signal = " ".join(record["verified_public_signal"].split())
+    contact = " ".join(record["public_contact"].split())
+    audience = "your product team" if record["route_type"] == "direct product team" else "your team or one authorized client project"
+    body = f"""DRAFT - OWNER REVIEW REQUIRED - NOT SENT - NO PRICE COMMITTED
+
+Prospect: {organization}
+Public contact route to recheck: {contact}
+Evidence source to recheck: {record['source']}
+Research status: researched, unsent, and unqualified
+
+Subject: Evidence-gated local visual-QA founding pilot for {organization}
+
+Hi {organization} team,
+
+Your public information describes: {signal}
+
+SuperMega is developing a local, observation-only visual QA workflow for buyer-approved Windows or Android screens. The product is still in controlled data collection. We do not currently claim validated accuracy, production readiness, or autonomous action capability.
+
+If {audience} has one screen workflow repeatedly checked by eye, we can explore a paid founding pilot. Before any commitment, we would jointly confirm screenshot rights, the small state set, human fallback, target device, workload, acceptance metrics, and an agreed stop condition.
+
+Proposed pilot sequence:
+1. Approve the workflow, screenshots, state labels, and privacy boundaries.
+2. Collect buyer-owned examples locally and separate training from held-out evaluation data.
+3. Train and evaluate locally, reporting accuracy, false positives, abstentions, and device latency only after measurement.
+4. Keep clicking, messaging, credentials, payments, and production changes disabled.
+5. Continue only if the agreed acceptance gates are met.
+
+The first conversation requires no data upload or production connection. Scope, timing, and price remain uncommitted until factual qualification and owner approval.
+
+This package is an internal draft. Nothing has been sent, sold, booked, or collected.
+"""
+    return body.encode("utf-8")
+
+
+def _founding_pilot_package_artifacts(
+    prospect_id: str, research_bytes: bytes, record: dict,
+) -> tuple[bytes, bytes]:
+    outreach, _ = _prospect_outreach_artifacts(prospect_id, research_bytes, record)
+    package = _render_founding_pilot_package(record)
+    receipt = {
+        "contract": FOUNDING_PILOT_PACKAGE_RECEIPT_CONTRACT,
+        "prospect_id": prospect_id,
+        "research_sha256": hashlib.sha256(research_bytes).hexdigest(),
+        "source_outreach_sha256": hashlib.sha256(outreach).hexdigest(),
+        "package_sha256": hashlib.sha256(package).hexdigest(),
+        "package_file": f"{prospect_id}.txt",
+        "status": "owner_review_required_unsent_unpriced",
+        "claims": {
+            "current_validated_accuracy": False,
+            "production_readiness": False,
+            "autonomous_actions": False,
+            "booked_or_collected_revenue": False,
+        },
+        "effects": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "lead_qualifications": 0,
+            "pricing_commitments": 0,
+        },
+    }
+    encoded_receipt = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return package, encoded_receipt
+
+
+def create_vision_founding_pilot_packages(sales_root: Path | None = None) -> dict:
+    """Create deterministic claim-safe internal packages from verified outreach evidence."""
+    requested_sales = (sales_root or default_vision_sales_root()).expanduser()
+    if requested_sales.exists() and requested_sales.is_symlink():
+        raise RuntimeError("vision_sales_root_unsafe")
+    sales = requested_sales.resolve()
+    research_root = sales / "research"
+    inventory, research_failures = _prospect_research_inventory(research_root / "prospects")
+    outreach_ready, outreach_failures = _prospect_outreach_status(research_root, inventory)
+    if research_failures or outreach_failures or outreach_ready != len(inventory):
+        raise RuntimeError("vision_founding_pilot_source_integrity_failed")
+
+    packages = research_root / "founding-pilot-packages"
+    receipts = research_root / "founding-pilot-package-receipts"
+    for directory in (research_root, packages, receipts):
+        if directory.exists() and (not directory.is_dir() or directory.is_symlink()):
+            raise RuntimeError("vision_founding_pilot_store_unsafe")
+    packages.mkdir(parents=True, exist_ok=True)
+    receipts.mkdir(parents=True, exist_ok=True)
+
+    expected = []
+    for prospect_id, (record, research_bytes) in sorted(inventory.items()):
+        package, receipt = _founding_pilot_package_artifacts(prospect_id, research_bytes, record)
+        expected.append((packages / f"{prospect_id}.txt", package, receipts / f"{prospect_id}.json", receipt))
+    for package_path, package, receipt_path, receipt in expected:
+        for path, content in ((package_path, package), (receipt_path, receipt)):
+            if path.exists() and (
+                not path.is_file() or path.is_symlink()
+                or path.stat().st_size != len(content) or path.read_bytes() != content
+            ):
+                raise RuntimeError("vision_founding_pilot_package_conflict")
+
+    packages_created = 0
+    receipts_created = 0
+    for package_path, package, receipt_path, receipt in expected:
+        packages_created += int(_write_exact_if_missing(
+            package_path, package, "vision_founding_pilot_package_conflict",
+        ))
+        receipts_created += int(_write_exact_if_missing(
+            receipt_path, receipt, "vision_founding_pilot_package_conflict",
+        ))
+    return {
+        "contract": VISION_FOUNDING_PILOT_PACKAGES_CONTRACT,
+        "status": "owner_review_ready" if inventory else "no_verified_prospects",
+        "researched_prospects": len(inventory),
+        "packages_created": packages_created,
+        "receipts_created": receipts_created,
+        "packages_replayed": len(inventory) - packages_created,
+        "next_action": "Review one evidence-gated package locally; nothing has been sent, priced, sold, booked, or collected.",
+        "controls": {
+            "model_calls": 0,
+            "network_requests": 0,
+            "external_sends": 0,
+            "payments": 0,
+            "lead_qualifications": 0,
+            "pricing_commitments": 0,
+            "source_mutations": 0,
+        },
+    }
+
+
 def _validated_worker_result(stdout: str) -> dict:
     lines = [line for line in stdout.splitlines() if line.strip()]
     if len(lines) != 1:
@@ -955,6 +1086,52 @@ def _prospect_outreach_status(research_root: Path, inventory: dict[str, tuple[di
     return ready, integrity_failures
 
 
+def _founding_pilot_package_status(
+    research_root: Path, inventory: dict[str, tuple[dict, bytes]],
+) -> tuple[int, int]:
+    receipt_files, integrity_failures = _regular_json_files(
+        research_root / "founding-pilot-package-receipts"
+    )
+    package_files, package_attention = _regular_text_files(
+        research_root / "founding-pilot-packages"
+    )
+    integrity_failures += package_attention
+    packages_by_name = {path.name: path for path in package_files}
+    referenced_packages = set()
+    ready = 0
+    for receipt_path in receipt_files:
+        try:
+            if receipt_path.stat().st_size > MAX_STATUS_FILE_BYTES:
+                raise ValueError("founding_pilot_receipt_too_large")
+            encoded_receipt = receipt_path.read_bytes()
+            receipt = json.loads(encoded_receipt.decode("utf-8"))
+            prospect_id = receipt.get("prospect_id")
+            if not isinstance(prospect_id, str) or prospect_id not in inventory:
+                raise ValueError("founding_pilot_prospect_unknown")
+            record, research_bytes = inventory[prospect_id]
+            expected_package, expected_receipt = _founding_pilot_package_artifacts(
+                prospect_id, research_bytes, record,
+            )
+            package_name = f"{prospect_id}.txt"
+            package_path = packages_by_name.get(package_name)
+            if package_path is not None:
+                referenced_packages.add(package_name)
+            if (
+                receipt.get("contract") != FOUNDING_PILOT_PACKAGE_RECEIPT_CONTRACT
+                or receipt_path.name != f"{prospect_id}.json"
+                or encoded_receipt != expected_receipt
+                or package_path is None
+                or package_path.stat().st_size != len(expected_package)
+                or package_path.read_bytes() != expected_package
+            ):
+                raise ValueError("founding_pilot_package_invalid")
+            ready += 1
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            integrity_failures += 1
+    integrity_failures += len(set(packages_by_name) - referenced_packages)
+    return ready, integrity_failures
+
+
 def vision_sales_status(sales_root: Path | None = None) -> dict:
     sales = (sales_root or default_vision_sales_root()).expanduser().resolve()
     inbox = sales / "inbox"
@@ -967,6 +1144,10 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
     research_inventory, research_integrity_failures = _prospect_research_inventory(research_root / "prospects")
     outreach_drafts_ready, outreach_integrity_failures = _prospect_outreach_status(research_root, research_inventory)
     research_integrity_failures += outreach_integrity_failures
+    founding_pilot_packages_ready, package_integrity_failures = _founding_pilot_package_status(
+        research_root, research_inventory,
+    )
+    research_integrity_failures += package_integrity_failures
     researched = len(research_inventory)
 
     receipt_files, integrity_failures = _regular_json_files(receipts)
@@ -1052,6 +1233,8 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
         next_action = "Review blocked-lead questions and missing start gates; nothing has been sent."
     elif researched and outreach_drafts_ready < researched:
         next_action = "Generate the missing local prospect outreach drafts; nothing has been sent or qualified."
+    elif founding_pilot_packages_ready:
+        next_action = "Review one evidence-gated founding-pilot package; nothing has been sent, priced, or counted as revenue."
     elif outreach_drafts_ready:
         next_action = "Review one local outreach draft; nothing has been sent, qualified, or counted as revenue."
     else:
@@ -1073,6 +1256,7 @@ def vision_sales_status(sales_root: Path | None = None) -> dict:
         "research": {
             "researched_unsent_unqualified": researched,
             "outreach_drafts_ready": outreach_drafts_ready,
+            "founding_pilot_packages_ready": founding_pilot_packages_ready,
             "integrity_failures": research_integrity_failures,
             "value_label": "Research only; not a lead, proposal, booked revenue, or collected revenue.",
         },
@@ -1118,11 +1302,15 @@ def vision_commercial_status(
         pipeline.get("qualified_drafts"), pipeline.get("blocked_drafts"),
         pipeline.get("integrity_failures"), pipeline.get("input_attention"),
         research.get("researched_unsent_unqualified"),
-        research.get("outreach_drafts_ready"), research.get("integrity_failures"),
+        research.get("outreach_drafts_ready"),
+        research.get("founding_pilot_packages_ready"),
+        research.get("integrity_failures"),
     )
     if any(type(value) is not int or value < 0 for value in count_fields):
         raise RuntimeError("vision_commercial_inputs_invalid")
-    qualified, blocked, pipeline_integrity, input_attention, researched, outreach, research_integrity = count_fields
+    qualified, blocked, pipeline_integrity, input_attention, researched, outreach, packages, research_integrity = count_fields
+    if packages > outreach or outreach > researched:
+        raise RuntimeError("vision_commercial_inputs_invalid")
     product_available = product_status["status"] != "unavailable"
     sales_integrity_ready = (
         sales_status["status"] == "ready"
@@ -1141,6 +1329,10 @@ def vision_commercial_status(
         status = "owner_review_ready"
         offer_stage = "qualified_proposal_internal_review"
         next_action = "review_one_qualified_proposal_without_sending_or_claiming_revenue"
+    elif packages:
+        status = "owner_review_ready"
+        offer_stage = "founding_pilot_package_internal_review"
+        next_action = "review_one_evidence_gated_founding_pilot_package_without_sending_or_pricing"
     elif outreach:
         status = "owner_review_ready"
         offer_stage = "founding_pilot_draft_internal_review"
@@ -1184,6 +1376,7 @@ def vision_commercial_status(
             "status": sales_status["status"],
             "researched_unsent_unqualified": researched,
             "outreach_drafts_ready": outreach,
+            "founding_pilot_packages_ready": packages,
             "qualified_proposal_drafts": qualified,
             "blocked_proposal_drafts": blocked,
             "draft_claim_review_required": outreach + qualified,

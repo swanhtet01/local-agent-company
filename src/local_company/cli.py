@@ -23,6 +23,7 @@ from .focus import (
     set_execution_focus,
 )
 from .supermega import (
+    create_vision_founding_pilot_packages,
     create_vision_sales_intake,
     create_vision_sales_intake_fields,
     create_vision_prospect_drafts,
@@ -70,6 +71,11 @@ def parser() -> argparse.ArgumentParser:
     vision_prospect_import.add_argument("--sales-root", type=Path)
     vision_prospect_drafts = supermega_sub.add_parser("vision-prospect-drafts", help="Create integrity-checked local outreach drafts without sending them")
     vision_prospect_drafts.add_argument("--sales-root", type=Path)
+    vision_pilot_packages = supermega_sub.add_parser(
+        "vision-founding-pilot-packages",
+        help="Create claim-safe internal founding-pilot packages without sending or pricing",
+    )
+    vision_pilot_packages.add_argument("--sales-root", type=Path)
     vision_product = supermega_sub.add_parser(
         "vision-product-status",
         help="Cross-check local Vision readiness and commercial-claim gates",
@@ -542,6 +548,8 @@ def main() -> int:
                 print(json.dumps(import_vision_prospects(args.input, args.sales_root), indent=2))
             elif args.supermega_command == "vision-prospect-drafts":
                 print(json.dumps(create_vision_prospect_drafts(args.sales_root), indent=2))
+            elif args.supermega_command == "vision-founding-pilot-packages":
+                print(json.dumps(create_vision_founding_pilot_packages(args.sales_root), indent=2))
             elif args.supermega_command == "vision-product-status":
                 print(json.dumps(vision_product_status(args.product_root), indent=2))
             elif args.supermega_command == "vision-commercial-status":

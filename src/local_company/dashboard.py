@@ -491,6 +491,7 @@ def render_dashboard(
         f'<p>Offer: <code>{cell(vision_offer.get("name", "unavailable") if isinstance(vision_offer, dict) else "unavailable")}</code> &middot; '
         f'stage: {cell(vision_offer.get("stage", "unavailable") if isinstance(vision_offer, dict) else "unavailable")} &middot; '
         f'local drafts ready: {cell(vision_sales.get("outreach_drafts_ready", 0) if isinstance(vision_sales, dict) else 0)} &middot; '
+        f'claim-safe packages ready: {cell(vision_sales.get("founding_pilot_packages_ready", 0) if isinstance(vision_sales, dict) else 0)} &middot; '
         f'external send authorized: {cell(vision_offer.get("external_send_authorized", False) if isinstance(vision_offer, dict) else False)}.</p>'
         f'<p class="hint">Commercial next action: <code>{cell(vision_commercial.get("next_action", "restore_and_verify_local_vision_product_evidence") if isinstance(vision_commercial, dict) else "restore_and_verify_local_vision_product_evidence")}</code>.</p></section>'
     )
@@ -664,6 +665,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
 <div class="card"><div class="metric gate">{cell(vision_metric)}</div><div class="label">Vision reviewed samples / minimum</div></div>
 <div class="card"><div class="metric gate">{cell(vision_sales.get('outreach_drafts_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision local drafts ready, unsent</div></div>
+<div class="card"><div class="metric gate">{cell(vision_sales.get('founding_pilot_packages_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision claim-safe pilot packages</div></div>
 {quality_recovery_card}
 {supersession_review_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>
