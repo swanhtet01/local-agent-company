@@ -105,6 +105,7 @@ Use one command for local coding, business teams, research, planning, and queued
 Examples:
   local-ai.cmd supermega
   local-ai.cmd supermega refresh
+  local-ai.cmd supermega next
   local-ai.cmd supermega plan "Choose one verified internal next action"
   local-ai.cmd supermega later "Draft one evidence-grounded release gap brief"
   local-ai.cmd supermega code --check
@@ -165,6 +166,14 @@ def translate(argv: list[str]) -> LaunchAction | None:
             if values:
                 raise ValueError("supermega_use_accepts_no_arguments")
             return LaunchAction((SUPERMEGA_PROJECT_NAME,), "use", "Select SuperMega for bounded model-backed work.", False, True)
+        if operation == "next":
+            if values:
+                raise ValueError("supermega_next_accepts_no_arguments")
+            return LaunchAction(
+                ("queue", "preflight"), "supermega-next",
+                "Inspect the exact next queued mission and its blockers without running it.",
+                False, False,
+            )
         if operation in {"plan", "work", "later"}:
             objective = _supermega_objective(f"supermega_{operation}", values)
             prefix = {
@@ -1209,6 +1218,11 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     project: dict[str, object]
     knowledge: dict[str, object]
     focus: dict[str, object]
+    queue: dict[str, object] = {
+        "status": "unavailable", "queueId": None, "projectId": None,
+        "blockers": [], "ownerGateCategories": [],
+    }
+    company = None
     try:
         company = Company(company_home, MockModel())
         detail = company.project_detail(SUPERMEGA_PROJECT_NAME)
@@ -1238,6 +1252,23 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         knowledge = {"readyForUse": False, "sourceCount": None, "statusCounts": None}
         focus = {"supermegaActive": False, "currentProject": None, "maxRoles": None}
 
+    if company is not None and project["status"] == "ready":
+        try:
+            preflight = company.queue_preflight()
+            blockers = preflight.get("blockers")
+            owner_gates = preflight.get("owner_gate_categories")
+            queue = {
+                "status": preflight.get("status"),
+                "queueId": preflight.get("queue_id"),
+                "projectId": preflight.get("project_id"),
+                "blockers": list(blockers[:10]) if isinstance(blockers, list) else [],
+                "ownerGateCategories": (
+                    list(owner_gates[:10]) if isinstance(owner_gates, list) else []
+                ),
+            }
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            pass
+
     try:
         available = available_memory_bytes()
     except (OSError, RuntimeError, ValueError):
@@ -1255,6 +1286,17 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     elif focus["supermegaActive"] is not True:
         next_action = "activate_supermega_execution_focus"
         command = "local-ai.cmd supermega use"
+    elif queue["status"] == "unavailable":
+        next_action = "inspect_unavailable_queue_state"
+        command = "local-ai.cmd supermega next"
+    elif queue["status"] in {"blocked", "owner_gate_required"}:
+        if queue["projectId"] != project["projectId"]:
+            next_action = "inspect_incompatible_queue_head"
+        elif queue["status"] == "owner_gate_required":
+            next_action = "review_queue_owner_gate"
+        else:
+            next_action = "inspect_blocked_queue_head"
+        command = "local-ai.cmd supermega next"
     elif repository["clean"] is not True:
         next_action = "review_existing_supermega_changes"
         command = "git status --short"
@@ -1267,13 +1309,14 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     attention = (
         repository["status"] != "ready" or project["status"] != "ready"
         or knowledge["readyForUse"] is not True or focus["supermegaActive"] is not True
+        or queue["status"] in {"unavailable", "blocked", "owner_gate_required"}
         or repository["clean"] is not True or not memory_ready
     )
     print(json.dumps({
         "schema": SUPERMEGA_WORKBENCH_SCHEMA,
         "status": "attention" if attention else "ready",
         "repository": repository, "project": project, "knowledge": knowledge,
-        "focus": focus,
+        "focus": focus, "queue": queue,
         "resources": {
             "availableMemoryBytes": available,
             "minimumModelMemoryBytes": CYCLE_MINIMUM_AVAILABLE_BYTES,
@@ -1288,6 +1331,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
             "status": "local-ai.cmd supermega",
             "refreshEvidence": "local-ai.cmd supermega refresh",
             "activateFocus": "local-ai.cmd supermega use",
+            "inspectQueue": "local-ai.cmd supermega next",
             "plan": 'local-ai.cmd supermega plan "OBJECTIVE"',
             "queue": 'local-ai.cmd supermega later "OBJECTIVE"',
             "run": 'local-ai.cmd supermega work "OBJECTIVE"',
