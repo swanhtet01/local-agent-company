@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_offer, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -23,6 +23,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             translate(["experiment-run", "--recover-memory", "Future Lab"]).command,
             ("Future Lab", "--recover-memory"),
         )
+        self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["work", "Build a plan"]).command, ("run", "Build a plan"))
         self.assertEqual(translate(["later", "Research market"]).command, ("queue", "add", "Research market"))
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
@@ -167,6 +168,21 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             recover.assert_called_once()
             sleep.assert_called_once_with(3.0)
 
+    def test_offer_command_reports_missing_proof_without_model_or_mutation(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            Company(home, MockModel()).create_project("Future Lab")
+            output = io.StringIO()
+            with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(output):
+                self.assertEqual(run_offer(translate(["offer", "Future Lab"])), 1)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "evidence_required")
+            self.assertFalse(receipt["externalPublicationAuthorized"])
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+
     def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")
         self.assertIn('python "%LAUNCHPAD_ROOT%scripts\\local_ai.py" %*', source)
@@ -178,6 +194,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-company-agent.cmd"', source)
         self.assertIn('local-ai.cmd" experiment', source)
         self.assertIn('local-ai.cmd" experiment-run --recover-memory', source)
+        self.assertIn('local-ai.cmd" offer', source)
         self.assertIn('local-ai.cmd" code "%LOCAL_AI_PROJECT_PATH%"', source)
         self.assertIn('local-company-agent.cmd" --check', source)
         self.assertIn('local-ai.cmd" dashboard', source)

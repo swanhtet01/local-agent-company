@@ -52,6 +52,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd experiment [PROJECT]            Show the next measured product test; no model
   local-ai.cmd experiment-run [PROJECT] [--recover-memory]
                                               Run that test locally and return its receipt
+  local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
@@ -81,6 +82,7 @@ Examples:
   local-ai.cmd plan "Design a product customers can buy" --project "New Product"
   local-ai.cmd experiment "New Product"
   local-ai.cmd experiment-run "New Product" --recover-memory
+  local-ai.cmd offer "New Product"
   local-ai.cmd work "Create a 30-day launch plan" --project "New Product"
   local-ai.cmd later "Review pricing and customer risks" --project "New Product"
   local-ai.cmd new "New Product" --description "Private product R&D"
@@ -121,6 +123,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
             raise ValueError("experiment_run_accepts_at_most_one_project")
         command = tuple(project_values + (["--recover-memory"] if recover_count else []))
         return LaunchAction(command, "experiment-run", "Run the next planned product test locally and return a receipt without recording human evidence.", True, False)
+    if name == "offer":
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError("offer_accepts_at_most_one_project")
+        return LaunchAction(tuple(tail), "offer", "Check whether repeatable measured evidence supports owner-reviewed offer packaging.", False, False)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -211,25 +217,30 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
+def _resolved_product_project(action: LaunchAction, home: Path) -> str:
+    project = next((item for item in action.command if item != "--recover-memory"), None)
+    if project is not None:
+        return project
+    from local_company.focus import read_execution_focus
+
+    focus = read_execution_focus(home)
+    if focus.get("enabled") is not True:
+        raise ValueError("product_project_required_or_enable_focus")
+    candidate = focus.get("projectId") or focus.get("projectName")
+    if not isinstance(candidate, str) or not candidate:
+        raise ValueError("product_focus_project_missing")
+    return candidate
+
+
 def _product_experiment_plan(action: LaunchAction, root: Path) -> dict[str, object]:
-    project_root = root
-    source = str(project_root / "src")
+    source = str(root / "src")
     if source not in sys.path:
         sys.path.insert(0, source)
     from local_company.config import default_company_home
-    from local_company.focus import read_execution_focus
     from local_company.mcp_server import CompanyTools, ProtocolError
 
     home = default_company_home()
-    project = next((item for item in action.command if item != "--recover-memory"), None)
-    if project is None:
-        focus = read_execution_focus(home)
-        if focus.get("enabled") is not True:
-            raise ValueError("experiment_project_required_or_enable_focus")
-        candidate = focus.get("projectId") or focus.get("projectName")
-        if not isinstance(candidate, str) or not candidate:
-            raise ValueError("experiment_focus_project_missing")
-        project = candidate
+    project = _resolved_product_project(action, home)
     try:
         return CompanyTools(home).product_experiment_next({"project": project})
     except ProtocolError as error:
@@ -241,6 +252,24 @@ def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
     result = _product_experiment_plan(action, project_root)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
+
+
+def run_offer(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.mcp_server import CompanyTools, ProtocolError
+
+    home = default_company_home()
+    project = _resolved_product_project(action, home)
+    try:
+        result = CompanyTools(home).product_offer_next({"project": project})
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0 if result.get("status") == "ready_for_owner_packaging" else 1
 
 
 def _invoke_experiment_runner(
@@ -663,6 +692,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_experiment(action)
         if action.mode == "experiment-run":
             return run_experiment_agent(action)
+        if action.mode == "offer":
+            return run_offer(action)
         if action.mode == "work":
             return run_work(action)
         if action.mode == "cycle":
