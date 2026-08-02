@@ -59,6 +59,8 @@ class PilotBundleTests(unittest.TestCase):
             self.assertEqual(manifest["licenseStatus"], "no_license_grant")
             self.assertIn("BUNDLE-README.txt", names)
             self.assertIn("local-ai.cmd", names)
+            self.assertIn("setup-local-ai.cmd", names)
+            self.assertIn("scripts/setup_local_ai.py", names)
             self.assertIn("scripts/verify_pilot_bundle.py", names)
             self.assertTrue(any(name.startswith("src/local_company/") for name in names))
             forbidden = (".git/", ".env", "company.db", "outputs/", "validation-packs/")

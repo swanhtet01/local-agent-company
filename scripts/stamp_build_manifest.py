@@ -29,6 +29,7 @@ OPERATIONAL_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/run_local_company_prompt.py"),
     Path("scripts/run_scheduled_cycle.py"),
     Path("scripts/runtime_guard.py"),
+    Path("scripts/setup_local_ai.py"),
     Path("scripts/stamp_build_manifest.py"),
 )
 RELEASE_DIGEST_DOMAIN = b"local-company.release-source.v1\0"

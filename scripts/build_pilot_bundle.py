@@ -19,7 +19,8 @@ except ImportError:
 ROOT_FILES = (
     "PRODUCT.md",
     "company-mcp.cmd", "local-ai-menu.cmd", "local-ai.cmd", "local-code.cmd",
-    "local-company-agent.cmd", "local-company.cmd", "pyproject.toml",
+    "local-company-agent.cmd", "local-company.cmd", "setup-local-ai.cmd",
+    "pyproject.toml",
 )
 SOURCE_PATTERNS = (
     ("src/local_company", "*.py"),
@@ -98,7 +99,8 @@ def _bundle_readme() -> bytes:
         "- qwen2.5-coder:0.5b for the read-only low-memory ask command\r\n"
         "- OpenCode installed separately for repository coding work\r\n"
         "\r\n"
-        "After extraction, run local-company.cmd init, then local-ai.cmd check.\r\n"
+        "After extraction, run setup-local-ai.cmd --preview, then --apply.\r\n"
+        "Run setup-local-ai.cmd --check after completing any reported actions.\r\n"
         "Use local-ai.cmd ask \"QUESTION\" for a grounded private draft.\r\n"
         "Keep model servers loopback-only and review all consequential actions.\r\n"
         "Use scripts\\verify_pilot_bundle.py against the original ZIP before use.\r\n"

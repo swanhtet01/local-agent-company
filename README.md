@@ -1,5 +1,28 @@
 # Local Agent Company
 
+## Set up this Windows user
+
+From a repository checkout or an extracted private pilot bundle, run the
+read-only preview first, apply the local configuration once, and verify it:
+
+```powershell
+.\setup-local-ai.cmd --preview
+.\setup-local-ai.cmd --apply
+.\setup-local-ai.cmd --check
+```
+
+The setup command merges only the owned `local-company` MCP/agent settings into
+the current user's OpenCode configuration, preserves unrelated settings, and
+creates a content-addressed backup before changing an existing file. It also
+initializes a private local company store with a generic starter project and,
+unless `--no-desktop` is supplied, creates the two managed desktop launchers.
+It refuses remote Ollama endpoints, conflicting managed settings, unsafe state
+paths, and unmanaged launcher overwrites. It never downloads an application or
+model, calls a paid API, exposes a listener, sends externally, or grants deploy,
+payment, credential, or publication authority. If Python, Ollama, OpenCode, or a
+required local model is missing, its JSON `actions` list gives the exact next
+local setup command; rerun `--check` after completing those actions.
+
 ## One-command launchpad
 
 Start with the general launchpad instead of memorizing the complete internal CLI:
