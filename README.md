@@ -22,6 +22,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd cycle --recover-memory
 .\local-ai.cmd autopilot status
 .\local-ai.cmd brief
+.\local-ai.cmd ask "What is usable now and what should I do next?"
 .\local-ai.cmd autopilot install
 .\local-ai.cmd code C:\path\to\any-project
 .\local-ai.cmd vision-lite --check
@@ -36,6 +37,7 @@ human-review contracts as the general product workflow:
 
 ```powershell
 .\local-ai.cmd supermega
+.\local-ai.cmd supermega ask "What should I do next?"
 .\local-ai.cmd supermega proof
 .\local-ai.cmd supermega prove
 .\local-ai.cmd supermega pending
@@ -51,6 +53,30 @@ SuperMega receipts and records nothing until a human supplies the decision,
 correction count, paid-setup observation, and exact `REVIEW` confirmation.
 The workbench exposes counts and the next category but never prints a pending
 response in its status receipt.
+
+### Low-memory grounded assistant
+
+`ask` is the usable read-only path while the larger agent model is blocked by
+desktop memory pressure. It uses the installed `qwen2.5-coder:0.5b` model only
+on Ollama's loopback endpoint, automatically applies the validated
+non-terminating Ally working-set trim when required, samples memory during the
+answer, and unloads the model afterward:
+
+```powershell
+ollama pull qwen2.5-coder:0.5b
+.\local-ai.cmd ask "Which active product action is supported by our evidence?"
+.\local-ai.cmd supermega ask "What is the verified SuperMega next action?"
+```
+
+The host—not the small model—collects the company brief, project overview, and
+playbook context through read-only code. The model receives that bounded JSON
+and may summarize it, but cannot select a tool or execute an action. Every
+result reports its context hash, named sources, memory measurement, zero paid
+API use, and clean unload status. Treat the answer as a private grounded draft;
+use the exact deterministic command in the cited context for any next action.
+The existing 0.8B/4B coding and governed-company agent gates are unchanged.
+Add `--json` immediately after `ask` when another local tool needs the complete
+machine-readable receipt instead of the human-readable answer.
 
 For the dedicated conversational company interface, double-click **SuperMega
 Local Company** on the Windows desktop or run:

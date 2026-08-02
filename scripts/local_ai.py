@@ -63,6 +63,7 @@ Use one command for local coding, business teams, research, planning, and queued
 
   local-ai.cmd check [model options]          Check Ollama and the configured model
   local-ai.cmd supermega [ACTION] ...         Operate SuperMega without retyping paths
+  local-ai.cmd ask "QUESTION"                 Ask the grounded read-only local assistant
   local-ai.cmd code [PROJECT_PATH]            Open a local coding agent in a project
   local-ai.cmd vision [--check] [PROJECT]     Use the full local Vision product agent
   local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
@@ -105,6 +106,8 @@ Use one command for local coding, business teams, research, planning, and queued
 
 Examples:
   local-ai.cmd supermega
+  local-ai.cmd supermega ask "What should I do next?"
+  local-ai.cmd ask "What can this local company do?"
   local-ai.cmd supermega refresh
   local-ai.cmd supermega next
   local-ai.cmd supermega park-next
@@ -133,6 +136,16 @@ def _require_tail(name: str, values: list[str]) -> list[str]:
     if not values or not values[0].strip():
         raise ValueError(f"{name}_objective_required")
     return values
+
+
+def _ask_command(name: str, scope: str, values: list[str]) -> tuple[str, ...]:
+    machine_readable = bool(values and values[0] == "--json")
+    question_values = values[1:] if machine_readable else values
+    question = " ".join(_require_tail(name, question_values))
+    return (
+        "--scope", scope, "--question", question,
+        *(("--plain",) if not machine_readable else ()),
+    )
 
 
 def _supermega_objective(name: str, values: list[str]) -> list[str]:
@@ -224,6 +237,12 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 "Write the current private SuperMega product-proof dossier.",
                 False, True,
             )
+        if operation == "ask":
+            return LaunchAction(
+                _ask_command("supermega_ask", "supermega", values), "ask",
+                "Ask a read-only local model using verified SuperMega context.",
+                True, False,
+            )
         if operation in {"plan", "work", "later"}:
             objective = _supermega_objective(f"supermega_{operation}", values)
             prefix = {
@@ -251,6 +270,12 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 raise ValueError("supermega_dashboard_accepts_no_arguments")
             return LaunchAction(("service", "start"), "dashboard", "Start the owner-controlled SuperMega loopback dashboard.", False, True)
         raise ValueError("supermega_operation_unknown")
+    if name == "ask":
+        return LaunchAction(
+            _ask_command(name, "company", tail), "ask",
+            "Ask a read-only local model using verified active-company context.",
+            True, False,
+        )
     if name == "plan":
         return LaunchAction(("preflight", *_require_tail(name, tail)), "plan", "Preview the team, evidence, and owner gates without starting work.", False, False)
     if name == "experiment":
@@ -383,6 +408,16 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
         cwd=project_root,
         env=environment,
         check=False,
+    )
+    return completed.returncode
+
+
+def run_ask(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    runner = project_root / "scripts" / "run_local_brief_assistant.py"
+    completed = subprocess.run(
+        [sys.executable, str(runner), *action.command],
+        cwd=project_root, check=False,
     )
     return completed.returncode
 
@@ -2082,6 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_supermega_park_next(action)
         if action.mode == "supermega-code":
             return run_supermega_code(action)
+        if action.mode == "ask":
+            return run_ask(action)
         if action.mode in {"code", "vision", "vision-lite"}:
             return run_code(action)
         if action.mode == "autopilot":

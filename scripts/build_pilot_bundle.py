@@ -95,9 +95,11 @@ def _bundle_readme() -> bytes:
         "- Windows 11 and Python 3.11 or newer\r\n"
         "- Ollama installed separately, bound to 127.0.0.1\r\n"
         "- qwen3.5:0.8b for bootstrap use; a measured larger model is optional\r\n"
+        "- qwen2.5-coder:0.5b for the read-only low-memory ask command\r\n"
         "- OpenCode installed separately for repository coding work\r\n"
         "\r\n"
         "After extraction, run local-company.cmd init, then local-ai.cmd check.\r\n"
+        "Use local-ai.cmd ask \"QUESTION\" for a grounded private draft.\r\n"
         "Keep model servers loopback-only and review all consequential actions.\r\n"
         "Use scripts\\verify_pilot_bundle.py against the original ZIP before use.\r\n"
     ).encode("utf-8")

@@ -25,6 +25,7 @@ OPERATIONAL_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/check_runtime_supervisor.py"),
     Path("scripts/local_ai.py"),
     Path("scripts/manage_cycle_task.ps1"),
+    Path("scripts/run_local_brief_assistant.py"),
     Path("scripts/run_local_company_prompt.py"),
     Path("scripts/run_scheduled_cycle.py"),
     Path("scripts/runtime_guard.py"),

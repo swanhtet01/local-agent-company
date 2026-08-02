@@ -67,7 +67,19 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
         self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
         self.assertEqual(translate(["brief"]).command, ())
+        self.assertEqual(
+            translate(["ask", "What", "next?"]).command,
+            ("--scope", "company", "--question", "What next?", "--plain"),
+        )
+        self.assertEqual(
+            translate(["ask", "--json", "What next?"]).command,
+            ("--scope", "company", "--question", "What next?"),
+        )
         self.assertEqual(translate(["supermega"]).mode, "supermega-status")
+        self.assertEqual(
+            translate(["supermega", "ask", "What next?"]).command,
+            ("--scope", "supermega", "--question", "What next?", "--plain"),
+        )
         self.assertEqual(translate(["supermega", "next"]).command, ("queue", "preflight"))
         self.assertEqual(translate(["supermega", "park-next"]).mode, "supermega-park-next")
         self.assertEqual(translate(["supermega", "proof"]).command, ("SuperMega",))
@@ -110,7 +122,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["mode"], "work")
 
     def test_unknown_or_incomplete_commands_fail_closed(self) -> None:
-        cases = [(["unknown"], "launchpad_command_unknown"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required"), (["supermega", "plan"], "supermega_plan_objective_required"), (["supermega", "unknown"], "supermega_operation_unknown")]
+        cases = [(["unknown"], "launchpad_command_unknown"), (["ask"], "ask_objective_required"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required"), (["supermega", "ask"], "supermega_ask_objective_required"), (["supermega", "plan"], "supermega_plan_objective_required"), (["supermega", "unknown"], "supermega_operation_unknown")]
         for args, reason in cases:
             error = io.StringIO()
             with self.subTest(args=args), redirect_stderr(error):
@@ -528,7 +540,11 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-company-agent.cmd" --check', source)
         self.assertIn('local-ai.cmd" cycle --recover-memory', source)
         self.assertIn('local-ai.cmd" dashboard', source)
+        self.assertIn('local-ai.cmd" ask "%LOCAL_AI_QUESTION%"', source)
         self.assertIn('local-ai.cmd" supermega', source)
+        self.assertIn(
+            'local-ai.cmd" supermega ask "%SUPERMEGA_QUESTION%"', source,
+        )
         self.assertIn('local-ai.cmd" supermega next', source)
         self.assertIn('local-ai.cmd" supermega park-next', source)
         self.assertIn('local-ai.cmd" supermega proof', source)

@@ -17,12 +17,14 @@ echo 7. Open local coding agent for a project
 echo 8. Check local AI readiness
 echo 9. Run one ready company mission ^(safe memory recovery^)
 echo A. Start local dashboard
+echo Q. Ask the grounded local assistant ^(read-only, low memory^)
 echo S. Open SuperMega workbench
 echo 0. Exit
 echo.
-choice /c 123456789AS0 /n /m "Choose 0-9, A, S, or 0: "
-if errorlevel 12 exit /b 0
-if errorlevel 11 goto supermega_menu
+choice /c 123456789AQS0 /n /m "Choose 1-9, A, Q, S, or 0: "
+if errorlevel 13 exit /b 0
+if errorlevel 12 goto supermega_menu
+if errorlevel 11 goto ask
 if errorlevel 10 goto dashboard
 if errorlevel 9 goto cycle
 if errorlevel 8 goto check
@@ -36,6 +38,15 @@ if errorlevel 1 goto company
 
 :company
 call "%LOCAL_AI_ROOT%local-company-agent.cmd"
+goto menu
+
+:ask
+set "LOCAL_AI_QUESTION="
+set /p "LOCAL_AI_QUESTION=Ask about the active local company: "
+if not defined LOCAL_AI_QUESTION goto menu
+call "%LOCAL_AI_ROOT%local-ai.cmd" ask "%LOCAL_AI_QUESTION%"
+echo.
+pause
 goto menu
 
 :brief
@@ -111,10 +122,12 @@ echo B. Preview the next measured product proof ^(no model^)
 echo C. Run one measured product proof ^(safe memory recovery^)
 echo D. Review a pending product proof ^(human decision^)
 echo E. Generate the private validation dossier ^(no model^)
+echo F. Ask the grounded SuperMega assistant ^(read-only, low memory^)
 echo 0. Back to main menu
 echo.
-choice /c 123456789ABCDE0 /n /m "Choose 0-9, A-E, or 0: "
-if errorlevel 15 goto menu
+choice /c 123456789ABCDEF0 /n /m "Choose 1-9, A-F, or 0: "
+if errorlevel 16 goto menu
+if errorlevel 15 goto supermega_ask
 if errorlevel 14 goto supermega_dossier
 if errorlevel 13 goto supermega_review
 if errorlevel 12 goto supermega_prove
@@ -129,6 +142,15 @@ if errorlevel 4 goto supermega_next
 if errorlevel 3 goto supermega_use
 if errorlevel 2 goto supermega_refresh
 if errorlevel 1 goto supermega_status
+
+:supermega_ask
+set "SUPERMEGA_QUESTION="
+set /p "SUPERMEGA_QUESTION=Ask about verified SuperMega state: "
+if not defined SUPERMEGA_QUESTION goto supermega_menu
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega ask "%SUPERMEGA_QUESTION%"
+echo.
+pause
+goto supermega_menu
 
 :supermega_status
 call "%LOCAL_AI_ROOT%local-ai.cmd" supermega

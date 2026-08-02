@@ -14,6 +14,10 @@ The defensible product is not “another chatbot.” It is the control layer aro
 - Marketing concepts, content plans, sales drafts, and customer-research preparation.
 - Coding in any local repository through OpenCode and Ollama.
 - Queued missions and manually materialized recurring work with an owner-controlled worker.
+- Read-only questions grounded in the active company or SuperMega status with
+  `local-ai.cmd ask` and the low-memory 0.5B model. The host supplies verified
+  context, withholds malformed model drafts, returns a deterministic safe
+  fallback when needed, and never lets the model execute an action.
 
 Small local models are best for bounded transformations and first drafts. Complex architecture, high-stakes decisions, computer control, and final commercial claims still require stronger-model or human review.
 
