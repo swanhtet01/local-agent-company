@@ -46,7 +46,8 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["experiment-review-interactive"]).command, ())
         self.assertEqual(translate([
             "experiment-review", "a" * 12, "--decision", "accepted",
-            "--corrections", "0", "--paid-setup", "unknown",
+            "--outcome-reason", "none", "--corrections", "0",
+            "--paid-setup", "unknown",
             "--confirm-human-review",
         ]).mode, "experiment-review")
         self.assertEqual(translate(["work", "Build a plan"]).command, ("run", "Build a plan"))
@@ -229,7 +230,8 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             review_output = io.StringIO()
             review_action = translate([
                 "experiment-review", pending_id, "--decision", "accepted",
-                "--corrections", "0", "--paid-setup", "unknown",
+                "--outcome-reason", "none", "--corrections", "0",
+                "--paid-setup", "unknown",
                 "--confirm-human-review",
             ])
             with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(review_output):
@@ -241,6 +243,21 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             status = Company(home, MockModel()).product_evidence_status(project_id)
             self.assertEqual(status["reviewed_missions"], 1)
             self.assertEqual(status["reviews"][0]["experiment_id"], pending_id)
+            self.assertEqual(status["reviews"][0]["outcome_reason"], "none")
+
+            update_output = io.StringIO()
+            update_action = translate([
+                "experiment-review", pending_id, "--decision", "rejected",
+                "--outcome-reason", "not_actionable", "--corrections", "1",
+                "--paid-setup", "no", "--confirm-human-review",
+            ])
+            with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(update_output):
+                self.assertEqual(run_experiment_review(update_action), 0)
+            updated = json.loads(update_output.getvalue())
+            self.assertFalse(updated["pendingArchived"])
+            self.assertTrue(updated["reviewUpdated"])
+            status = Company(home, MockModel()).product_evidence_status(project_id)
+            self.assertEqual(status["reviews"][0]["outcome_reason"], "not_actionable")
 
     def test_interactive_review_requires_human_values_and_records_locally(self) -> None:
         from local_company.core import Company, MockModel
@@ -272,6 +289,24 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 )
             self.assertIn("Pending measured product experiments", output.getvalue())
             self.assertIn('"status":"recorded"', output.getvalue())
+
+            history_output = io.StringIO()
+            history_answers = iter([
+                pending_id, "rejected", "incomplete", "2", "no", "REVIEW",
+            ])
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("builtins.input", side_effect=lambda _prompt: next(history_answers)),
+                redirect_stdout(history_output),
+            ):
+                self.assertEqual(
+                    run_interactive_experiment_review(
+                        translate(["experiment-review-interactive"]),
+                    ), 0,
+                )
+            self.assertIn("Archived measured product experiments", history_output.getvalue())
+            status = Company(home, MockModel()).product_evidence_status(project_id)
+            self.assertEqual(status["reviews"][0]["outcome_reason"], "incomplete")
 
     def test_offer_command_reports_missing_proof_without_model_or_mutation(self) -> None:
         from local_company.core import Company, MockModel
@@ -347,12 +382,18 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 "category_counts": {"business": 1, "coding": 1, "data-research": 1},
                 "decision_counts": {"accepted": 2, "rejected": 1},
                 "paid_setup_signal_counts": {"no": 1, "unknown": 2, "yes": 0},
+                "outcome_reason_counts": {
+                    "inaccurate": 0, "incomplete": 0, "legacy_unspecified": 0,
+                    "none": 2, "not_actionable": 1, "other": 0,
+                    "too_resource_heavy": 0, "too_slow": 0,
+                    "tool_failure": 0, "unsafe": 0,
+                },
                 "missing_proof": ["ten_current_reviewed_missions"],
                 "reviews": [{
                     "source": "external_experiment", "label": "Coding operability review",
                     "category": "coding", "decision": "accepted", "corrections": 1,
                     "paid_setup_signal": "unknown", "runtime_seconds": 15.5,
-                    "peak_memory_mb": 512,
+                    "peak_memory_mb": 512, "outcome_reason": "none",
                 }],
             },
             "experiment": {

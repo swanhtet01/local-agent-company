@@ -220,6 +220,12 @@ def parser() -> argparse.ArgumentParser:
     evidence_record.add_argument(
         "--decision", required=True, choices=("accepted", "rejected"),
     )
+    evidence_record.add_argument(
+        "--outcome-reason",
+        choices=("none", "inaccurate", "incomplete", "not_actionable", "too_slow",
+                 "too_resource_heavy", "unsafe", "tool_failure", "other"),
+        help="Use none for accepted evidence; classify why rejected evidence failed",
+    )
     evidence_record.add_argument("--corrections", required=True, type=int)
     evidence_record.add_argument(
         "--paid-setup", required=True, choices=("yes", "no", "unknown"),
@@ -240,6 +246,12 @@ def parser() -> argparse.ArgumentParser:
     )
     evidence_experiment.add_argument(
         "--decision", required=True, choices=("accepted", "rejected"),
+    )
+    evidence_experiment.add_argument(
+        "--outcome-reason",
+        choices=("none", "inaccurate", "incomplete", "not_actionable", "too_slow",
+                 "too_resource_heavy", "unsafe", "tool_failure", "other"),
+        help="Use none for accepted evidence; classify why rejected evidence failed",
     )
     evidence_experiment.add_argument("--corrections", required=True, type=int)
     evidence_experiment.add_argument(
@@ -745,7 +757,7 @@ def main() -> int:
             if args.evidence_command == "record":
                 result = company.record_product_evidence_review(
                     args.job_id, args.category, args.decision, args.corrections,
-                    args.paid_setup, args.peak_memory_mb,
+                    args.paid_setup, args.peak_memory_mb, args.outcome_reason,
                 )
             elif args.evidence_command == "experiment":
                 result = company.record_product_experiment_review(
@@ -753,6 +765,7 @@ def main() -> int:
                     args.corrections, args.paid_setup, args.runtime_seconds,
                     args.peak_memory_mb, args.exit_code, args.checks_passed,
                     args.runner, args.artifact_sha256, args.experiment_id,
+                    args.outcome_reason,
                 )
             else:
                 result = company.product_evidence_status(args.project)

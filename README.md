@@ -85,7 +85,13 @@ planned tool action actually occurred. A fully reviewable accepted receipt is
 saved locally under a content-derived pending ID, but no human judgment is
 invented. Use `experiment-pending` to inspect the model response and measured
 runtime or memory, then `experiment-review-interactive` to enter the actual
-accept/reject decision, correction count, and paid-setup signal. Low memory,
+accept/reject decision, a structured outcome reason, correction count, and
+paid-setup signal. Rejections must be classified as inaccurate, incomplete,
+not actionable, too slow, too resource-heavy, unsafe, tool failure, or other;
+accepted results use `none`. When the pending inbox is empty, the same review
+flow lists archived receipts for explicit re-review so older unclassified
+outcomes can be repaired without rerunning the model. Validation dossiers show
+these diagnostic counts and each reviewed run's reason. Low memory,
 runner failure, or a skipped action returns a fail-closed receipt for a later
 retry and creates no pending evidence.
 

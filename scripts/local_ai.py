@@ -26,7 +26,7 @@ CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
 OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
-VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v1"
+VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v2"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
 PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
@@ -36,6 +36,10 @@ QUEUE_COMPLETION_PATTERN = re.compile(
 )
 SCHEDULE_TICK_PATTERN = re.compile(r"^Materialized (\d+) due schedule\(s\)\.$", re.MULTILINE)
 CYCLE_MINIMUM_AVAILABLE_BYTES = 2 * GIB
+PRODUCT_OUTCOME_REASONS = (
+    "none", "inaccurate", "incomplete", "not_actionable", "too_slow",
+    "too_resource_heavy", "unsafe", "tool_failure", "other",
+)
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
   local-ai.cmd experiment-review-interactive   Review one pending receipt with local prompts
   local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
-      --paid-setup yes|no|unknown --confirm-human-review
+      --outcome-reason REASON --paid-setup yes|no|unknown --confirm-human-review
                                               Record one actual human review
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
@@ -529,6 +533,9 @@ def _validation_pack_text(source: dict[str, object], dossier_id: str) -> str:
         category = _markdown_text(item.get("category"), limit=40, reason="validation_pack_source_invalid")
         decision = _markdown_text(item.get("decision"), limit=20, reason="validation_pack_source_invalid")
         paid = _markdown_text(item.get("paid_setup_signal"), limit=20, reason="validation_pack_source_invalid")
+        outcome_reason = _markdown_text(
+            item.get("outcome_reason"), limit=40, reason="validation_pack_source_invalid",
+        )
         corrections = item.get("corrections")
         runtime = item.get("runtime_seconds")
         peak = item.get("peak_memory_mb")
@@ -538,14 +545,16 @@ def _validation_pack_text(source: dict[str, object], dossier_id: str) -> str:
             or (peak is not None and (type(peak) is not int or peak < 1))
         ):
             raise ValueError("validation_pack_source_invalid")
-        label_value = item.get("label") or item.get("source")
+        label_value = item.get("label") or item.get("job_id") or item.get("source")
+        if item.get("label") and isinstance(item.get("experiment_id"), str):
+            label_value = f"{item['label']} ({item['experiment_id']})"
         label = _markdown_text(label_value, limit=80, reason="validation_pack_source_invalid")
         review_rows.append(
-            f"| {label} | {category} | {decision} | {corrections} | {paid} | "
+            f"| {label} | {category} | {decision} | {outcome_reason} | {corrections} | {paid} | "
             f"{runtime} | {peak if peak is not None else 'not recorded'} |"
         )
     if not review_rows:
-        review_rows.append("| No reviewed runs yet | - | - | - | - | - | - |")
+        review_rows.append("| No reviewed runs yet | - | - | - | - | - | - | - |")
 
     gate_rows = []
     for name in sorted(gate_results):
@@ -582,9 +591,14 @@ def _validation_pack_text(source: dict[str, object], dossier_id: str) -> str:
         *counts("decision_counts", ("accepted", "rejected")), "",
         "## Paid-setup observations", "", "| Signal | Count |", "|---|---:|",
         *counts("paid_setup_signal_counts", ("no", "unknown", "yes")), "",
+        "## Outcome diagnostics", "", "| Reason | Count |", "|---|---:|",
+        *counts("outcome_reason_counts", (
+            "inaccurate", "incomplete", "legacy_unspecified", "none", "not_actionable",
+            "other", "too_resource_heavy", "too_slow", "tool_failure", "unsafe",
+        )), "",
         "## Reviewed runs", "",
-        "| Workflow | Category | Decision | Corrections | Paid setup | Runtime seconds | Peak memory MiB |",
-        "|---|---|---|---:|---|---:|---:|", *review_rows, "",
+        "| Workflow | Category | Decision | Reason | Corrections | Paid setup | Runtime seconds | Peak memory MiB |",
+        "|---|---|---|---|---:|---|---:|---:|", *review_rows, "",
         "## Product milestone gaps", "",
         *([f"- {_markdown_text(item, reason='validation_pack_source_invalid')}" for item in missing] or ["- None"]), "",
         "## Offer gate", "", "| Gate | Result |", "|---|---|", *gate_rows, "",
@@ -600,7 +614,9 @@ def run_validation_pack(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     home, source = _product_validation_result(action, project_root)
     canonical = json.dumps(source, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    dossier_id = hashlib.sha256(b"local-ai.validation-pack.v1\0" + canonical).hexdigest()[:12]
+    dossier_id = hashlib.sha256(
+        VALIDATION_PACK_SCHEMA.encode("ascii") + b"\0" + canonical,
+    ).hexdigest()[:12]
     target, stored, digest = _store_private_markdown(
         home, "validation-packs", "validation-pack", dossier_id,
         _validation_pack_text(source, dossier_id), reason_prefix="validation_pack",
@@ -734,10 +750,12 @@ def _store_pending_experiment(home: Path, payload: dict[str, object]) -> tuple[s
     return experiment_id, True
 
 
-def _load_pending_experiment(home: Path, experiment_id: str) -> tuple[Path, dict[str, object]]:
+def _load_pending_experiment(
+    home: Path, experiment_id: str, *, reviewed: bool = False,
+) -> tuple[Path, dict[str, object]]:
     if PENDING_EXPERIMENT_ID.fullmatch(experiment_id) is None:
         raise ValueError("pending_experiment_id_invalid")
-    path = _pending_experiment_directory(home) / f"pending-{experiment_id}.json"
+    path = _pending_experiment_directory(home, reviewed=reviewed) / f"pending-{experiment_id}.json"
     try:
         metadata = path.lstat()
     except FileNotFoundError as error:
@@ -754,8 +772,8 @@ def _load_pending_experiment(home: Path, experiment_id: str) -> tuple[Path, dict
     return path, validated
 
 
-def _pending_experiment_items(home: Path) -> list[dict[str, object]]:
-    directory = _pending_experiment_directory(home)
+def _pending_experiment_items(home: Path, *, reviewed: bool = False) -> list[dict[str, object]]:
+    directory = _pending_experiment_directory(home, reviewed=reviewed)
     items: list[dict[str, object]] = []
     if directory.exists():
         if directory.is_symlink() or not directory.is_dir():
@@ -767,7 +785,7 @@ def _pending_experiment_items(home: Path) -> list[dict[str, object]]:
             match = re.fullmatch(r"pending-([0-9a-f]{12})\.json", path.name)
             if match is None:
                 raise ValueError("pending_experiment_filename_invalid")
-            _, payload = _load_pending_experiment(home, match.group(1))
+            _, payload = _load_pending_experiment(home, match.group(1), reviewed=reviewed)
             receipt = payload["runnerReceipt"]
             items.append({
                 "experimentId": payload["experimentId"], "project": payload["project"],
@@ -809,7 +827,10 @@ def _experiment_review_values(command: tuple[str, ...]) -> dict[str, object]:
             values["confirmed"] = True
             index += 1
             continue
-        names = {"--decision": "decision", "--corrections": "corrections", "--paid-setup": "paidSetupSignal"}
+        names = {
+            "--decision": "decision", "--outcome-reason": "outcomeReason",
+            "--corrections": "corrections", "--paid-setup": "paidSetupSignal",
+        }
         name = names.get(token)
         if name is None or name in values or index + 1 >= len(command):
             raise ValueError("experiment_review_arguments_invalid")
@@ -822,8 +843,16 @@ def _experiment_review_values(command: tuple[str, ...]) -> dict[str, object]:
         else:
             values[name] = raw
         index += 2
-    if set(values) != {"experimentId", "decision", "corrections", "paidSetupSignal", "confirmed"}:
+    if set(values) != {
+        "experimentId", "decision", "outcomeReason", "corrections",
+        "paidSetupSignal", "confirmed",
+    }:
         raise ValueError("experiment_review_arguments_required")
+    if (
+        values["outcomeReason"] not in PRODUCT_OUTCOME_REASONS
+        or (values["decision"] == "accepted") != (values["outcomeReason"] == "none")
+    ):
+        raise ValueError("experiment_review_outcome_reason_invalid")
     return values
 
 
@@ -839,34 +868,46 @@ def run_experiment_review(action: LaunchAction, root: Path | None = None) -> int
 
     values = _experiment_review_values(action.command)
     home = default_company_home()
-    source_path, pending = _load_pending_experiment(home, str(values["experimentId"]))
+    was_pending = True
+    try:
+        source_path, pending = _load_pending_experiment(home, str(values["experimentId"]))
+    except ValueError as error:
+        if str(error) != "pending_experiment_unknown":
+            raise
+        was_pending = False
+        source_path, pending = _load_pending_experiment(
+            home, str(values["experimentId"]), reviewed=True,
+        )
     project = pending["project"]
     try:
         result = CompanyTools(home).product_experiment_review({
             "experimentId": pending["experimentId"], "project": project["id"],
             "label": pending["label"], "category": pending["category"],
             "decision": values["decision"], "corrections": values["corrections"],
+            "outcomeReason": values["outcomeReason"],
             "paidSetupSignal": values["paidSetupSignal"],
             "receipt": pending["runnerReceipt"],
             "reviewConfirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
         })
     except ProtocolError as error:
         raise ValueError(error.message) from error
-    reviewed_directory = _pending_experiment_directory(home, reviewed=True)
-    reviewed_directory.mkdir(parents=True, exist_ok=True)
-    if reviewed_directory.is_symlink() or not reviewed_directory.is_dir():
-        raise ValueError("reviewed_experiment_directory_unsafe")
-    destination = reviewed_directory / source_path.name
-    if destination.exists():
-        if destination.is_symlink() or destination.read_bytes() != source_path.read_bytes():
-            raise ValueError("reviewed_experiment_collision")
-        source_path.unlink()
-    else:
-        os.replace(source_path, destination)
+    if was_pending:
+        reviewed_directory = _pending_experiment_directory(home, reviewed=True)
+        reviewed_directory.mkdir(parents=True, exist_ok=True)
+        if reviewed_directory.is_symlink() or not reviewed_directory.is_dir():
+            raise ValueError("reviewed_experiment_directory_unsafe")
+        destination = reviewed_directory / source_path.name
+        if destination.exists():
+            if destination.is_symlink() or destination.read_bytes() != source_path.read_bytes():
+                raise ValueError("reviewed_experiment_collision")
+            source_path.unlink()
+        else:
+            os.replace(source_path, destination)
     print(json.dumps({
         "schema": "local-ai.product-experiment-human-review.v1",
         "status": "recorded", "recorded": True,
-        "experimentId": pending["experimentId"], "pendingArchived": True,
+        "experimentId": pending["experimentId"], "pendingArchived": was_pending,
+        "reviewUpdated": not was_pending,
         "review": result["review"], "modelCalled": False,
         "stateMutated": True, "externalActionPerformed": False,
     }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
@@ -883,21 +924,34 @@ def run_interactive_experiment_review(
         sys.path.insert(0, source)
     from local_company.config import default_company_home
 
-    items = _pending_experiment_items(default_company_home())
+    home = default_company_home()
+    items = _pending_experiment_items(home)
+    history_mode = False
+    if not items:
+        items = _pending_experiment_items(home, reviewed=True)
+        history_mode = True
     if not items:
         print(json.dumps({
             "schema": "local-ai.product-experiment-interactive-review.v1",
-            "status": "no_pending_experiment", "recorded": False,
+            "status": "no_reviewable_experiment", "recorded": False,
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }, separators=(",", ":"), sort_keys=True))
         return 1
-    print("\nPending measured product experiments:\n")
+    print(
+        "\nArchived measured product experiments (explicit re-review):\n"
+        if history_mode else "\nPending measured product experiments:\n"
+    )
     for item in items:
         print(f"ID: {item['experimentId']}  Category: {item['category']}  Label: {item['label']}")
         print(f"Response: {item['response']}\n")
     experiment_id = input("Experiment ID to review: ").strip().lower()
     decision = input("Decision (accepted/rejected): ").strip().lower()
+    if decision == "accepted":
+        outcome_reason = "none"
+    else:
+        print("Rejection reasons: " + ", ".join(PRODUCT_OUTCOME_REASONS[1:]))
+        outcome_reason = input("Primary rejection reason: ").strip().lower()
     corrections = input("Actual correction count (0-100): ").strip()
     paid_signal = input("Would this justify a paid setup? (yes/no/unknown): ").strip().lower()
     confirmation = input("Type REVIEW to record this human judgment: ").strip()
@@ -905,7 +959,8 @@ def run_interactive_experiment_review(
         raise ValueError("experiment_review_confirmation_required")
     review_action = LaunchAction((
         experiment_id, "--decision", decision, "--corrections", corrections,
-        "--paid-setup", paid_signal, "--confirm-human-review",
+        "--outcome-reason", outcome_reason, "--paid-setup", paid_signal,
+        "--confirm-human-review",
     ), "experiment-review", "Record one interactive human product review.", False, True)
     return run_experiment_review(review_action, project_root)
 
