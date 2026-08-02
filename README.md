@@ -53,6 +53,11 @@ memory, the runner applies that verified trim once, validates its zero-
 termination/zero-file/zero-network receipt, waits three seconds, and retries
 the cycle exactly once. Invalid recovery evidence stops the task without a
 queue claim or model call.
+Scheduled starts now wait for ten minutes of Windows idle time, for up to six
+hours after each trigger. This targets the window where Codex and desktop UI
+working sets are least likely to refill immediately after trimming. Once an
+admitted mission starts, returning to the PC does not terminate it; the fixed
+two-hour execution limit and one-worker guard still apply.
 
 ```powershell
 .\local-ai.cmd explain work "Research a new product"

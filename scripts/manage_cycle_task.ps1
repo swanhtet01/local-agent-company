@@ -57,6 +57,10 @@ function Test-CycleTask([object]$Task) {
         [string]::Equals([string]$Task.Principal.RunLevel, 'Limited', [System.StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$Task.Settings.MultipleInstances, 'IgnoreNew', [System.StringComparison]::OrdinalIgnoreCase) -and
         $Task.Settings.ExecutionTimeLimit -eq 'PT2H' -and
+        $Task.Settings.RunOnlyIfIdle -and
+        $Task.Settings.IdleSettings.IdleDuration -eq 'PT10M' -and
+        $Task.Settings.IdleSettings.WaitTimeout -eq 'PT6H' -and
+        -not $Task.Settings.IdleSettings.StopOnIdleEnd -and
         $Task.Settings.Enabled
     )
 }
@@ -113,6 +117,9 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
             modelMemoryGateBytes = 2147483648
             sourceDigestsPinned = $true
             boundedMemoryRecovery = $true
+            idleWindowMinutes = 10
+            idleWaitHours = 6
+            stopsWhenUserReturns = $false
             externalActionsAllowed = $false
         }
     } | ConvertTo-Json -Depth 6 -Compress
@@ -146,9 +153,9 @@ try {
     }
     $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments -WorkingDirectory $root
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration (New-TimeSpan -Days 3650)
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RunOnlyIfIdle -IdleDuration (New-TimeSpan -Minutes 10) -IdleWaitTimeout (New-TimeSpan -Hours 6) -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Runs one source-pinned, bounded, memory-gated local product-company cycle every six hours.' -ErrorAction Stop | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Runs one source-pinned, bounded, memory-gated local product-company cycle after a ten-minute idle window.' -ErrorAction Stop | Out-Null
     $mutationCommitted = $true
     $installed = Get-CycleTask
     if (-not (Test-CycleTask $installed)) { throw 'task_install_verification_failed' }
