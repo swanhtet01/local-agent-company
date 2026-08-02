@@ -184,6 +184,46 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 "Reversibly park only an incompatible exact queue head so SuperMega can proceed.",
                 False, True,
             )
+        if operation == "proof":
+            if values:
+                raise ValueError("supermega_proof_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "experiment",
+                "Preview the next category-balanced SuperMega product proof without loading a model.",
+                False, False,
+            )
+        if operation == "prove":
+            if values:
+                raise ValueError("supermega_prove_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME, "--recover-memory"), "experiment-run",
+                "Run one measured SuperMega product proof and preserve it for human review.",
+                True, True,
+            )
+        if operation == "pending":
+            if values:
+                raise ValueError("supermega_pending_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "experiment-pending",
+                "Inspect pending SuperMega product-proof receipts without changing state.",
+                False, False,
+            )
+        if operation == "review":
+            if values:
+                raise ValueError("supermega_review_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "experiment-review-interactive",
+                "Review one measured SuperMega proof through explicit local human prompts.",
+                False, True,
+            )
+        if operation == "dossier":
+            if values:
+                raise ValueError("supermega_dossier_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "validation-pack",
+                "Write the current private SuperMega product-proof dossier.",
+                False, True,
+            )
         if operation in {"plan", "work", "later"}:
             objective = _supermega_objective(f"supermega_{operation}", values)
             prefix = {
@@ -879,18 +919,39 @@ def _pending_experiment_items(home: Path, *, reviewed: bool = False) -> list[dic
     return items
 
 
+def _filter_product_experiment_items(
+    items: list[dict[str, object]], command: tuple[str, ...],
+) -> tuple[list[dict[str, object]], str | None]:
+    if not command:
+        return items, None
+    if len(command) != 1 or not command[0].strip():
+        raise ValueError("product_experiment_filter_invalid")
+    target = command[0]
+    filtered = []
+    for item in items:
+        project = item.get("project")
+        if (
+            isinstance(project, dict)
+            and target in {project.get("id"), project.get("name")}
+        ):
+            filtered.append(item)
+    return filtered, target
+
+
 def run_pending_experiments(action: LaunchAction, root: Path | None = None) -> int:
-    del action
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     source = str(project_root / "src")
     if source not in sys.path:
         sys.path.insert(0, source)
     from local_company.config import default_company_home
 
-    items = _pending_experiment_items(default_company_home())
+    items, project_filter = _filter_product_experiment_items(
+        _pending_experiment_items(default_company_home()), action.command,
+    )
     print(json.dumps({
         "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
-        "items": items, "count": len(items), "modelCalled": False,
+        "items": items, "count": len(items), "projectFilter": project_filter,
+        "modelCalled": False,
         "stateMutated": False, "externalActionPerformed": False,
     }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
@@ -999,7 +1060,6 @@ def run_experiment_review(action: LaunchAction, root: Path | None = None) -> int
 def run_interactive_experiment_review(
     action: LaunchAction, root: Path | None = None,
 ) -> int:
-    del action
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     source = str(project_root / "src")
     if source not in sys.path:
@@ -1007,15 +1067,20 @@ def run_interactive_experiment_review(
     from local_company.config import default_company_home
 
     home = default_company_home()
-    items = _pending_experiment_items(home)
+    items, project_filter = _filter_product_experiment_items(
+        _pending_experiment_items(home), action.command,
+    )
     history_mode = False
     if not items:
-        items = _pending_experiment_items(home, reviewed=True)
+        items, _ = _filter_product_experiment_items(
+            _pending_experiment_items(home, reviewed=True), action.command,
+        )
         history_mode = True
     if not items:
         print(json.dumps({
             "schema": "local-ai.product-experiment-interactive-review.v1",
             "status": "no_reviewable_experiment", "recorded": False,
+            "projectFilter": project_filter,
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }, separators=(",", ":"), sort_keys=True))
@@ -1223,6 +1288,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     from local_company.config import default_company_home
     from local_company.core import Company, MockModel, QUEUE_PREFLIGHT_SCHEMA
     from local_company.focus import read_execution_focus
+    from local_company.mcp_server import CompanyTools, ProtocolError
 
     company_home = default_company_home()
     project: dict[str, object]
@@ -1232,6 +1298,12 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         "status": "unavailable", "queueId": None, "projectId": None,
         "blockers": [], "ownerGateCategories": [], "parkableForFocus": False,
         "parkedCount": None,
+    }
+    product_proof: dict[str, object] = {
+        "status": "unavailable", "reviewedMissions": None,
+        "missionTarget": None, "remainingMissions": None,
+        "completeMeasurements": None, "pendingReviewCount": None,
+        "milestoneReached": None, "nextCategory": None, "nextLabel": None,
     }
     company = None
     try:
@@ -1300,6 +1372,45 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         except (KeyError, OSError, RuntimeError, TypeError, ValueError):
             pass
 
+        try:
+            evidence = company.product_evidence_status(str(project["projectId"]))
+            pending_items = _pending_experiment_items(company_home)
+            pending_count = sum(
+                1 for item in pending_items
+                if isinstance(item.get("project"), dict)
+                and item["project"].get("id") == project["projectId"]
+            )
+            plan = CompanyTools(company_home).product_experiment_next({
+                "project": str(project["projectId"]),
+            })
+            experiment = plan.get("experiment")
+            values = (
+                evidence.get("reviewed_missions"),
+                evidence.get("mission_target"),
+                evidence.get("remaining_missions"),
+                evidence.get("complete_measurements"),
+            )
+            milestone_reached = evidence.get("milestone_reached")
+            if (
+                any(type(value) is not int or value < 0 for value in values)
+                or type(milestone_reached) is not bool
+                or (not milestone_reached and not isinstance(experiment, dict))
+            ):
+                raise ValueError("supermega_product_proof_invalid")
+            product_proof = {
+                "status": "ready",
+                "reviewedMissions": values[0], "missionTarget": values[1],
+                "remainingMissions": values[2], "completeMeasurements": values[3],
+                "pendingReviewCount": pending_count,
+                "milestoneReached": milestone_reached,
+                "nextCategory": plan.get("selectedCategory"),
+                "nextLabel": experiment.get("label") if isinstance(experiment, dict) else None,
+            }
+        except (
+            KeyError, OSError, ProtocolError, RuntimeError, TypeError, ValueError,
+        ):
+            pass
+
     try:
         available = available_memory_bytes()
     except (OSError, RuntimeError, ValueError):
@@ -1331,9 +1442,28 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         else:
             next_action = "inspect_blocked_queue_head"
         command = "local-ai.cmd supermega next"
+    elif product_proof["status"] != "ready":
+        next_action = "inspect_supermega_product_proof"
+        command = "local-ai.cmd company evidence status --project SuperMega"
+    elif product_proof["pendingReviewCount"]:
+        next_action = "review_pending_supermega_product_proof"
+        command = "local-ai.cmd supermega review"
     elif repository["clean"] is not True:
         next_action = "review_existing_supermega_changes"
         command = "git status --short"
+    elif (
+        queue["status"] == "no_due_mission"
+        and product_proof["milestoneReached"] is False
+        and not memory_ready
+    ):
+        next_action = "preview_next_supermega_product_proof"
+        command = "local-ai.cmd supermega proof"
+    elif (
+        queue["status"] == "no_due_mission"
+        and product_proof["milestoneReached"] is False
+    ):
+        next_action = "run_next_supermega_product_proof"
+        command = "local-ai.cmd supermega prove"
     elif not memory_ready:
         next_action = "free_memory_or_plan_without_model"
         command = 'local-ai.cmd supermega plan "OBJECTIVE"'
@@ -1344,13 +1474,15 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         repository["status"] != "ready" or project["status"] != "ready"
         or knowledge["readyForUse"] is not True or focus["supermegaActive"] is not True
         or queue["status"] in {"unavailable", "blocked", "owner_gate_required"}
+        or product_proof["status"] != "ready"
+        or bool(product_proof["pendingReviewCount"])
         or repository["clean"] is not True or not memory_ready
     )
     print(json.dumps({
         "schema": SUPERMEGA_WORKBENCH_SCHEMA,
         "status": "attention" if attention else "ready",
         "repository": repository, "project": project, "knowledge": knowledge,
-        "focus": focus, "queue": queue,
+        "focus": focus, "queue": queue, "productProof": product_proof,
         "resources": {
             "availableMemoryBytes": available,
             "minimumModelMemoryBytes": CYCLE_MINIMUM_AVAILABLE_BYTES,
@@ -1368,6 +1500,11 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
             "inspectQueue": "local-ai.cmd supermega next",
             "parkIncompatibleQueueHead": "local-ai.cmd supermega park-next",
             "listParkedQueue": "local-ai.cmd company queue list --status parked",
+            "previewProductProof": "local-ai.cmd supermega proof",
+            "runProductProof": "local-ai.cmd supermega prove",
+            "inspectPendingProof": "local-ai.cmd supermega pending",
+            "reviewProductProof": "local-ai.cmd supermega review",
+            "validationDossier": "local-ai.cmd supermega dossier",
             "plan": 'local-ai.cmd supermega plan "OBJECTIVE"',
             "queue": 'local-ai.cmd supermega later "OBJECTIVE"',
             "run": 'local-ai.cmd supermega work "OBJECTIVE"',

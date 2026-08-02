@@ -70,6 +70,14 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["supermega"]).mode, "supermega-status")
         self.assertEqual(translate(["supermega", "next"]).command, ("queue", "preflight"))
         self.assertEqual(translate(["supermega", "park-next"]).mode, "supermega-park-next")
+        self.assertEqual(translate(["supermega", "proof"]).command, ("SuperMega",))
+        self.assertEqual(
+            translate(["supermega", "prove"]).command,
+            ("SuperMega", "--recover-memory"),
+        )
+        self.assertEqual(translate(["supermega", "pending"]).command, ("SuperMega",))
+        self.assertEqual(translate(["supermega", "review"]).command, ("SuperMega",))
+        self.assertEqual(translate(["supermega", "dossier"]).command, ("SuperMega",))
         self.assertEqual(
             translate(["supermega", "plan", "Review release proof"]).command,
             ("preflight", "Review release proof", "--project", "SuperMega"),
@@ -523,6 +531,10 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-ai.cmd" supermega', source)
         self.assertIn('local-ai.cmd" supermega next', source)
         self.assertIn('local-ai.cmd" supermega park-next', source)
+        self.assertIn('local-ai.cmd" supermega proof', source)
+        self.assertIn('local-ai.cmd" supermega prove', source)
+        self.assertIn('local-ai.cmd" supermega review', source)
+        self.assertIn('local-ai.cmd" supermega dossier', source)
         self.assertIn('if /I "%~1"=="--supermega" goto supermega_menu', source)
         self.assertNotIn("taskkill", source.lower())
         self.assertNotIn("powershell", source.lower())
@@ -561,7 +573,11 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertTrue(receipt["knowledge"]["readyForUse"])
             self.assertTrue(receipt["focus"]["supermegaActive"])
             self.assertEqual(receipt["queue"]["status"], "no_due_mission")
-            self.assertEqual(receipt["nextAction"], "check_supermega_coding_agent")
+            self.assertEqual(receipt["productProof"]["reviewedMissions"], 0)
+            self.assertEqual(receipt["productProof"]["missionTarget"], 10)
+            self.assertEqual(receipt["productProof"]["pendingReviewCount"], 0)
+            self.assertEqual(receipt["nextAction"], "run_next_supermega_product_proof")
+            self.assertEqual(receipt["command"], "local-ai.cmd supermega prove")
             self.assertFalse(receipt["modelCalled"])
             self.assertFalse(receipt["stateMutated"])
             self.assertFalse(receipt["externalActionPerformed"])
@@ -615,6 +631,50 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["queue"]["parkedCount"], 0)
             self.assertEqual(receipt["nextAction"], "park_incompatible_queue_head")
             self.assertEqual(receipt["command"], "local-ai.cmd supermega park-next")
+            self.assertNotIn(str(base), output.getvalue())
+
+    def test_supermega_status_prioritizes_pending_human_product_review(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "local-agent-company"
+            repository = base / "supermega-platform"
+            home = base / "company"
+            root.mkdir()
+            repository.mkdir()
+            company = Company(home, MockModel())
+            project_id = company.create_project("SuperMega")
+            evidence = base / "evidence.md"
+            evidence.write_text("Current local evidence.\n", encoding="utf-8")
+            company.add_knowledge(evidence, project_id)
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            pending = [{
+                "experimentId": "a" * 12,
+                "project": {"id": project_id, "name": "SuperMega"},
+                "label": "Coding operability review", "category": "coding",
+                "response": "private response", "model": "local",
+                "wallSeconds": 1.0, "peakIncrementalMemoryMb": 10,
+            }]
+            git_status = subprocess.CompletedProcess([], 0, "## main...origin/main\n", "")
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai.subprocess.run", return_value=git_status),
+                patch("scripts.local_ai.available_memory_bytes", return_value=3 * 1024**3),
+                patch("scripts.local_ai._pending_experiment_items", return_value=pending),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_supermega_status(translate(["supermega"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "attention")
+            self.assertEqual(receipt["productProof"]["pendingReviewCount"], 1)
+            self.assertEqual(
+                receipt["nextAction"], "review_pending_supermega_product_proof",
+            )
+            self.assertEqual(receipt["command"], "local-ai.cmd supermega review")
+            self.assertNotIn("private response", output.getvalue())
             self.assertNotIn(str(base), output.getvalue())
 
     def test_supermega_can_park_only_an_exact_incompatible_queue_head(self) -> None:
@@ -695,6 +755,37 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 )
             self.assertEqual(company.db_path.read_bytes(), database_before)
             self.assertEqual(company.queue_items("queued")[0][0], queue_id)
+
+    def test_supermega_pending_view_filters_other_projects(self) -> None:
+        items = [
+            {
+                "experimentId": "a" * 12,
+                "project": {"id": "1" * 12, "name": "SuperMega"},
+                "label": "SuperMega proof", "category": "coding",
+                "response": "supermega", "model": "local",
+                "wallSeconds": 1.0, "peakIncrementalMemoryMb": 10,
+            },
+            {
+                "experimentId": "b" * 12,
+                "project": {"id": "2" * 12, "name": "Other Lab"},
+                "label": "Other proof", "category": "business",
+                "response": "other", "model": "local",
+                "wallSeconds": 1.0, "peakIncrementalMemoryMb": 10,
+            },
+        ]
+        output = io.StringIO()
+        with (
+            patch("scripts.local_ai._pending_experiment_items", return_value=items),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                run_pending_experiments(translate(["supermega", "pending"])), 0,
+            )
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["count"], 1)
+        self.assertEqual(receipt["projectFilter"], "SuperMega")
+        self.assertEqual(receipt["items"][0]["experimentId"], "a" * 12)
+        self.assertNotIn("other", output.getvalue())
 
     def test_supermega_code_targets_exact_sibling_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:

@@ -30,6 +30,28 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd dashboard
 ```
 
+For the pathless SuperMega workflow, double-click **SuperMega AI Workbench** or
+use these aliases. The proof commands reuse the same receipt validation and
+human-review contracts as the general product workflow:
+
+```powershell
+.\local-ai.cmd supermega
+.\local-ai.cmd supermega proof
+.\local-ai.cmd supermega prove
+.\local-ai.cmd supermega pending
+.\local-ai.cmd supermega review
+.\local-ai.cmd supermega dossier
+```
+
+`supermega proof` previews the next category-balanced test without loading a
+model. `supermega prove` performs one memory-gated local run, requires the
+planned MCP actions, zero paid cost, measured runtime and memory, and model
+unload before saving a pending receipt. `supermega review` can show only
+SuperMega receipts and records nothing until a human supplies the decision,
+correction count, paid-setup observation, and exact `REVIEW` confirmation.
+The workbench exposes counts and the next category but never prints a pending
+response in its status receipt.
+
 For the dedicated conversational company interface, double-click **SuperMega
 Local Company** on the Windows desktop or run:
 

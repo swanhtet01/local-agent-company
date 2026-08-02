@@ -107,10 +107,18 @@ echo 7. Queue SuperMega work for autopilot ^(no model^)
 echo 8. Run one bounded SuperMega team now
 echo 9. Check SuperMega coding-agent readiness
 echo A. Open SuperMega coding agent
+echo B. Preview the next measured product proof ^(no model^)
+echo C. Run one measured product proof ^(safe memory recovery^)
+echo D. Review a pending product proof ^(human decision^)
+echo E. Generate the private validation dossier ^(no model^)
 echo 0. Back to main menu
 echo.
-choice /c 123456789A0 /n /m "Choose 0-9, A, or 0: "
-if errorlevel 11 goto menu
+choice /c 123456789ABCDE0 /n /m "Choose 0-9, A-E, or 0: "
+if errorlevel 15 goto menu
+if errorlevel 14 goto supermega_dossier
+if errorlevel 13 goto supermega_review
+if errorlevel 12 goto supermega_prove
+if errorlevel 11 goto supermega_proof
 if errorlevel 10 goto supermega_code
 if errorlevel 9 goto supermega_code_check
 if errorlevel 8 goto supermega_work
@@ -148,6 +156,30 @@ goto supermega_menu
 
 :supermega_park_next
 call "%LOCAL_AI_ROOT%local-ai.cmd" supermega park-next
+echo.
+pause
+goto supermega_menu
+
+:supermega_proof
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega proof
+echo.
+pause
+goto supermega_menu
+
+:supermega_prove
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega prove
+echo.
+pause
+goto supermega_menu
+
+:supermega_review
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega review
+echo.
+pause
+goto supermega_menu
+
+:supermega_dossier
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega dossier
 echo.
 pause
 goto supermega_menu
