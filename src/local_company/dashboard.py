@@ -20,12 +20,19 @@ from .core import (
     QUALITY_SUPERSESSION_LIST_SCHEMA,
     QUALITY_SUPERSESSION_PREVIEW_SCHEMA, QueueClaim, ReportFinalizationPending, ROLES,
 )
+from .focus import read_execution_focus
+from .mcp_server import (
+    CompanyTools, PRODUCT_EXPERIMENT_CATEGORIES, PRODUCT_OUTCOME_REASONS,
+    PRODUCT_REVIEW_CONFIRMATION, ProtocolError,
+)
 from .supermega import (
     vision_commercial_status, vision_product_status, vision_sales_status,
 )
 
 
 MAX_FORM_BYTES = 16 * 1024
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PRODUCT_PAID_SETUP_SIGNALS = ("unknown", "no", "yes")
 
 
 def _utc_now() -> str:
@@ -155,6 +162,164 @@ class LocalQueueWorker:
             self._run_lock.release()
 
 
+def _sealed_product_review_source(
+    company: Company,
+) -> tuple[CompanyTools, dict[str, object]]:
+    """Return one active-project review candidate with its full bounded result."""
+    focus = read_execution_focus(company.home)
+    project: str | None = None
+    project_name: str | None = None
+    if focus.get("enabled") is True:
+        project_id = focus.get("projectId")
+        project_name_value = focus.get("projectName")
+        if (
+            not isinstance(project_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", project_id) is None
+            or not isinstance(project_name_value, str)
+            or not project_name_value.strip()
+        ):
+            raise ValueError("Active product-review project is malformed")
+        project = project_id
+        project_name = project_name_value
+
+    tools = CompanyTools(company.home)
+    try:
+        candidate_result = tools.product_evidence_next({"project": project})
+    except ProtocolError as exc:
+        raise ValueError("Product-review candidate is unavailable") from exc
+    if (
+        not isinstance(candidate_result, dict)
+        or candidate_result.get("schema")
+        != "local-company.mcp-product-evidence-next.v1"
+        or candidate_result.get("status") not in {"candidate_ready", "no_candidate"}
+        or candidate_result.get("modelCalled") is not False
+        or candidate_result.get("stateMutated") is not False
+        or candidate_result.get("externalActionPerformed") is not False
+    ):
+        raise ValueError("Product-review candidate is malformed")
+    progress = candidate_result.get("evidenceProgress")
+    if not isinstance(progress, dict):
+        raise ValueError("Product-review progress is malformed")
+    candidate = candidate_result.get("candidate")
+    if candidate_result["status"] == "no_candidate":
+        if candidate is not None:
+            raise ValueError("Product-review candidate is malformed")
+        return tools, {
+            "status": "no_candidate", "scopeProjectId": project,
+            "scopeProjectName": project_name, "candidate": None,
+            "jobResult": None, "evidenceProgress": progress,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+    if not isinstance(candidate, dict):
+        raise ValueError("Product-review candidate is malformed")
+    job_id = candidate.get("jobId")
+    roles = candidate.get("roles")
+    candidate_project = candidate.get("project")
+    report_sha256 = candidate.get("reportSha256")
+    evidence_sha256 = candidate.get("evidenceManifestSha256")
+    quality_score = candidate.get("qualityScore")
+    if (
+        not isinstance(job_id, str)
+        or re.fullmatch(r"[0-9a-f]{12}", job_id) is None
+        or candidate.get("status") != "complete"
+        or not isinstance(candidate.get("objective"), str)
+        or not candidate["objective"].strip()
+        or (
+            candidate_project is not None
+            and (
+                not isinstance(candidate_project, str)
+                or not candidate_project.strip()
+            )
+        )
+        or not isinstance(roles, list) or not roles
+        or any(not isinstance(role, str) or not role.strip() for role in roles)
+        or type(candidate.get("qualityPassed")) is not bool
+        or type(quality_score) is not int or not 0 <= quality_score <= 100
+        or not isinstance(report_sha256, str)
+        or SHA256_PATTERN.fullmatch(report_sha256) is None
+        or not isinstance(evidence_sha256, str)
+        or SHA256_PATTERN.fullmatch(evidence_sha256) is None
+    ):
+        raise ValueError("Product-review candidate is malformed")
+    try:
+        job_result = tools.job_result({"jobId": job_id})
+    except ProtocolError as exc:
+        raise ValueError("Product-review result is unavailable") from exc
+    if not isinstance(job_result, dict):
+        raise ValueError("Product-review result is malformed")
+    job = job_result.get("job")
+    quality = job_result.get("quality")
+    checks = quality.get("checks") if isinstance(quality, dict) else None
+    if (
+        job_result.get("schema") != "local-company.mcp-job-result.v1"
+        or job_result.get("status") != "ready"
+        or job_result.get("modelCalled") is not False
+        or job_result.get("stateMutated") is not False
+        or job_result.get("externalActionPerformed") is not False
+        or not isinstance(job, dict) or job.get("jobId") != job_id
+        or job.get("status") != "complete"
+        or job.get("reportAvailable") is not True
+        or job.get("objective") != candidate.get("objective")
+        or job.get("project") != candidate_project
+        or job.get("roles") != roles
+        or not isinstance(job.get("synthesis"), str)
+        or not job["synthesis"].strip()
+        or job.get("synthesisTruncated") is not False
+        or job.get("reportSha256") != report_sha256
+        or job.get("evidenceManifestSha256") != evidence_sha256
+        or not isinstance(quality, dict) or not isinstance(checks, dict)
+        or quality.get("passed") is not candidate.get("qualityPassed")
+        or quality.get("score") != quality_score
+        or checks.get("report_integrity_valid") is not True
+        or checks.get("evidence_manifest_valid") is not True
+        or checks.get("model_stopped_cleanly") is not True
+    ):
+        raise ValueError("Product-review result is malformed")
+    return tools, {
+        "status": "candidate_ready", "scopeProjectId": project,
+        "scopeProjectName": project_name, "candidate": candidate,
+        "jobResult": job_result, "evidenceProgress": progress,
+        "modelCalled": False, "stateMutated": False,
+        "externalActionPerformed": False,
+    }
+
+
+def _product_review_overview(company: Company) -> dict[str, object]:
+    try:
+        _, source = _sealed_product_review_source(company)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {
+            "status": "unavailable", "jobId": None, "project": None,
+            "qualityPassed": None, "qualityScore": None,
+            "humanReviewRequired": True,
+        }
+    candidate = source.get("candidate")
+    if source["status"] == "no_candidate":
+        return {
+            "status": "no_candidate", "jobId": None,
+            "project": source.get("scopeProjectName"),
+            "qualityPassed": None, "qualityScore": None,
+            "humanReviewRequired": True,
+        }
+    if not isinstance(candidate, dict):
+        return {
+            "status": "unavailable", "jobId": None, "project": None,
+            "qualityPassed": None, "qualityScore": None,
+            "humanReviewRequired": True,
+        }
+    return {
+        "status": "candidate_ready", "jobId": candidate["jobId"],
+        "project": candidate.get("project"),
+        "roles": list(candidate["roles"]),
+        "qualityPassed": candidate["qualityPassed"],
+        "qualityScore": candidate["qualityScore"],
+        "reportSha256": candidate["reportSha256"],
+        "evidenceManifestSha256": candidate["evidenceManifestSha256"],
+        "humanReviewRequired": True,
+    }
+
+
 def dashboard_snapshot(
     company: Company, worker: LocalQueueWorker | None = None
 ) -> dict[str, object]:
@@ -181,6 +346,7 @@ def dashboard_snapshot(
         "vision_commercial": vision_commercial_status(
             product=vision_product, sales=vision_sales,
         ),
+        "product_review": _product_review_overview(company),
     }
 
 
@@ -277,6 +443,227 @@ def health_endpoint_snapshot(
         "health": health,
         "worker": {"status": worker_status},
     }
+
+
+def _record_product_review(
+    company: Company, fields: dict[str, str],
+) -> dict[str, object]:
+    expected_fields = {
+        "service_token", "job_id", "project", "report_sha256",
+        "evidence_manifest_sha256", "category", "decision",
+        "outcome_reason", "corrections", "paid_setup_signal",
+        "peak_memory_mb", "review_confirmation",
+    }
+    if set(fields) != expected_fields or any(
+        not isinstance(value, str) for value in fields.values()
+    ):
+        raise ValueError("Product-review form fields are invalid")
+    job_id = fields["job_id"]
+    report_sha256 = fields["report_sha256"]
+    evidence_sha256 = fields["evidence_manifest_sha256"]
+    category = fields["category"]
+    decision = fields["decision"]
+    outcome_reason = fields["outcome_reason"]
+    paid_signal = fields["paid_setup_signal"]
+    if (
+        re.fullmatch(r"[0-9a-f]{12}", job_id) is None
+        or SHA256_PATTERN.fullmatch(report_sha256) is None
+        or SHA256_PATTERN.fullmatch(evidence_sha256) is None
+        or category not in PRODUCT_EXPERIMENT_CATEGORIES
+        or decision not in {"accepted", "rejected"}
+        or outcome_reason not in PRODUCT_OUTCOME_REASONS
+        or (decision == "accepted") != (outcome_reason == "none")
+        or paid_signal not in PRODUCT_PAID_SETUP_SIGNALS
+        or fields["review_confirmation"] != PRODUCT_REVIEW_CONFIRMATION
+    ):
+        raise ValueError("Product-review values or confirmation are invalid")
+    try:
+        corrections = int(fields["corrections"])
+    except ValueError as exc:
+        raise ValueError("Correction count must be an integer from 0 to 100") from exc
+    if not 0 <= corrections <= 100:
+        raise ValueError("Correction count must be an integer from 0 to 100")
+    raw_peak = fields["peak_memory_mb"]
+    try:
+        peak_memory = None if raw_peak == "" else int(raw_peak)
+    except ValueError as exc:
+        raise ValueError("Peak memory must be blank or a positive integer MiB") from exc
+    if peak_memory is not None and not 1 <= peak_memory <= 1_000_000:
+        raise ValueError("Peak memory must be blank or a positive integer MiB")
+
+    tools, source = _sealed_product_review_source(company)
+    candidate = source.get("candidate")
+    if source.get("status") != "candidate_ready" or not isinstance(candidate, dict):
+        raise RuntimeError("Product-review candidate changed; refresh before recording")
+    if (
+        candidate.get("jobId") != job_id
+        or str(candidate.get("project") or "") != fields["project"]
+        or candidate.get("reportSha256") != report_sha256
+        or candidate.get("evidenceManifestSha256") != evidence_sha256
+    ):
+        raise RuntimeError("Product-review candidate changed; refresh before recording")
+    try:
+        recorded = tools.product_evidence_review({
+            "jobId": job_id, "category": category, "decision": decision,
+            "outcomeReason": outcome_reason, "corrections": corrections,
+            "paidSetupSignal": paid_signal, "peakMemoryMb": peak_memory,
+            "reviewConfirmation": PRODUCT_REVIEW_CONFIRMATION,
+        })
+        progress = tools.product_evidence_status({
+            "project": source.get("scopeProjectId"), "includeReviews": False,
+        })
+    except ProtocolError as exc:
+        if exc.message == "invalid_product_review":
+            raise RuntimeError(
+                "Product-review integrity changed; refresh and inspect again"
+            ) from exc
+        raise ValueError(exc.message) from exc
+    review = recorded.get("review") if isinstance(recorded, dict) else None
+    if (
+        not isinstance(recorded, dict)
+        or recorded.get("schema")
+        != "local-company.mcp-product-evidence-review.v1"
+        or recorded.get("status") != "recorded"
+        or recorded.get("recorded") is not True
+        or recorded.get("modelCalled") is not False
+        or recorded.get("externalActionPerformed") is not False
+        or not isinstance(review, dict)
+        or review.get("job_id") != job_id
+        or review.get("category") != category
+        or review.get("decision") != decision
+        or review.get("outcome_reason") != outcome_reason
+        or review.get("corrections") != corrections
+        or review.get("paid_setup_signal") != paid_signal
+        or review.get("peak_memory_mb") != peak_memory
+        or review.get("report_sha256") != report_sha256
+        or review.get("manifest_sha256") != evidence_sha256
+        or not isinstance(progress, dict)
+        or progress.get("schema")
+        != "local-company.mcp-product-evidence-status.v1"
+        or progress.get("modelCalled") is not False
+        or progress.get("stateMutated") is not False
+        or progress.get("externalActionPerformed") is not False
+    ):
+        raise RuntimeError("Recorded product review could not be verified")
+    return {
+        "jobId": job_id, "category": category, "decision": decision,
+        "reviewedMissions": progress.get("reviewed_missions"),
+        "remainingMissions": progress.get("remaining_missions"),
+        "completeMeasurements": progress.get("complete_measurements"),
+        "modelCalled": False, "externalActionPerformed": False,
+    }
+
+
+def render_product_review(
+    company: Company, service_token: str | None = None,
+) -> str:
+    """Render one full sealed result and an explicit local human-review form."""
+    _, source = _sealed_product_review_source(company)
+
+    def cell(value: object) -> str:
+        return html.escape(str(value))
+
+    progress = source["evidenceProgress"]
+    project_name = source.get("scopeProjectName") or "All local projects"
+    progress_html = (
+        f'<div class="grid"><div><strong>{cell(progress.get("reviewedMissions", 0))}</strong>'
+        '<span>reviewed missions</span></div>'
+        f'<div><strong>{cell(progress.get("remainingMissions", "unknown"))}</strong>'
+        '<span>remaining to evidence target</span></div>'
+        f'<div><strong>{cell(progress.get("completeMeasurements", 0))}</strong>'
+        '<span>complete memory measurements</span></div></div>'
+    )
+    if source["status"] == "no_candidate":
+        content = (
+            '<section class="panel"><h2>No sealed mission is waiting</h2>'
+            f'<p>The active review scope is <strong>{cell(project_name)}</strong>. '
+            'Run another bounded mission, then return here. No model was called and '
+            'no state changed while checking.</p></section>'
+        )
+    else:
+        candidate = source["candidate"]
+        job_result = source["jobResult"]
+        if not isinstance(candidate, dict) or not isinstance(job_result, dict):
+            raise ValueError("Product-review source is malformed")
+        job = job_result["job"]
+        quality = job_result["quality"]
+        roles = ", ".join(str(role) for role in candidate["roles"])
+        missing = progress.get("missingProof")
+        missing_items = (
+            "".join(f"<li><code>{cell(item)}</code></li>" for item in missing)
+            if isinstance(missing, list)
+            and all(isinstance(item, str) for item in missing)
+            else ""
+        )
+        category_options = '<option value="">Select the actual workflow</option>' + "".join(
+            f'<option value="{cell(value)}">{cell(value)}</option>'
+            for value in PRODUCT_EXPERIMENT_CATEGORIES
+        )
+        outcome_options = '<option value="">Select the actual outcome reason</option>' + "".join(
+            f'<option value="{cell(value)}">{cell(value.replace("_", " "))}</option>'
+            for value in PRODUCT_OUTCOME_REASONS
+        )
+        paid_options = "".join(
+            f'<option value="{cell(value)}">{cell(value)}</option>'
+            for value in PRODUCT_PAID_SETUP_SIGNALS
+        )
+        if service_token:
+            form = f"""
+<form method="post" action="/product-review/record">
+<input type="hidden" name="service_token" value="{cell(service_token)}">
+<input type="hidden" name="job_id" value="{cell(candidate['jobId'])}">
+<input type="hidden" name="project" value="{cell(candidate.get('project') or '')}">
+<input type="hidden" name="report_sha256" value="{cell(candidate['reportSha256'])}">
+<input type="hidden" name="evidence_manifest_sha256" value="{cell(candidate['evidenceManifestSha256'])}">
+<div class="form-grid">
+<label>Actual workflow category<select name="category" required>{category_options}</select></label>
+<label>Your decision<select name="decision" required><option value="">Select</option><option value="accepted">accepted</option><option value="rejected">rejected</option></select></label>
+<label>Outcome reason<select name="outcome_reason" required>{outcome_options}</select></label>
+<label>Actual correction count<input name="corrections" type="number" min="0" max="100" required></label>
+<label>Real willingness-to-pay signal<select name="paid_setup_signal" required>{paid_options}</select></label>
+<label>Measured peak memory MiB, if known<input name="peak_memory_mb" type="number" min="1" max="1000000"></label>
+</div>
+<label>Type the exact confirmation phrase
+<input name="review_confirmation" maxlength="64" autocomplete="off" required placeholder="{cell(PRODUCT_REVIEW_CONFIRMATION)}"></label>
+<button type="submit">Record my actual human review</button>
+</form>"""
+        else:
+            form = (
+                '<p class="readonly">This dashboard instance is read-only. Start the '
+                'managed localhost service to record a review.</p>'
+            )
+        content = f"""
+<section class="panel"><h2>Sealed mission ready for human review</h2>
+<p><strong>Project:</strong> {cell(candidate.get('project') or 'Unscoped')} &middot;
+<strong>Job:</strong> <code>{cell(candidate['jobId'])}</code> &middot;
+<strong>Roles:</strong> {cell(roles)}</p>
+<p><strong>Automated quality:</strong> {'passed' if quality['passed'] else 'failed'}
+{cell(quality['score'])}/100. Automated quality is not your acceptance.</p>
+<p class="digest"><strong>Report SHA-256:</strong> <code>{cell(candidate['reportSha256'])}</code><br>
+<strong>Evidence SHA-256:</strong> <code>{cell(candidate['evidenceManifestSha256'])}</code></p>
+<h3>Objective</h3><p>{cell(job['objective'])}</p>
+<h3>Complete result</h3><pre>{cell(job['synthesis'])}</pre>
+<h3>Still missing from the product evidence gate</h3><ul>{missing_items or '<li>none reported</li>'}</ul>
+<div class="boundary">Record only what you personally observed. Choose <code>yes</code>
+for willingness to pay only after a real person indicated it. Submitting writes one
+local append-only review; it calls no model, sends nothing, spends nothing, and grants
+no deployment or publication authority.</div>{form}</section>"""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Human product evidence review</title><style>
+:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
+body {{ max-width:980px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
+.panel {{ background:#121a2d; border:1px solid #31527a; border-radius:12px; padding:20px; }}
+.grid,.form-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:18px 0; }}
+.grid div {{ background:#0b1020; border-radius:8px; padding:12px; }} .grid strong {{ display:block; font-size:24px; }}
+.grid span,.readonly {{ color:#9aa7bd; }} pre {{ white-space:pre-wrap; overflow-wrap:anywhere; background:#0b1020; padding:14px; border-radius:8px; }}
+.digest code {{ overflow-wrap:anywhere; }} .boundary {{ border:1px solid #67582b; background:#2b2615; border-radius:8px; padding:12px; margin:18px 0; }}
+label {{ display:block; color:#cbd5e1; font-size:13px; }} input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
+button {{ margin-top:14px; padding:10px 15px; color:#07111f; background:#8bd5ff; border:0; border-radius:8px; font-weight:700; cursor:pointer; }}
+@media(max-width:760px) {{ .grid,.form-grid {{ grid-template-columns:1fr; }} body {{ padding:18px 12px 40px; }} }}
+</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<h1>Human product evidence review</h1><p>Active scope: <strong>{cell(project_name)}</strong>. This page performs no inference.</p>
+{progress_html}{content}</body></html>"""
 
 
 def render_dashboard(
@@ -451,6 +838,28 @@ def render_dashboard(
         f"<tr><td><code>{cell(row[0])}</code></td><td>{cell(row[2])}</td><td>{cell(row[4])}</td></tr>"
         for row in snapshot["pending_approvals"]
     ) or '<tr><td colspan="3" class="empty">No pending approvals</td></tr>'
+
+    product_review = snapshot["product_review"]
+    product_review_ready = (
+        isinstance(product_review, dict)
+        and product_review.get("status") == "candidate_ready"
+    )
+    product_review_html = (
+        '<section class="product-review-banner"><h2>Human product evidence review ready</h2>'
+        f'<p>Project <strong>{cell(product_review.get("project") or "Unscoped")}</strong> '
+        f'has sealed mission <code>{cell(product_review.get("jobId"))}</code> ready. '
+        f'Automated quality: {cell(product_review.get("qualityScore"))}/100; '
+        'this is not human acceptance.</p>'
+        '<p><a href="/product-review">Inspect the complete result and record only your '
+        'actual judgment</a>. This review calls no model and performs no external action.</p>'
+        '</section>'
+        if product_review_ready else ""
+    )
+    product_review_card = (
+        '<div class="card"><div class="metric gate">1</div><div class="label">'
+        '<a href="/product-review">Human product review ready</a></div></div>'
+        if product_review_ready else ""
+    )
 
     vision = snapshot["vision_product"]
     vision_dataset = vision.get("dataset", {}) if isinstance(vision, dict) else {}
@@ -644,6 +1053,8 @@ code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }
 .build-banner h2 {{ margin-bottom:8px; }} .build-banner p {{ margin:6px 0; }}
 .vision-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
 .vision-banner h2 {{ margin-bottom:8px; }} .vision-banner p {{ margin:6px 0; }}
+.product-review-banner {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
+.product-review-banner h2 {{ margin-bottom:8px; }} .product-review-banner p {{ margin:6px 0; }}
 .build-hash code {{ overflow-wrap:anywhere; }}
 .hint {{ color:#9aa7bd; margin-top:-6px; }} label {{ display:block; color:#cbd5e1; font-size:13px; }}
 textarea,input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
@@ -654,7 +1065,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 @media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} th:nth-child(4),td:nth-child(4) {{ display:none; }} }}
 </style></head><body>
 <h1>Local Agent Company</h1><p class="sub">Owner-controlled task intake &middot; localhost only <a class="refresh" href="/">Refresh</a><br>Scores are automated format, safety, and evidence-consistency checks—not factual or production verification.</p>
-{notice_html}{completion_html}{build_html}{vision_product_html}{intake}
+{notice_html}{completion_html}{build_html}{product_review_html}{vision_product_html}{intake}
 <div class="grid">
 <div class="card"><div class="metric">{len(snapshot['projects'])}</div><div class="label">Projects</div></div>
 <div class="card"><div class="metric">{len(snapshot['jobs'])}</div><div class="label">Missions</div></div>
@@ -668,6 +1079,7 @@ button:disabled {{ cursor:not-allowed; opacity:.45; }}
 <div class="card"><div class="metric gate">{cell(vision_sales.get('founding_pilot_packages_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision claim-safe pilot packages</div></div>
 {quality_recovery_card}
 {supersession_review_card}
+{product_review_card}
 <div class="card"><div class="metric">{cell(snapshot['worker'].get('status', 'disabled'))}</div><div class="label">Local worker</div></div>
 </div>
 <section><h2>Mission queue</h2>{quality_recovery_hint}{supersession_review_hint}<table><thead><tr><th>ID</th><th>Status</th><th>Priority</th><th>Scheduled UTC</th><th>Project</th><th>Objective</th><th>Report</th><th>Error</th><th>Action</th></tr></thead><tbody>{queue_rows}</tbody></table></section>
@@ -2168,6 +2580,20 @@ def create_dashboard_server(
                 ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif not parsed.query and parsed.path == "/product-review":
+                try:
+                    body = render_product_review(
+                        company, service_token,
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+                    body = (
+                        b"Human product review unavailable; refresh after local "
+                        b"state is stable."
+                    )
+                    self.send_response(409)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
             elif match := re.fullmatch(
                 r"/vision-capture-lab/(ready|loading|error|degraded)/([0-9]{1,2})",
                 parsed.path,
@@ -2405,6 +2831,7 @@ def create_dashboard_server(
             if self.path in {
                 "/queue/preview-team", "/queue/enqueue", "/queue/cancel",
                 "/queue/reset", "/queue/run-next", "/jobs/quality",
+                "/product-review/record",
             } and service_token:
                 try:
                     fields = self._read_form()
@@ -2418,7 +2845,16 @@ def create_dashboard_server(
                     self.send_error(403, "Invalid local service token")
                     return
                 try:
-                    if self.path == "/queue/preview-team":
+                    if self.path == "/product-review/record":
+                        review = _record_product_review(company, fields)
+                        self._redirect(
+                            "Recorded actual human review for sealed mission "
+                            f"{review['jobId']}: {review['decision']}; "
+                            f"reviewed={review['reviewedMissions']}, "
+                            f"remaining={review['remainingMissions']}. "
+                            "No model or external action was performed."
+                        )
+                    elif self.path == "/queue/preview-team":
                         preview = company.mission_preflight(
                             fields.get("objective", ""),
                             fields.get("project") or None,

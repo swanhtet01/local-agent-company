@@ -56,7 +56,7 @@ from local_company.core import (
 from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
     health_endpoint_snapshot, render_dashboard, render_dataset_quality_detail,
-    render_mission_detail, render_quality_failure_overview,
+    render_mission_detail, render_product_review, render_quality_failure_overview,
     render_vision_capture_fixture,
     runtime_build_identity, runtime_model_identity,
 )
@@ -4051,6 +4051,184 @@ class CompanyTests(unittest.TestCase):
                 self.assertEqual(rejected.exception.code, 403)
                 rejected.exception.close()
                 self.assertEqual(company.queue_items(), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_dashboard_surfaces_sealed_review_without_model_or_result_exposure(self):
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "company"
+            model = CountingMockModel()
+            company = Company(home, model)
+            project_id = company.create_project("SuperMega")
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            objective = "Review business workflow and owner evidence"
+            job_id, _ = company.run(objective, project=project_id)
+            detail = company.job_detail(job_id)
+            synthesis = detail["job"][7]
+            calls_before = model.calls
+
+            snapshot = dashboard_snapshot(company)
+            self.assertEqual(snapshot["product_review"]["status"], "candidate_ready")
+            self.assertEqual(snapshot["product_review"]["jobId"], job_id)
+            self.assertNotIn("objective", snapshot["product_review"])
+            self.assertNotIn("synthesis", snapshot["product_review"])
+            snapshot_text = json.dumps(snapshot)
+            self.assertNotIn(synthesis, snapshot_text)
+
+            main_page = render_dashboard(company, service_token="review-secret")
+            self.assertIn("Human product evidence review ready", main_page)
+            self.assertIn('href="/product-review"', main_page)
+            self.assertIn(job_id, main_page)
+            self.assertNotIn(synthesis, main_page)
+
+            read_only = render_product_review(company)
+            self.assertIn(objective, read_only)
+            self.assertIn(synthesis, read_only)
+            self.assertIn("dashboard instance is read-only", read_only)
+            self.assertNotIn('action="/product-review/record"', read_only)
+
+            review_page = render_product_review(company, "review-secret")
+            self.assertIn('action="/product-review/record"', review_page)
+            self.assertIn(f'name="job_id" value="{job_id}"', review_page)
+            self.assertIn(detail["job"][8], review_page)
+            self.assertIn(detail["job"][9], review_page)
+            self.assertIn("RECORD HUMAN PRODUCT EVIDENCE REVIEW", review_page)
+            self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 0)
+            self.assertEqual(model.calls, calls_before)
+
+    def test_dashboard_product_review_requires_auth_and_confirmation_then_blocks_replay(self):
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "company"
+            model = CountingMockModel()
+            company = Company(home, model)
+            project_id = company.create_project("SuperMega")
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            job_id, _ = company.run("Review business workflow", project=project_id)
+            detail = company.job_detail(job_id)
+            report_sha256 = detail["job"][8]
+            manifest_sha256 = detail["job"][9]
+            calls_before = model.calls
+            server = create_dashboard_server(
+                company, 0, service_token="review-secret",
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+
+            def request(token: str, confirmation: str) -> urllib.request.Request:
+                return urllib.request.Request(
+                    base + "/product-review/record",
+                    data=urllib.parse.urlencode({
+                        "service_token": token, "job_id": job_id,
+                        "project": "SuperMega", "report_sha256": report_sha256,
+                        "evidence_manifest_sha256": manifest_sha256,
+                        "category": "business", "decision": "accepted",
+                        "outcome_reason": "none", "corrections": "0",
+                        "paid_setup_signal": "unknown", "peak_memory_mb": "512",
+                        "review_confirmation": confirmation,
+                    }).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+
+            try:
+                with opener.open(base + "/product-review", timeout=3) as response:
+                    page = response.read().decode("utf-8")
+                    self.assertIn(job_id, page)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    opener.open(request("wrong", "RECORD HUMAN PRODUCT EVIDENCE REVIEW"), timeout=3)
+                self.assertEqual(rejected.exception.code, 403)
+                rejected.exception.close()
+
+                with self.assertRaises(urllib.error.HTTPError) as cancelled:
+                    opener.open(request("review-secret", "CANCEL"), timeout=3)
+                self.assertEqual(cancelled.exception.code, 400)
+                cancelled.exception.close()
+                self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 0)
+
+                accepted = request(
+                    "review-secret", "RECORD HUMAN PRODUCT EVIDENCE REVIEW",
+                )
+                with opener.open(accepted, timeout=3) as response:
+                    result = response.read().decode("utf-8")
+                self.assertIn("Recorded actual human review", result)
+                self.assertIn("No model or external action was performed", result)
+                status = company.product_evidence_status(project_id)
+                self.assertEqual(status["reviewed_missions"], 1)
+                self.assertEqual(status["complete_measurements"], 1)
+                self.assertEqual(status["reviews"][0]["job_id"], job_id)
+                self.assertEqual(status["reviews"][0]["peak_memory_mb"], 512)
+                self.assertEqual(model.calls, calls_before)
+
+                with self.assertRaises(urllib.error.HTTPError) as replayed:
+                    opener.open(request(
+                        "review-secret", "RECORD HUMAN PRODUCT EVIDENCE REVIEW",
+                    ), timeout=3)
+                self.assertEqual(replayed.exception.code, 409)
+                replayed.exception.close()
+                self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_dashboard_product_review_rejects_report_tampering_without_recording(self):
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "company"
+            model = CountingMockModel()
+            company = Company(home, model)
+            project_id = company.create_project("Integrity Lab")
+            set_execution_focus(home, project_id, "Integrity Lab", 4)
+            job_id, report = company.run(
+                "Review one integrity-bound workflow", project=project_id,
+            )
+            detail = company.job_detail(job_id)
+            calls_before = model.calls
+            server = create_dashboard_server(
+                company, 0, service_token="integrity-secret",
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with opener.open(base + "/product-review", timeout=3) as response:
+                    self.assertIn(job_id.encode("utf-8"), response.read())
+                report.write_text(
+                    report.read_text(encoding="utf-8") + "\ntampered after review render\n",
+                    encoding="utf-8",
+                )
+                submitted = urllib.request.Request(
+                    base + "/product-review/record",
+                    data=urllib.parse.urlencode({
+                        "service_token": "integrity-secret", "job_id": job_id,
+                        "project": "Integrity Lab", "report_sha256": detail["job"][8],
+                        "evidence_manifest_sha256": detail["job"][9],
+                        "category": "business", "decision": "rejected",
+                        "outcome_reason": "inaccurate", "corrections": "1",
+                        "paid_setup_signal": "no", "peak_memory_mb": "",
+                        "review_confirmation": "RECORD HUMAN PRODUCT EVIDENCE REVIEW",
+                    }).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    opener.open(submitted, timeout=3)
+                self.assertEqual(rejected.exception.code, 409)
+                rejected.exception.close()
+                self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 0)
+                self.assertEqual(model.calls, calls_before)
             finally:
                 server.shutdown()
                 server.server_close()
