@@ -29,6 +29,7 @@ SCHEDULE_CREATE_CONFIRMATION = "CREATE RECURRING LOCAL MISSION"
 SCHEDULE_CHANGE_CONFIRMATION = "CHANGE LOCAL MISSION SCHEDULE"
 PROJECT_CREATE_CONFIRMATION = "CREATE LOCAL COMPANY PROJECT"
 KNOWLEDGE_ADD_CONFIRMATION = "ADD LOCAL PROJECT KNOWLEDGE"
+PRODUCT_REVIEW_CONFIRMATION = "RECORD HUMAN PRODUCT EVIDENCE REVIEW"
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -94,7 +95,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 17
+        self.exposed_tools = 19
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -330,6 +331,73 @@ class CompanyTools:
             ],
             "count": len(hits), "limit": limit, "modelCalled": False,
             "stateMutated": False, "externalActionPerformed": False,
+        }
+
+    def product_evidence_status(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"project", "includeReviews", "reviewLimit"})
+        project = value.get("project")
+        include_reviews = value.get("includeReviews", False)
+        review_limit = value.get("reviewLimit", 10)
+        if project is not None and (
+            not isinstance(project, str) or not project.strip() or len(project) > 80
+        ):
+            raise ProtocolError(-32602, "invalid_project")
+        if type(include_reviews) is not bool:
+            raise ProtocolError(-32602, "invalid_include_reviews")
+        if type(review_limit) is not int or not 1 <= review_limit <= 20:
+            raise ProtocolError(-32602, "invalid_review_limit")
+        try:
+            status = self.company.product_evidence_status(project)
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_project") from error
+        reviews = status.pop("reviews", [])
+        return {
+            **status,
+            "schema": "local-company.mcp-product-evidence-status.v1",
+            "reviews": reviews[:review_limit] if include_reviews else [],
+            "reviewsIncluded": include_reviews,
+            "reviewResultLimit": review_limit,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+
+    def product_evidence_review(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {
+            "jobId", "category", "decision", "corrections", "paidSetupSignal",
+            "peakMemoryMb", "reviewConfirmation",
+        })
+        if value.get("reviewConfirmation") != PRODUCT_REVIEW_CONFIRMATION:
+            raise ProtocolError(-32602, "product_review_confirmation_required")
+        job_id = value.get("jobId")
+        category = value.get("category")
+        decision = value.get("decision")
+        corrections = value.get("corrections")
+        paid_signal = value.get("paidSetupSignal")
+        peak_memory = value.get("peakMemoryMb")
+        if not isinstance(job_id, str) or QUEUE_ID_PATTERN.fullmatch(job_id) is None:
+            raise ProtocolError(-32602, "invalid_job_id")
+        if category not in {"coding", "business", "data-research"}:
+            raise ProtocolError(-32602, "invalid_product_category")
+        if decision not in {"accepted", "rejected"}:
+            raise ProtocolError(-32602, "invalid_product_decision")
+        if type(corrections) is not int or not 0 <= corrections <= 100:
+            raise ProtocolError(-32602, "invalid_corrections")
+        if paid_signal not in {"yes", "no", "unknown"}:
+            raise ProtocolError(-32602, "invalid_paid_setup_signal")
+        if peak_memory is not None and (
+            type(peak_memory) is not int or not 1 <= peak_memory <= 1_000_000
+        ):
+            raise ProtocolError(-32602, "invalid_peak_memory")
+        try:
+            review = self.company.record_product_evidence_review(
+                job_id, category, decision, corrections, paid_signal, peak_memory,
+            )
+        except ValueError as error:
+            raise ProtocolError(-32602, "invalid_product_review") from error
+        return {
+            "schema": "local-company.mcp-product-evidence-review.v1",
+            "status": "recorded", "recorded": True, "review": review,
+            "modelCalled": False, "externalActionPerformed": False,
         }
 
     def preflight(self, arguments: Any) -> dict[str, Any]:
@@ -711,6 +779,36 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             company_tools.knowledge_search, True,
         ),
         Tool(
+            "product_evidence_status", "Summarize bounded human-reviewed product validation evidence.",
+            _schema(
+                [],
+                {
+                    "project": project, "includeReviews": {"type": "boolean"},
+                    "reviewLimit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+            ),
+            company_tools.product_evidence_status, True,
+        ),
+        Tool(
+            "product_evidence_review", "Append one explicitly confirmed human review bound to a sealed job.",
+            _schema(
+                [
+                    "jobId", "category", "decision", "corrections", "paidSetupSignal",
+                    "reviewConfirmation",
+                ],
+                {
+                    "jobId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                    "category": {"type": "string", "enum": ["coding", "business", "data-research"]},
+                    "decision": {"type": "string", "enum": ["accepted", "rejected"]},
+                    "corrections": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "paidSetupSignal": {"type": "string", "enum": ["yes", "no", "unknown"]},
+                    "peakMemoryMb": {"type": "integer", "minimum": 1, "maximum": 1_000_000},
+                    "reviewConfirmation": {"const": PRODUCT_REVIEW_CONFIRMATION},
+                },
+            ),
+            company_tools.product_evidence_review, False,
+        ),
+        Tool(
             "queue_list", "List bounded local mission queue records without changing state.",
             _schema([], {
                 "status": {"type": "string", "enum": sorted(QUEUE_STATUSES)},
@@ -873,7 +971,7 @@ class McpSession:
                     "instructions": (
                         "Local-only company coordination. In compact mode call company with one action and input object. "
                         "Start with status; use projects, playbooks, queue_list, and preflight as relevant. "
-                        "Project creation, knowledge addition, queue execution, and recurring missions require exact owner confirmations. "
+                        "Project creation, knowledge addition, queue execution, recurring missions, and human product reviews require exact owner confirmations. "
                         "Use jobs and job_result to inspect outcomes. External actions are never exposed."
                     ),
                 })

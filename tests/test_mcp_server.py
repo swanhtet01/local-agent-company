@@ -10,6 +10,7 @@ from local_company.mcp_server import (
     MAX_TOOL_CALLS,
     KNOWLEDGE_ADD_CONFIRMATION,
     PROJECT_CREATE_CONFIRMATION,
+    PRODUCT_REVIEW_CONFIRMATION,
     RUN_CONFIRMATION,
     SCHEDULE_CHANGE_CONFIRMATION,
     SCHEDULE_CREATE_CONFIRMATION,
@@ -47,9 +48,10 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "jobs", "job_result", "schedule_list", "schedule_create",
                     "schedule_set_enabled", "playbooks", "project_create", "project_overview",
                     "knowledge_list", "knowledge_add", "knowledge_search",
+                    "product_evidence_status", "product_evidence_review",
                 },
             )
-            self.assertEqual(len(tools), 17)
+            self.assertEqual(len(tools), 19)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -270,6 +272,35 @@ class LocalCompanyMcpTests(unittest.TestCase):
             }, 8)["result"]["structuredContent"]
             self.assertEqual(preflight["status"], "ready")
             self.assertTrue(preflight["model_execution_ready"])
+
+    def test_human_product_review_is_confirmation_bound_and_updates_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            job_id, _ = session.company_tools.company.run("Prepare an internal product decision")
+            review = {
+                "jobId": job_id, "category": "business", "decision": "accepted",
+                "corrections": 1, "paidSetupSignal": "yes", "peakMemoryMb": 900,
+            }
+            refused = self._call(session, "product_evidence_review", review, 3)
+            self.assertEqual(
+                refused["error"]["message"], "product_review_confirmation_required",
+            )
+            before = self._call(session, "product_evidence_status", {}, 4)
+            self.assertEqual(before["result"]["structuredContent"]["reviewed_missions"], 0)
+            recorded = self._call(session, "product_evidence_review", {
+                **review, "reviewConfirmation": PRODUCT_REVIEW_CONFIRMATION,
+            }, 5)["result"]["structuredContent"]
+            self.assertTrue(recorded["recorded"])
+            self.assertFalse(recorded["modelCalled"])
+            status = self._call(session, "product_evidence_status", {
+                "includeReviews": True, "reviewLimit": 1,
+            }, 6)["result"]["structuredContent"]
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["remaining_missions"], 9)
+            self.assertEqual(status["decision_counts"]["accepted"], 1)
+            self.assertEqual(status["paid_setup_signal_counts"]["yes"], 1)
+            self.assertEqual(len(status["reviews"]), 1)
+            self.assertFalse(status["externalActionPerformed"])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
