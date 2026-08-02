@@ -11,7 +11,7 @@ echo 2. Show company brief and exact next action ^(no model^)
 echo 3. Plan next product experiment ^(no model^)
 echo 4. Run next product experiment ^(safe memory recovery^)
 echo 5. Inspect and review a completed product experiment ^(no model^)
-echo 6. Check whether a workflow is ready to package and sell ^(no model^)
+echo 6. Check and package a proven workflow for owner review ^(no model^)
 echo 7. Open local coding agent for a project
 echo 8. Check local AI readiness
 echo 9. Run one ready company mission ^(safe memory recovery^)
@@ -54,7 +54,7 @@ pause
 goto menu
 
 :offer
-call "%LOCAL_AI_ROOT%local-ai.cmd" offer
+call "%LOCAL_AI_ROOT%local-ai.cmd" offer-pack
 echo.
 pause
 goto menu

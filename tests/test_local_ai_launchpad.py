@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -40,6 +40,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             ("Future Lab", "--recover-memory"),
         )
         self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["offer-pack", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["experiment-pending"]).command, ())
         self.assertEqual(translate(["experiment-review-interactive"]).command, ())
         self.assertEqual(translate([
@@ -286,6 +287,55 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertFalse(receipt["modelCalled"])
             self.assertFalse(receipt["stateMutated"])
 
+    def test_offer_pack_writes_only_a_ready_deterministic_owner_draft(self) -> None:
+        blocked = {
+            "status": "evidence_required", "missingProof": ["tenMeasuredCrossCategoryReviews"],
+        }
+        ready = {
+            "schema": "local-company.mcp-product-offer-next.v1",
+            "status": "ready_for_owner_packaging",
+            "project": {"id": "1" * 12, "name": "Future Lab"},
+            "missingProof": [],
+            "offer": {
+                "workflow": "Repository safety audit", "category": "coding",
+                "evidenceRuns": 2, "maximumCorrectionsObserved": 1,
+                "maximumPeakMemoryMbObserved": 768,
+                "runtimeSecondsRange": {"minimum": 12.5, "maximum": 21.0},
+                "package": ["private local installation", "operator training"],
+                "allowedClaims": ["2 integrity-checked local runs were accepted"],
+                "prohibitedClaims": ["guaranteed customer ROI"],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            root = Path(directory) / "repo"
+            root.mkdir()
+            output = io.StringIO()
+            with patch("scripts.local_ai._product_offer_result", return_value=(home, blocked)), redirect_stdout(output):
+                self.assertEqual(run_offer_pack(translate(["offer-pack"]), root), 1)
+            self.assertFalse((home / "offer-packs").exists())
+            blocked_receipt = json.loads(output.getvalue())
+            self.assertFalse(blocked_receipt["packStored"])
+            self.assertFalse(blocked_receipt["stateMutated"])
+
+            receipts = []
+            with patch("scripts.local_ai._product_offer_result", return_value=(home, ready)):
+                for _ in range(2):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(run_offer_pack(translate(["offer-pack"]), root), 0)
+                    receipts.append(json.loads(output.getvalue()))
+            self.assertTrue(receipts[0]["packStored"])
+            self.assertTrue(receipts[0]["stateMutated"])
+            self.assertFalse(receipts[1]["packStored"])
+            self.assertFalse(receipts[1]["stateMutated"])
+            self.assertEqual(receipts[0]["offerPackId"], receipts[1]["offerPackId"])
+            target = Path(receipts[0]["offerPackPath"])
+            content = target.read_text(encoding="utf-8")
+            self.assertIn("Status: owner-review draft", content)
+            self.assertIn("Claims this pack does not support", content)
+            self.assertFalse(receipts[0]["externalPublicationAuthorized"])
+
     def test_company_brief_prioritizes_trust_activity_review_queue_offer_and_experiment(self) -> None:
         ready = {"status": "ready", "verified": True, "currentActivity": "idle"}
         cases = [
@@ -358,7 +408,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-company-agent.cmd"', source)
         self.assertIn('local-ai.cmd" experiment', source)
         self.assertIn('local-ai.cmd" experiment-run --recover-memory', source)
-        self.assertIn('local-ai.cmd" offer', source)
+        self.assertIn('local-ai.cmd" offer-pack', source)
         self.assertIn('local-ai.cmd" code "%LOCAL_AI_PROJECT_PATH%"', source)
         self.assertIn('local-company-agent.cmd" --check', source)
         self.assertIn('local-ai.cmd" cycle --recover-memory', source)

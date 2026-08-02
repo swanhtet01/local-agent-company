@@ -14,6 +14,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd experiment-pending
 .\local-ai.cmd experiment-review-interactive
 .\local-ai.cmd offer
+.\local-ai.cmd offer-pack
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
@@ -86,6 +87,15 @@ runtime or memory, then `experiment-review-interactive` to enter the actual
 accept/reject decision, correction count, and paid-setup signal. Low memory,
 runner failure, or a skipped action returns a fail-closed receipt for a later
 retry and creates no pending evidence.
+
+`offer-pack` uses the conservative product-offer gate and writes nothing while
+proof is incomplete. Once the gate passes, it atomically creates a deterministic
+Markdown owner-review pack in the private company state directory. The pack
+contains only the measured workflow, bounded package, supported claims,
+prohibited claims, and remaining owner decisions. Its receipt includes a
+content hash and explicitly withholds publication authority; reruns reuse the
+identical pack instead of creating conflicting drafts. Desktop Lab option **6**
+provides the same check-and-package flow without loading a model.
 
 Add `--recover-memory` when Codex or another desktop app has filled RAM. Only
 after an initial zero-model memory block, the command invokes the existing

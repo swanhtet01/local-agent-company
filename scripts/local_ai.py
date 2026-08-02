@@ -25,6 +25,7 @@ WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
 CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
+OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
 PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
@@ -59,6 +60,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd experiment-run [PROJECT] [--recover-memory]
                                               Run that test locally and return its receipt
   local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
+  local-ai.cmd offer-pack [PROJECT]            Write an owner-review offer pack when proven
   local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
   local-ai.cmd experiment-review-interactive   Review one pending receipt with local prompts
   local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
@@ -141,6 +143,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if len(tail) > 1 or (tail and not tail[0].strip()):
             raise ValueError("offer_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "offer", "Check whether repeatable measured evidence supports owner-reviewed offer packaging.", False, False)
+    if name == "offer-pack":
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError("offer_pack_accepts_at_most_one_project")
+        return LaunchAction(tuple(tail), "offer-pack", "Write a local owner-review pack only from evidence-gated offer claims.", False, True)
     if name == "experiment-pending":
         if tail:
             raise ValueError("experiment_pending_accepts_no_arguments")
@@ -286,8 +292,7 @@ def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
     return 0
 
 
-def run_offer(action: LaunchAction, root: Path | None = None) -> int:
-    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+def _product_offer_result(action: LaunchAction, project_root: Path) -> tuple[Path, dict[str, object]]:
     source = str(project_root / "src")
     if source not in sys.path:
         sys.path.insert(0, source)
@@ -300,8 +305,127 @@ def run_offer(action: LaunchAction, root: Path | None = None) -> int:
         result = CompanyTools(home).product_offer_next({"project": project})
     except ProtocolError as error:
         raise ValueError(error.message) from error
+    return home, result
+
+
+def run_offer(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    _, result = _product_offer_result(action, project_root)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0 if result.get("status") == "ready_for_owner_packaging" else 1
+
+
+def _offer_pack_text(result: dict[str, object], pack_id: str) -> str:
+    project = result.get("project")
+    offer = result.get("offer")
+    if not isinstance(project, dict) or not isinstance(offer, dict):
+        raise ValueError("offer_pack_source_invalid")
+
+    def text_value(value: object, limit: int = 200) -> str:
+        normalized = " ".join(value.split()) if isinstance(value, str) else ""
+        if not normalized or len(normalized) > limit:
+            raise ValueError("offer_pack_source_invalid")
+        return normalized.replace("\\", "\\\\").replace("`", "\\`").replace("[", "\\[").replace("]", "\\]")
+
+    project_name = text_value(project.get("name"), 80)
+    workflow = text_value(offer.get("workflow"), 80)
+    category = text_value(offer.get("category"), 40)
+    evidence_runs = offer.get("evidenceRuns")
+    corrections = offer.get("maximumCorrectionsObserved")
+    peak_memory = offer.get("maximumPeakMemoryMbObserved")
+    runtime_range = offer.get("runtimeSecondsRange")
+    if (
+        type(evidence_runs) is not int or evidence_runs < 2
+        or type(corrections) is not int or corrections < 0
+        or type(peak_memory) is not int or peak_memory < 1
+        or not isinstance(runtime_range, dict)
+        or type(runtime_range.get("minimum")) not in {int, float}
+        or type(runtime_range.get("maximum")) not in {int, float}
+    ):
+        raise ValueError("offer_pack_source_invalid")
+
+    def bullets(name: str) -> list[str]:
+        values = offer.get(name)
+        if (
+            not isinstance(values, list) or not 1 <= len(values) <= 20
+            or any(not isinstance(item, str) for item in values)
+        ):
+            raise ValueError("offer_pack_source_invalid")
+        return [f"- {text_value(item)}" for item in values]
+
+    return "\n".join([
+        f"# Private Local AI Workflow Offer: {workflow}", "",
+        "**Status: owner-review draft; not published and not authorized for external use.**", "",
+        f"Offer pack ID: `{pack_id}`", f"Project: {project_name}",
+        f"Workflow category: {category}", "",
+        "## What the customer receives", "", *bullets("package"), "",
+        "## Integrity-checked local evidence", "",
+        f"- Supporting accepted runs: {evidence_runs}",
+        f"- Maximum corrections observed: {corrections}",
+        f"- Runtime observed: {runtime_range['minimum']} to {runtime_range['maximum']} seconds",
+        f"- Maximum peak memory observed: {peak_memory} MiB", "",
+        "## Claims supported by current evidence", "", *bullets("allowedClaims"), "",
+        "## Claims this pack does not support", "", *bullets("prohibitedClaims"), "",
+        "## Owner decisions still required", "",
+        "- Confirm the target customer and their workflow baseline.",
+        "- Choose scope, price, support terms, and acceptance test.",
+        "- Review every claim before sharing or publishing.",
+        "- Keep credentials, payments, deployment, and external messages behind explicit approval.", "",
+    ])
+
+
+def run_offer_pack(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    home, result = _product_offer_result(action, project_root)
+    if result.get("status") != "ready_for_owner_packaging":
+        print(json.dumps({
+            "schema": OFFER_PACK_SCHEMA, "status": "evidence_required",
+            "missingProof": result.get("missingProof"), "packStored": False,
+            "ownerReviewRequired": True, "externalPublicationAuthorized": False,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }, separators=(",", ":"), sort_keys=True))
+        return 1
+    canonical = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    pack_id = hashlib.sha256(b"local-ai.offer-pack.v1\0" + canonical).hexdigest()[:12]
+    encoded = _offer_pack_text(result, pack_id).encode("utf-8")
+    if len(encoded) > 65_536:
+        raise ValueError("offer_pack_too_large")
+    directory = home / "offer-packs"
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("offer_pack_directory_unsafe")
+    target = directory / f"offer-pack-{pack_id}.md"
+    stored = False
+    if target.exists():
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != encoded:
+            raise ValueError("offer_pack_collision")
+    else:
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=directory, prefix=".offer-pack-", suffix=".tmp", delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+            stored = True
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    print(json.dumps({
+        "schema": OFFER_PACK_SCHEMA, "status": "ready_for_owner_review",
+        "offerPackId": pack_id, "offerPackPath": str(target),
+        "offerPackSha256": hashlib.sha256(encoded).hexdigest(),
+        "packStored": stored, "ownerReviewRequired": True,
+        "stateMutated": stored,
+        "externalPublicationAuthorized": False, "modelCalled": False,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
 
 
 def _invoke_experiment_runner(
@@ -1207,6 +1331,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_interactive_experiment_review(action)
         if action.mode == "offer":
             return run_offer(action)
+        if action.mode == "offer-pack":
+            return run_offer_pack(action)
         if action.mode == "work":
             return run_work(action)
         if action.mode == "cycle":
