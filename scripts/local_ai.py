@@ -17,6 +17,7 @@ except ImportError:
 SCHEMA = "local-ai.launchpad.v1"
 WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
 CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
+EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -46,6 +47,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
   local-ai.cmd plan "OBJECTIVE" [options]     Preview the team and gates; no model
   local-ai.cmd experiment [PROJECT]            Show the next measured product test; no model
+  local-ai.cmd experiment-run [PROJECT]        Run that test locally and return its receipt
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
@@ -74,6 +76,7 @@ Examples:
   local-ai.cmd vision-lite
   local-ai.cmd plan "Design a product customers can buy" --project "New Product"
   local-ai.cmd experiment "New Product"
+  local-ai.cmd experiment-run "New Product"
   local-ai.cmd work "Create a 30-day launch plan" --project "New Product"
   local-ai.cmd later "Review pricing and customer risks" --project "New Product"
   local-ai.cmd new "New Product" --description "Private product R&D"
@@ -104,6 +107,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if len(tail) > 1 or (tail and not tail[0].strip()):
             raise ValueError("experiment_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "experiment", "Plan the next category-balanced measured product test without loading a model.", False, False)
+    if name == "experiment-run":
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError("experiment_run_accepts_at_most_one_project")
+        return LaunchAction(tuple(tail), "experiment-run", "Run the next planned product test locally and return a receipt without recording human evidence.", True, False)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -194,8 +201,8 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
-def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
-    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+def _product_experiment_plan(action: LaunchAction, root: Path) -> dict[str, object]:
+    project_root = root
     source = str(project_root / "src")
     if source not in sys.path:
         sys.path.insert(0, source)
@@ -214,11 +221,79 @@ def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
             raise ValueError("experiment_focus_project_missing")
         project = candidate
     try:
-        result = CompanyTools(home).product_experiment_next({"project": project})
+        return CompanyTools(home).product_experiment_next({"project": project})
     except ProtocolError as error:
         raise ValueError(error.message) from error
+
+
+def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    result = _product_experiment_plan(action, project_root)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
+
+
+def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    plan = _product_experiment_plan(action, project_root)
+    experiment = plan.get("experiment")
+    if plan.get("status") != "experiment_ready" or not isinstance(experiment, dict):
+        print(json.dumps({
+            "schema": EXPERIMENT_RUN_SCHEMA, "ok": True, "status": "not_needed",
+            "reason": "product_evidence_milestone_reached", "plan": plan,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+        return 0
+    prompt = experiment.get("prompt")
+    required_actions = experiment.get("requiredActions")
+    if not isinstance(prompt, str) or not isinstance(required_actions, list):
+        raise ValueError("experiment_plan_invalid")
+    completed = subprocess.run(
+        [sys.executable, str(project_root / "scripts" / "run_local_company_prompt.py"), prompt],
+        cwd=project_root, capture_output=True, text=True, check=False,
+    )
+    candidate = completed.stdout.strip() or completed.stderr.strip()
+    if len(candidate) > 65_536:
+        raise ValueError("experiment_runner_receipt_too_large")
+    try:
+        runner_receipt = json.loads(candidate)
+    except json.JSONDecodeError as error:
+        raise ValueError("experiment_runner_receipt_invalid") from error
+    if not isinstance(runner_receipt, dict) or runner_receipt.get("schema") != "local-ai.company-prompt-result.v1":
+        raise ValueError("experiment_runner_receipt_invalid")
+    observed_actions = runner_receipt.get("toolActions", [])
+    if not isinstance(observed_actions, list):
+        observed_actions = []
+    missing_actions = [name for name in required_actions if name not in observed_actions]
+    accepted = completed.returncode == 0 and runner_receipt.get("ok") is True and not missing_actions
+    status = (
+        "accepted" if accepted else
+        "rejected" if completed.returncode == 0 else
+        runner_receipt.get("status", "blocked")
+    )
+    reason = (
+        "accepted" if accepted else
+        "required_company_actions_missing" if completed.returncode == 0 and missing_actions else
+        runner_receipt.get("reason", "experiment_runner_failed")
+    )
+    output = {
+        "schema": EXPERIMENT_RUN_SCHEMA, "ok": accepted, "status": status,
+        "reason": reason, "project": plan["project"],
+        "selectedCategory": plan["selectedCategory"], "label": experiment.get("label"),
+        "requiredActions": required_actions, "missingActions": missing_actions,
+        "runnerReceipt": runner_receipt,
+        "humanReviewRecorded": False,
+        "nextAction": (
+            "perform_actual_human_review_then_call_product_experiment_review"
+            if accepted else "resolve_runner_block_or_failed_acceptance_check"
+        ),
+        "modelCalled": runner_receipt.get("modelCalled") is True,
+        "stateMutated": False,
+        "externalActionPerformed": runner_receipt.get("externalActionPerformed") is True,
+    }
+    print(json.dumps(output, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0 if accepted else 1
 
 
 def run_code(action: LaunchAction, root: Path | None = None) -> int:
@@ -541,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
             return switch_project(action)
         if action.mode == "experiment":
             return run_experiment(action)
+        if action.mode == "experiment-run":
+            return run_experiment_agent(action)
         if action.mode == "work":
             return run_work(action)
         if action.mode == "cycle":

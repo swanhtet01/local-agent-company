@@ -10,6 +10,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd check
 .\local-ai.cmd plan "Design a useful product I can validate and sell"
 .\local-ai.cmd experiment
+.\local-ai.cmd experiment-run
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
@@ -41,6 +42,7 @@ zero-model command (it uses the active project), or name a project explicitly:
 ```powershell
 .\local-ai.cmd experiment
 .\local-ai.cmd experiment "Local AI Product Lab"
+.\local-ai.cmd experiment-run "Local AI Product Lab"
 ```
 
 The same planner is accessible conversationally by asking the company agent:
@@ -54,6 +56,12 @@ bounded prompt for `local-company-agent.cmd --run`, and lists the machine and
 human acceptance checks. Planning is read-only: it does not load a model,
 change company state, claim customer demand, or record a review. After the run,
 record only measurements and judgments that actually occurred.
+
+`experiment-run` removes the copy/paste step: it obtains the current balanced
+plan, invokes the receipt-bound local-company agent, and verifies that every
+planned tool action actually occurred. It never records the human review. Low
+memory, runner failure, or a skipped action returns a fail-closed receipt for a
+later retry.
 
 Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `cycle` is the bounded autonomy entrypoint: it materializes due schedules, performs an exact ID-bound preflight, and runs at most one mission only when focus, evidence, resources, and owner gates pass. With no due work or an owner gate, it exits without calling a model. It never loops, sends externally, spends money, deploys, or retries a failed result. A Windows scheduled task may invoke one cycle periodically, but registering that task remains an explicit owner action. `explain` reports whether a command can call a model or change local state without running it:
 

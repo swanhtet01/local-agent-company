@@ -78,3 +78,6 @@ experiment. They balance category coverage, provide the
 exact local runner prompt and objective checks, and leaves acceptance,
 corrections, and paid-setup demand as explicit human observations. This keeps
 autonomous iteration useful without manufacturing product-market evidence.
+`local-ai.cmd experiment-run` can execute that planned prompt and bind the
+runner receipt to its required tool actions, but it deliberately stops before
+the human acceptance and paid-setup judgment.
