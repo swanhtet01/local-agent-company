@@ -9,6 +9,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd help
 .\local-ai.cmd check
 .\local-ai.cmd plan "Design a useful product I can validate and sell"
+.\local-ai.cmd experiment
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
@@ -34,8 +35,15 @@ The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
 only the dedicated OpenCode agent backed by the locally selected Qwen model.
 
-To get a concrete product experiment instead of an open-ended chat, ask the
-company agent:
+To get a concrete product experiment instead of an open-ended chat, run this
+zero-model command (it uses the active project), or name a project explicitly:
+
+```powershell
+.\local-ai.cmd experiment
+.\local-ai.cmd experiment "Local AI Product Lab"
+```
+
+The same planner is accessible conversationally by asking the company agent:
 
 ```text
 Call product_experiment_next for Local AI Product Lab and show me the runner invocation.

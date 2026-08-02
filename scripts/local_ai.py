@@ -45,6 +45,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd vision [--check] [PROJECT]     Use the full local Vision product agent
   local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
   local-ai.cmd plan "OBJECTIVE" [options]     Preview the team and gates; no model
+  local-ai.cmd experiment [PROJECT]            Show the next measured product test; no model
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
@@ -72,6 +73,7 @@ Examples:
   local-ai.cmd vision-lite --check
   local-ai.cmd vision-lite
   local-ai.cmd plan "Design a product customers can buy" --project "New Product"
+  local-ai.cmd experiment "New Product"
   local-ai.cmd work "Create a 30-day launch plan" --project "New Product"
   local-ai.cmd later "Review pricing and customer risks" --project "New Product"
   local-ai.cmd new "New Product" --description "Private product R&D"
@@ -98,6 +100,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         return LaunchAction(("doctor", *tail), "check", "Check the local model dependency without generating text.", False, False)
     if name == "plan":
         return LaunchAction(("preflight", *_require_tail(name, tail)), "plan", "Preview the team, evidence, and owner gates without starting work.", False, False)
+    if name == "experiment":
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError("experiment_accepts_at_most_one_project")
+        return LaunchAction(tuple(tail), "experiment", "Plan the next category-balanced measured product test without loading a model.", False, False)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -186,6 +192,33 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
         check=False,
     )
     return completed.returncode
+
+
+def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.focus import read_execution_focus
+    from local_company.mcp_server import CompanyTools, ProtocolError
+
+    home = default_company_home()
+    project = action.command[0] if action.command else None
+    if project is None:
+        focus = read_execution_focus(home)
+        if focus.get("enabled") is not True:
+            raise ValueError("experiment_project_required_or_enable_focus")
+        candidate = focus.get("projectId") or focus.get("projectName")
+        if not isinstance(candidate, str) or not candidate:
+            raise ValueError("experiment_focus_project_missing")
+        project = candidate
+    try:
+        result = CompanyTools(home).product_experiment_next({"project": project})
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
 
 
 def run_code(action: LaunchAction, root: Path | None = None) -> int:
@@ -506,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_autopilot(action)
         if action.mode == "use":
             return switch_project(action)
+        if action.mode == "experiment":
+            return run_experiment(action)
         if action.mode == "work":
             return run_work(action)
         if action.mode == "cycle":

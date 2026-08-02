@@ -9,13 +9,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
     def test_friendly_modes_translate_to_existing_bounded_commands(self) -> None:
         self.assertEqual(translate(["plan", "Invent a product"]).command, ("preflight", "Invent a product"))
+        self.assertEqual(translate(["experiment"]).command, ())
+        self.assertEqual(translate(["experiment", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["work", "Build a plan"]).command, ("run", "Build a plan"))
         self.assertEqual(translate(["later", "Research market"]).command, ("queue", "add", "Research market"))
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
@@ -69,6 +71,24 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(command[-4:], ["preflight", "Quote ; & $() exactly", "--project", "Future Product"])
             self.assertEqual(run.call_args.kwargs["cwd"], root)
             self.assertFalse(run.call_args.kwargs["check"])
+
+    def test_experiment_planner_runs_without_model_or_state_mutation(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            Company(home, MockModel()).create_project("Future Lab")
+            output = io.StringIO()
+            with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(output):
+                self.assertEqual(
+                    run_experiment(translate(["experiment", "Future Lab"])), 0,
+                )
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "experiment_ready")
+            self.assertEqual(receipt["selectedCategory"], "coding")
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
 
     def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")
