@@ -85,6 +85,19 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
         self.assertIn('set "OPENCODE_AGENT=vision-campaign"', source)
         self.assertIn('call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL% --agent "%OPENCODE_AGENT%"', source)
 
+    def test_windows_launchers_route_dedicated_governed_company_agent(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        code = (root / "local-code.cmd").read_text(encoding="utf-8")
+        company = (root / "local-company-agent.cmd").read_text(encoding="utf-8")
+        self.assertIn('if /I "%~1"=="--company" (', code)
+        self.assertIn('set "OPENCODE_AGENT=local-company"', code)
+        self.assertIn("get('local_company',{}).get('enabled') is True", company)
+        self.assertIn("get('local_company_*') is True", company)
+        self.assertIn('call "%COMPANY_ROOT%local-code.cmd" --company --check "%COMPANY_ROOT%"', company)
+        self.assertIn("if errorlevel 1 exit /b 3", company)
+        self.assertIn('call "%COMPANY_ROOT%local-code.cmd" --company "%COMPANY_ROOT%"', company)
+        self.assertNotIn("--model openai/", company.lower())
+
     @staticmethod
     def _fixture(directory: str) -> tuple[Path, Path]:
         root = Path(directory) / "repo"

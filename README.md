@@ -22,6 +22,18 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd dashboard
 ```
 
+For the dedicated conversational company interface, double-click **SuperMega
+Local Company** on the Windows desktop or run:
+
+```powershell
+.\local-company-agent.cmd
+.\local-company-agent.cmd --check
+```
+
+The check verifies the installed local model, Ollama, OpenCode, and the governed
+`local-company` MCP profile without loading a model. The normal launcher opens
+only the dedicated OpenCode agent backed by the locally selected Qwen model.
+
 Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `cycle` is the bounded autonomy entrypoint: it materializes due schedules, performs an exact ID-bound preflight, and runs at most one mission only when focus, evidence, resources, and owner gates pass. With no due work or an owner gate, it exits without calling a model. It never loops, sends externally, spends money, deploys, or retries a failed result. A Windows scheduled task may invoke one cycle periodically, but registering that task remains an explicit owner action. `explain` reports whether a command can call a model or change local state without running it:
 
 Immediately before queue execution, `cycle` rechecks current physical memory

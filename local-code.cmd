@@ -2,6 +2,10 @@
 setlocal
 
 set "OPENCODE_AGENT="
+if /I "%~1"=="--company" (
+  set "OPENCODE_AGENT=local-company"
+  shift
+)
 if /I "%~1"=="--vision-lite" (
   set "OPENCODE_AGENT=vision-campaign"
   shift
