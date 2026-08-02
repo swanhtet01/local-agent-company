@@ -367,10 +367,19 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             "modelCalled": False, "memoryShortfallBytes": 123,
             "report": "C:\\private\\report.md", "secret": "SENTINEL",
         }
+        pending = {
+            "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
+            "count": 1, "items": [{"response": "SENTINEL"}],
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
         with tempfile.TemporaryDirectory() as directory, patch(
             "scripts.run_scheduled_cycle.subprocess.run",
-            return_value=subprocess.CompletedProcess([], 0, "raw SENTINEL\n" + json.dumps(cycle) + "\n", ""),
-        ):
+        ) as run:
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "raw SENTINEL\n" + json.dumps(cycle) + "\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(pending), ""),
+            ]
             root = Path(directory) / "local-agent-company"
             state = Path(directory) / "state"
             (root / "scripts").mkdir(parents=True)
@@ -380,6 +389,8 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(journal["schema"], SCHEDULED_CYCLE_SCHEMA)
             self.assertEqual(journal["cycle"]["reason"], "no_due_mission")
+            self.assertEqual(journal["experiment"]["status"], "awaiting_human_review")
+            self.assertEqual(run.call_count, 2)
             stored = (state / "autopilot-cycle-result.json").read_text(encoding="utf-8")
             self.assertNotIn("SENTINEL", stored)
             self.assertNotIn("report.md", stored)
@@ -410,6 +421,11 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             "schema": "local-ai.cycle-result.v1", "status": "no_due_mission",
             "reason": "no_due_mission", "missionsRun": 0, "modelCalled": False,
         }) + "\n"
+        pending = json.dumps({
+            "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
+            "count": 1, "items": [], "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        })
         trim = json.dumps({
             "contract": "supermega.ally-working-set-trim.v1", "ok": True,
             "mode": "apply", "targetCount": 3, "trimSucceeded": 3,
@@ -433,14 +449,115 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 subprocess.CompletedProcess([], 0, blocked, ""),
                 subprocess.CompletedProcess([], 0, trim, ""),
                 subprocess.CompletedProcess([], 0, ready, ""),
+                subprocess.CompletedProcess([], 0, pending, ""),
             ]
             with redirect_stdout(io.StringIO()):
                 code, journal = run_scheduled_cycle(root, state, settle=lambda _seconds: None)
             self.assertEqual(code, 0)
-            self.assertEqual(run.call_count, 3)
+            self.assertEqual(run.call_count, 4)
             self.assertEqual(journal["cycle"]["status"], "no_due_mission")
             self.assertEqual(journal["memoryRecovery"]["releasedWorkingSetMb"], 512.5)
             self.assertEqual(journal["memoryRecovery"]["processTerminationCalls"], 0)
+            self.assertEqual(journal["experiment"]["status"], "awaiting_human_review")
+
+    def test_scheduled_cycle_runs_one_experiment_only_when_queue_and_inbox_are_empty(self) -> None:
+        cycle = json.dumps({
+            "schema": "local-ai.cycle-result.v1", "status": "no_due_mission",
+            "reason": "no_due_mission", "missionsRun": 0, "modelCalled": False,
+        })
+        pending = json.dumps({
+            "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
+            "count": 0, "items": [], "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        })
+        experiment = json.dumps({
+            "schema": "local-ai.experiment-run.v1", "status": "accepted",
+            "reason": "accepted", "ok": True, "selectedCategory": "coding",
+            "label": "Coding operability review", "pendingExperimentId": "a" * 12,
+            "pendingReceiptStored": True, "attemptCount": 1,
+            "modelCalled": True, "stateMutated": True,
+            "externalActionPerformed": False,
+            "runnerReceipt": {"response": "PRIVATE SENTINEL"},
+        })
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+        ) as run:
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, cycle, ""),
+                subprocess.CompletedProcess([], 0, pending, ""),
+                subprocess.CompletedProcess([], 0, experiment, ""),
+            ]
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state)
+            self.assertEqual(code, 0)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(run.call_args.args[0][-2:], ["experiment-run", "--recover-memory"])
+            self.assertEqual(journal["experiment"]["status"], "accepted")
+            self.assertEqual(journal["experiment"]["pendingExperimentId"], "a" * 12)
+            self.assertEqual(journal["controls"]["maximumExperimentsPerCycle"], 1)
+            self.assertTrue(journal["controls"]["humanReviewRequired"])
+            stored = (state / "autopilot-cycle-result.json").read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE SENTINEL", stored)
+
+    def test_scheduled_cycle_never_runs_experiment_after_a_mission(self) -> None:
+        completed_cycle = json.dumps({
+            "schema": "local-ai.cycle-result.v1", "status": "completed",
+            "reason": "completed", "queueId": "a" * 12, "missionsRun": 1,
+            "modelCalled": True, "qualityPassed": True,
+            "modelUnloadedAfterRun": True,
+        })
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, completed_cycle, ""),
+        ) as run:
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state)
+            self.assertEqual(code, 0)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(journal["cycle"]["missionsRun"], 1)
+            self.assertNotIn("experiment", journal)
+
+    def test_scheduled_cycle_rejects_unsafe_experiment_receipt_without_raw_output(self) -> None:
+        cycle = json.dumps({
+            "schema": "local-ai.cycle-result.v1", "status": "no_due_mission",
+            "reason": "no_due_mission", "missionsRun": 0, "modelCalled": False,
+        })
+        pending = json.dumps({
+            "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
+            "count": 0, "items": [], "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        })
+        unsafe = json.dumps({
+            "schema": "local-ai.experiment-run.v1", "status": "accepted",
+            "reason": "accepted", "modelCalled": True, "stateMutated": True,
+            "externalActionPerformed": True, "response": "PRIVATE SENTINEL",
+        })
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+        ) as run:
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, cycle, ""),
+                subprocess.CompletedProcess([], 0, pending, ""),
+                subprocess.CompletedProcess([], 0, unsafe, ""),
+            ]
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state)
+            self.assertEqual(code, 2)
+            self.assertEqual(journal["reason"], "scheduled_experiment_receipt_invalid")
+            stored = (state / "autopilot-cycle-result.json").read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE SENTINEL", stored)
 
     def test_vision_modes_default_to_installed_vision_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:

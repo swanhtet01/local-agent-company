@@ -119,6 +119,12 @@ memory, the runner applies that verified trim once, validates its zero-
 termination/zero-file/zero-network receipt, waits three seconds, and retries
 the cycle exactly once. Invalid recovery evidence stops the task without a
 queue claim or model call.
+When a verified cycle has no due mission, the same serial task checks the
+pending product-experiment inbox. It runs at most one measured headless
+experiment only when that inbox is empty; otherwise it waits for human review
+without loading a model. A mission always has priority. The bounded task
+journal records experiment status and the opaque pending ID but never stores
+the prompt, model response, or full runner receipt.
 Scheduled starts now wait for ten minutes of Windows idle time, for up to six
 hours after each trigger. This targets the window where Codex and desktop UI
 working sets are least likely to refill immediately after trimming. Once an

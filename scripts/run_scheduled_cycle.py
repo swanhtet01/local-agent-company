@@ -13,6 +13,8 @@ from typing import Callable
 
 SCHEMA = "local-ai.scheduled-cycle-result.v1"
 CYCLE_SCHEMA = "local-ai.cycle-result.v1"
+PENDING_SCHEMA = "local-ai.pending-product-experiments.v1"
+EXPERIMENT_SCHEMA = "local-ai.experiment-run.v1"
 TRIM_SCHEMA = "supermega.ally-working-set-trim.v1"
 MAX_CAPTURE_CHARS = 262_144
 MAX_JOURNAL_BYTES = 65_536
@@ -22,9 +24,14 @@ ALLOWED_CYCLE_FIELDS = (
     "recommendedAction", "availableMemoryBytes", "minimumAvailableBytes",
     "memoryShortfallBytes", "ownerGateCategories", "blockers",
 )
+ALLOWED_EXPERIMENT_FIELDS = (
+    "status", "reason", "ok", "selectedCategory", "label",
+    "pendingExperimentId", "pendingReceiptStored", "attemptCount",
+    "modelCalled", "stateMutated", "externalActionPerformed",
+)
 
 
-def _cycle_receipt(stdout: str, stderr: str) -> dict[str, object] | None:
+def _json_receipt(stdout: str, stderr: str, schema: str) -> dict[str, object] | None:
     if len(stdout) > MAX_CAPTURE_CHARS or len(stderr) > MAX_CAPTURE_CHARS:
         return None
     for line in reversed((stdout + "\n" + stderr).splitlines()):
@@ -34,9 +41,16 @@ def _cycle_receipt(stdout: str, stderr: str) -> dict[str, object] | None:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and value.get("schema") == CYCLE_SCHEMA:
-            return {key: value[key] for key in ALLOWED_CYCLE_FIELDS if key in value}
+        if isinstance(value, dict) and value.get("schema") == schema:
+            return value
     return None
+
+
+def _cycle_receipt(stdout: str, stderr: str) -> dict[str, object] | None:
+    value = _json_receipt(stdout, stderr, CYCLE_SCHEMA)
+    if value is None:
+        return None
+    return {key: value[key] for key in ALLOWED_CYCLE_FIELDS if key in value}
 
 
 def _atomic_write(path: Path, value: dict[str, object]) -> None:
@@ -66,6 +80,60 @@ def _invoke_cycle(root: Path, launcher: Path) -> tuple[int, dict[str, object] | 
         cwd=root, check=False, capture_output=True, text=True, timeout=7200,
     )
     return completed.returncode, _cycle_receipt(completed.stdout, completed.stderr)
+
+
+def _invoke_launchpad(
+    root: Path, launcher: Path, arguments: list[str], schema: str,
+) -> tuple[int, dict[str, object] | None]:
+    completed = subprocess.run(
+        [sys.executable, str(launcher), *arguments], cwd=root, check=False,
+        capture_output=True, text=True, timeout=1800,
+    )
+    return completed.returncode, _json_receipt(completed.stdout, completed.stderr, schema)
+
+
+def _scheduled_experiment(
+    root: Path, launcher: Path, *, memory_already_recovered: bool,
+) -> tuple[int, dict[str, object] | None]:
+    pending_code, pending = _invoke_launchpad(
+        root, launcher, ["experiment-pending"], PENDING_SCHEMA,
+    )
+    if (
+        pending_code != 0 or pending is None
+        or pending.get("status") != "ready"
+        or type(pending.get("count")) is not int
+        or not 0 <= pending["count"] <= 100
+        or pending.get("modelCalled") is not False
+        or pending.get("stateMutated") is not False
+        or pending.get("externalActionPerformed") is not False
+    ):
+        return 2, None
+    if pending["count"]:
+        return 0, {
+            "status": "awaiting_human_review", "reason": "pending_experiment_exists",
+            "pendingCount": pending["count"], "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        }
+    command = ["experiment-run"]
+    if not memory_already_recovered:
+        command.append("--recover-memory")
+    experiment_code, experiment = _invoke_launchpad(
+        root, launcher, command, EXPERIMENT_SCHEMA,
+    )
+    if (
+        experiment is None
+        or experiment.get("externalActionPerformed") is not False
+        or type(experiment.get("modelCalled")) is not bool
+        or type(experiment.get("stateMutated")) is not bool
+        or type(experiment.get("status")) is not str
+        or type(experiment.get("reason")) is not str
+    ):
+        return 2, None
+    bounded = {
+        key: experiment[key] for key in ALLOWED_EXPERIMENT_FIELDS if key in experiment
+    }
+    bounded["processExitCode"] = experiment_code
+    return experiment_code, bounded
 
 
 def _recover_memory(root: Path) -> dict[str, object] | None:
@@ -179,6 +247,41 @@ def run_scheduled_cycle(
             if recovery is not None:
                 journal["memoryRecovery"] = recovery
             exit_code = process_exit_code
+            if (
+                process_exit_code == 0
+                and cycle.get("status") == "no_due_mission"
+                and cycle.get("reason") == "no_due_mission"
+                and cycle.get("missionsRun") == 0
+                and cycle.get("modelCalled") is False
+            ):
+                experiment_code, experiment = _scheduled_experiment(
+                    root, launcher, memory_already_recovered=recovery is not None,
+                )
+                if experiment is None:
+                    journal = {
+                        "schema": SCHEMA, "status": "error",
+                        "reason": "scheduled_experiment_receipt_invalid",
+                        "processExitCode": 2,
+                        "observedAt": now().astimezone(timezone.utc).isoformat(),
+                        "cycle": cycle,
+                        "controls": {
+                            "rawOutputStored": False, "experimentResponseStored": False,
+                            "externalActionPerformed": False,
+                        },
+                    }
+                    if recovery is not None:
+                        journal["memoryRecovery"] = recovery
+                    _atomic_write(journal_path, journal)
+                    print(json.dumps(journal, separators=(",", ":"), sort_keys=True))
+                    return 2, journal
+                journal["experiment"] = experiment
+                journal["controls"].update({
+                    "experimentResponseStored": False,
+                    "maximumExperimentsPerCycle": 1,
+                    "humanReviewRequired": True,
+                })
+                journal["processExitCode"] = experiment_code
+                exit_code = experiment_code
     except subprocess.TimeoutExpired:
         journal = {
             "schema": SCHEMA, "status": "error", "reason": "cycle_timeout",
