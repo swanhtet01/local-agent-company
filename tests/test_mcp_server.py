@@ -284,7 +284,8 @@ class LocalCompanyMcpTests(unittest.TestCase):
             job_id, _ = session.company_tools.company.run("Prepare an internal product decision")
             review = {
                 "jobId": job_id, "category": "business", "decision": "accepted",
-                "corrections": 1, "paidSetupSignal": "yes", "peakMemoryMb": 900,
+                "outcomeReason": "none", "corrections": 1,
+                "paidSetupSignal": "yes", "peakMemoryMb": 900,
             }
             refused = self._call(session, "product_evidence_review", review, 3)
             self.assertEqual(
@@ -304,8 +305,16 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(status["remaining_missions"], 9)
             self.assertEqual(status["decision_counts"]["accepted"], 1)
             self.assertEqual(status["paid_setup_signal_counts"]["yes"], 1)
+            self.assertEqual(status["outcome_reason_counts"]["none"], 1)
             self.assertEqual(len(status["reviews"]), 1)
             self.assertFalse(status["externalActionPerformed"])
+            invalid_reason = self._call(session, "product_evidence_review", {
+                **review, "decision": "rejected", "outcomeReason": "none",
+                "reviewConfirmation": PRODUCT_REVIEW_CONFIRMATION,
+            }, 7)
+            self.assertEqual(
+                invalid_reason["error"]["message"], "invalid_product_outcome_reason",
+            )
 
     def test_next_product_review_excludes_reviewed_jobs_and_stays_pathless(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -360,7 +369,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 "experimentId": "b" * 12,
                 "project": project_id, "label": "Compact status workflow",
                 "category": "business", "decision": "accepted", "corrections": 0,
-                "paidSetupSignal": "unknown", "receipt": receipt,
+                "outcomeReason": "none", "paidSetupSignal": "unknown", "receipt": receipt,
             }
             refused = self._call(session, "product_experiment_review", request, 3)
             self.assertEqual(
@@ -411,6 +420,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
             session.company_tools.company.record_product_experiment_review(
                 project_id, "Existing coding review", "coding", "rejected", 2,
                 "unknown", 10.0, 256, 1, False, "fixture", "a" * 64,
+                outcome_reason="tool_failure",
             )
             second = self._call(session, "product_experiment_next", {
                 "project": project_id,

@@ -42,6 +42,7 @@ from local_company.core import (
     bounded_context_blocks,
     compact_labeled_sections,
     count_words,
+    product_experiment_observation_digest,
     evidence_filename_pairs_valid,
     extract_labeled_sections,
     mark_unverified_advisory,
@@ -1809,7 +1810,7 @@ class CompanyTests(unittest.TestCase):
             result = company.record_product_experiment_review(
                 project_id, "Coding attempt", "coding", "rejected", 0,
                 "unknown", 12.5, 256, 0, False, "local-agent/model",
-                artifact_sha256,
+                artifact_sha256, outcome_reason="tool_failure",
             )
             self.assertRegex(result["experiment_id"], r"^[0-9a-f]{12}$")
             self.assertRegex(result["observation_sha256"], r"^[0-9a-f]{64}$")
@@ -1819,6 +1820,27 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(status["category_counts"]["coding"], 1)
             self.assertEqual(status["reviews"][0]["integrity"], "sealed_observation")
             self.assertFalse(status["reviews"][0]["checks_passed"])
+            self.assertEqual(status["reviews"][0]["outcome_reason"], "tool_failure")
+            self.assertEqual(status["outcome_reason_counts"]["tool_failure"], 1)
+            legacy = {
+                key: value for key, value in result.items()
+                if key in {
+                    "artifact_sha256", "category", "checks_passed", "corrections",
+                    "decision", "exit_code", "experiment_id", "label",
+                    "paid_setup_signal", "peak_memory_mb", "project_id", "runner",
+                    "runtime_seconds",
+                }
+            }
+            with closing(sqlite3.connect(company.db_path)) as db, db:
+                db.execute(
+                    "UPDATE product_experiment_reviews SET outcome_reason=NULL, "
+                    "observation_sha256=? WHERE id=?",
+                    (product_experiment_observation_digest(legacy), result["review_id"]),
+                )
+            legacy_status = company.product_evidence_status("Experiment Lab")
+            self.assertEqual(legacy_status["reviewed_missions"], 1)
+            self.assertEqual(legacy_status["legacy_outcome_reason_count"], 1)
+            self.assertIn("classified_review_outcomes", legacy_status["missing_proof"])
             with closing(sqlite3.connect(company.db_path)) as db, db:
                 db.execute(
                     "UPDATE product_experiment_reviews SET runtime_seconds=99 WHERE id=?",

@@ -33,6 +33,10 @@ PRODUCT_REVIEW_CONFIRMATION = "RECORD HUMAN PRODUCT EVIDENCE REVIEW"
 PRODUCT_EXPERIMENT_CONFIRMATION = "RECORD HUMAN PRODUCT EXPERIMENT REVIEW"
 COMPANY_PROMPT_RECEIPT_SCHEMA = "local-ai.company-prompt-result.v1"
 PRODUCT_EXPERIMENT_CATEGORIES = ("coding", "business", "data-research")
+PRODUCT_OUTCOME_REASONS = (
+    "none", "inaccurate", "incomplete", "not_actionable", "too_slow",
+    "too_resource_heavy", "unsafe", "tool_failure", "other",
+)
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -367,7 +371,7 @@ class CompanyTools:
     def product_evidence_review(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(arguments, {
             "jobId", "category", "decision", "corrections", "paidSetupSignal",
-            "peakMemoryMb", "reviewConfirmation",
+            "peakMemoryMb", "outcomeReason", "reviewConfirmation",
         })
         if value.get("reviewConfirmation") != PRODUCT_REVIEW_CONFIRMATION:
             raise ProtocolError(-32602, "product_review_confirmation_required")
@@ -376,6 +380,7 @@ class CompanyTools:
         decision = value.get("decision")
         corrections = value.get("corrections")
         paid_signal = value.get("paidSetupSignal")
+        outcome_reason = value.get("outcomeReason")
         peak_memory = value.get("peakMemoryMb")
         if not isinstance(job_id, str) or QUEUE_ID_PATTERN.fullmatch(job_id) is None:
             raise ProtocolError(-32602, "invalid_job_id")
@@ -387,6 +392,11 @@ class CompanyTools:
             raise ProtocolError(-32602, "invalid_corrections")
         if paid_signal not in {"yes", "no", "unknown"}:
             raise ProtocolError(-32602, "invalid_paid_setup_signal")
+        if outcome_reason is not None and (
+            outcome_reason not in PRODUCT_OUTCOME_REASONS
+            or (decision == "accepted") != (outcome_reason == "none")
+        ):
+            raise ProtocolError(-32602, "invalid_product_outcome_reason")
         if peak_memory is not None and (
             type(peak_memory) is not int or not 1 <= peak_memory <= 1_000_000
         ):
@@ -394,6 +404,7 @@ class CompanyTools:
         try:
             review = self.company.record_product_evidence_review(
                 job_id, category, decision, corrections, paid_signal, peak_memory,
+                outcome_reason,
             )
         except ValueError as error:
             raise ProtocolError(-32602, "invalid_product_review") from error
@@ -476,6 +487,7 @@ class CompanyTools:
             "humanReviewFields": {
                 "category": ["coding", "business", "data-research"],
                 "decision": ["accepted", "rejected"],
+                "outcomeReason": list(PRODUCT_OUTCOME_REASONS),
                 "corrections": "integer from 0 to 100",
                 "paidSetupSignal": ["yes", "no", "unknown"],
                 "peakMemoryMb": "measured positive integer or omit if unmeasured",
@@ -574,6 +586,7 @@ class CompanyTools:
             ] if plan else [],
             "humanReviewFields": {
                 "decision": ["accepted", "rejected"],
+                "outcomeReason": list(PRODUCT_OUTCOME_REASONS),
                 "corrections": "actual integer from 0 to 100",
                 "paidSetupSignal": ["yes", "no", "unknown"],
                 "confirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
@@ -731,7 +744,7 @@ class CompanyTools:
     def product_experiment_review(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(arguments, {
             "experimentId", "project", "label", "category", "decision", "corrections",
-            "paidSetupSignal", "receipt", "reviewConfirmation",
+            "paidSetupSignal", "outcomeReason", "receipt", "reviewConfirmation",
         })
         if value.get("reviewConfirmation") != PRODUCT_EXPERIMENT_CONFIRMATION:
             raise ProtocolError(-32602, "product_experiment_confirmation_required")
@@ -741,6 +754,7 @@ class CompanyTools:
         decision = value.get("decision")
         corrections = value.get("corrections")
         paid_signal = value.get("paidSetupSignal")
+        outcome_reason = value.get("outcomeReason")
         experiment_id = value.get("experimentId")
         if experiment_id is not None and (
             not isinstance(experiment_id, str)
@@ -759,6 +773,11 @@ class CompanyTools:
             raise ProtocolError(-32602, "invalid_corrections")
         if paid_signal not in {"yes", "no", "unknown"}:
             raise ProtocolError(-32602, "invalid_paid_setup_signal")
+        if outcome_reason is not None and (
+            outcome_reason not in PRODUCT_OUTCOME_REASONS
+            or (decision == "accepted") != (outcome_reason == "none")
+        ):
+            raise ProtocolError(-32602, "invalid_product_outcome_reason")
         receipt = self._validated_company_prompt_receipt(value.get("receipt"))
         canonical = json.dumps(
             receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -797,6 +816,7 @@ class CompanyTools:
                 float(receipt["wallSeconds"]), peak_memory_mb,
                 receipt["agentExitCode"], checks_passed,
                 f"local-company/{receipt['model']}", digest, experiment_id,
+                outcome_reason,
             )
         except ValueError as error:
             if created_file:

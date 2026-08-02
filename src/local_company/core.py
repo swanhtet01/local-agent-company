@@ -239,6 +239,10 @@ PRODUCT_EVIDENCE_STATUS_SCHEMA = "local-company.product-evidence-status.v1"
 PRODUCT_EVIDENCE_CATEGORIES = frozenset({"coding", "business", "data-research"})
 PRODUCT_EVIDENCE_DECISIONS = frozenset({"accepted", "rejected"})
 PRODUCT_EVIDENCE_PAID_SIGNALS = frozenset({"yes", "no", "unknown"})
+PRODUCT_EVIDENCE_OUTCOME_REASONS = frozenset({
+    "none", "inaccurate", "incomplete", "not_actionable", "too_slow",
+    "too_resource_heavy", "unsafe", "tool_failure", "other",
+})
 PRODUCT_EVIDENCE_MISSION_TARGET = 10
 MAX_PRODUCT_EVIDENCE_REVIEWS = 100
 
@@ -1735,6 +1739,15 @@ def product_experiment_observation_digest(values: dict[str, object]) -> str:
     return hashlib.sha256(b"local-company.product-experiment.v1\0" + framed).hexdigest()
 
 
+def validate_product_outcome_reason(decision: str, outcome_reason: str) -> None:
+    if outcome_reason not in PRODUCT_EVIDENCE_OUTCOME_REASONS:
+        raise ValueError("Product outcome reason is invalid")
+    if decision == "accepted" and outcome_reason != "none":
+        raise ValueError("Accepted product evidence requires outcome reason none")
+    if decision == "rejected" and outcome_reason == "none":
+        raise ValueError("Rejected product evidence requires a diagnostic outcome reason")
+
+
 class ExecutionLeaseLost(RuntimeError):
     """Raised when a recovered or superseded worker tries to persist a late result."""
 
@@ -1890,7 +1903,7 @@ class Company:
                     peak_memory_mb INTEGER,
                     report_sha256 TEXT NOT NULL, manifest_sha256 TEXT NOT NULL,
                     evaluation_score INTEGER NOT NULL, evaluator_version TEXT NOT NULL,
-                    reviewed_at TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL, outcome_reason TEXT,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
                 CREATE TABLE IF NOT EXISTS product_experiment_reviews (
@@ -1902,7 +1915,7 @@ class Company:
                     peak_memory_mb INTEGER NOT NULL, exit_code INTEGER NOT NULL,
                     checks_passed INTEGER NOT NULL, runner TEXT NOT NULL,
                     artifact_sha256 TEXT NOT NULL, observation_sha256 TEXT NOT NULL,
-                    reviewed_at TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL, outcome_reason TEXT,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
             """)
@@ -1918,6 +1931,8 @@ class Company:
             self._ensure_column(db, "assignments", "deliverable", "TEXT")
             self._ensure_column(db, "assignments", "sequence", "INTEGER")
             self._ensure_column(db, "evaluation_history", "manifest_sha256", "TEXT")
+            self._ensure_column(db, "product_evidence_reviews", "outcome_reason", "TEXT")
+            self._ensure_column(db, "product_experiment_reviews", "outcome_reason", "TEXT")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -8492,6 +8507,7 @@ class Company:
     def record_product_evidence_review(
         self, job_id: str, category: str, decision: str, corrections: int,
         paid_setup_signal: str, peak_memory_mb: int | None = None,
+        outcome_reason: str | None = None,
     ) -> dict[str, object]:
         """Append one human review bound to the current sealed job evidence."""
         if not isinstance(job_id, str) or re.fullmatch(r"[0-9a-f]{12}", job_id) is None:
@@ -8502,6 +8518,14 @@ class Company:
             )
         if decision not in PRODUCT_EVIDENCE_DECISIONS:
             raise ValueError("Product evidence decision must be accepted or rejected")
+        if outcome_reason is None:
+            stored_outcome_reason = None if decision == "rejected" else "none"
+            resolved_outcome_reason = (
+                "legacy_unspecified" if decision == "rejected" else "none"
+            )
+        else:
+            validate_product_outcome_reason(decision, outcome_reason)
+            stored_outcome_reason = resolved_outcome_reason = outcome_reason
         if type(corrections) is not int or not 0 <= corrections <= 100:
             raise ValueError("Product evidence corrections must be between 0 and 100")
         if paid_setup_signal not in PRODUCT_EVIDENCE_PAID_SIGNALS:
@@ -8563,12 +8587,12 @@ class Company:
                 "INSERT INTO product_evidence_reviews("
                 "job_id, category, decision, corrections, paid_setup_signal, "
                 "runtime_seconds, peak_memory_mb, report_sha256, manifest_sha256, "
-                "evaluation_score, evaluator_version, reviewed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "evaluation_score, evaluator_version, reviewed_at, outcome_reason"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id, category, decision, corrections, paid_setup_signal,
                     runtime_seconds, peak_memory_mb, row[2], row[3], row[5], row[6],
-                    reviewed_at,
+                    reviewed_at, stored_outcome_reason,
                 ),
             )
             review_id = int(cursor.lastrowid)
@@ -8576,6 +8600,7 @@ class Company:
                 "review_id": review_id,
                 "category": category,
                 "decision": decision,
+                "outcome_reason": resolved_outcome_reason,
                 "corrections": corrections,
                 "paid_setup_signal": paid_setup_signal,
                 "peak_memory_recorded": peak_memory_mb is not None,
@@ -8588,6 +8613,7 @@ class Company:
             "decision": decision,
             "corrections": corrections,
             "paid_setup_signal": paid_setup_signal,
+            "outcome_reason": resolved_outcome_reason,
             "runtime_seconds": runtime_seconds,
             "peak_memory_mb": peak_memory_mb,
             "quality_score": row[5],
@@ -8603,6 +8629,7 @@ class Company:
         corrections: int, paid_setup_signal: str, runtime_seconds: float,
         peak_memory_mb: int, exit_code: int, checks_passed: bool, runner: str,
         artifact_sha256: str, experiment_id: str | None = None,
+        outcome_reason: str | None = None,
     ) -> dict[str, object]:
         """Append one sealed observation from a local tool outside the coordinator."""
         self.initialize()
@@ -8619,6 +8646,14 @@ class Company:
             )
         if decision not in PRODUCT_EVIDENCE_DECISIONS:
             raise ValueError("Product evidence decision must be accepted or rejected")
+        if outcome_reason is None:
+            stored_outcome_reason = None if decision == "rejected" else "none"
+            resolved_outcome_reason = (
+                "legacy_unspecified" if decision == "rejected" else "none"
+            )
+        else:
+            validate_product_outcome_reason(decision, outcome_reason)
+            stored_outcome_reason = resolved_outcome_reason = outcome_reason
         if type(corrections) is not int or not 0 <= corrections <= 100:
             raise ValueError("Product evidence corrections must be between 0 and 100")
         if paid_setup_signal not in PRODUCT_EVIDENCE_PAID_SIGNALS:
@@ -8660,6 +8695,8 @@ class Company:
             "runner": normalized_runner,
             "runtime_seconds": runtime_seconds,
         }
+        if stored_outcome_reason is not None:
+            observation["outcome_reason"] = stored_outcome_reason
         observation_sha256 = product_experiment_observation_digest(observation)
         reviewed_at = utc_now()
         with closing(self._connect(immediate=True)) as db, db:
@@ -8667,13 +8704,13 @@ class Company:
                 "INSERT INTO product_experiment_reviews("
                 "experiment_id, project_id, label, category, decision, corrections, "
                 "paid_setup_signal, runtime_seconds, peak_memory_mb, exit_code, "
-                "checks_passed, runner, artifact_sha256, observation_sha256, reviewed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "checks_passed, runner, artifact_sha256, observation_sha256, reviewed_at, "
+                "outcome_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     experiment_id, project_id, normalized_label, category, decision,
                     corrections, paid_setup_signal, runtime_seconds, peak_memory_mb,
                     exit_code, int(checks_passed), normalized_runner, artifact_sha256,
-                    observation_sha256, reviewed_at,
+                    observation_sha256, reviewed_at, stored_outcome_reason,
                 ),
             )
             review_id = int(cursor.lastrowid)
@@ -8682,6 +8719,7 @@ class Company:
             "review_id": review_id,
             "project": {"id": project_id, "name": project_name},
             **observation,
+            "outcome_reason": resolved_outcome_reason,
             "observation_sha256": observation_sha256,
             "external_action_performed": False,
             "model_called_by_recorder": False,
@@ -8711,7 +8749,7 @@ class Company:
                 "r.report_sha256, r.manifest_sha256, r.evaluation_score, "
                 "r.evaluator_version, j.status, j.output_path, j.report_sha256, "
                 "j.evidence_manifest_sha256, e.passed, e.score, h.evaluator_version, "
-                "h.report_sha256, h.manifest_sha256 "
+                "h.report_sha256, h.manifest_sha256, r.outcome_reason "
                 "FROM latest JOIN product_evidence_reviews r ON r.id=latest.review_id "
                 "JOIN jobs j ON j.id=r.job_id LEFT JOIN evaluations e ON e.job_id=j.id "
                 "LEFT JOIN evaluation_history h ON h.id=("
@@ -8732,7 +8770,7 @@ class Company:
                 ") SELECT r.id, r.experiment_id, r.project_id, r.label, r.category, "
                 "r.decision, r.corrections, r.paid_setup_signal, r.runtime_seconds, "
                 "r.peak_memory_mb, r.exit_code, r.checks_passed, r.runner, "
-                "r.artifact_sha256, r.observation_sha256 "
+                "r.artifact_sha256, r.observation_sha256, r.outcome_reason "
                 "FROM latest JOIN product_experiment_reviews r ON r.id=latest.review_id "
                 "ORDER BY r.id DESC LIMIT ?",
                 (project_id, project_id, MAX_PRODUCT_EVIDENCE_REVIEWS),
@@ -8742,13 +8780,29 @@ class Company:
         category_counts = {category: 0 for category in sorted(PRODUCT_EVIDENCE_CATEGORIES)}
         decision_counts = {decision: 0 for decision in sorted(PRODUCT_EVIDENCE_DECISIONS)}
         paid_counts = {signal: 0 for signal in sorted(PRODUCT_EVIDENCE_PAID_SIGNALS)}
+        outcome_reason_counts = {
+            reason: 0 for reason in sorted(PRODUCT_EVIDENCE_OUTCOME_REASONS)
+        }
+        outcome_reason_counts["legacy_unspecified"] = 0
         valid_items: list[dict[str, object]] = []
         stale_review_count = 0
         complete_measurements = 0
         corrections_total = 0
+        legacy_outcome_reason_count = 0
         promotion_candidates: list[str] = []
         promotion_candidate_items: list[dict[str, str]] = []
         for row in rows:
+            outcome_reason = (
+                row[21] if row[21] is not None
+                else ("none" if row[3] == "accepted" else "legacy_unspecified")
+            )
+            outcome_reason_valid = (
+                outcome_reason == "legacy_unspecified"
+                or (
+                    outcome_reason in PRODUCT_EVIDENCE_OUTCOME_REASONS
+                    and (row[3] == "accepted") == (outcome_reason == "none")
+                )
+            )
             integrity_valid = (
                 row[2] in PRODUCT_EVIDENCE_CATEGORIES
                 and row[3] in PRODUCT_EVIDENCE_DECISIONS
@@ -8765,6 +8819,7 @@ class Company:
                 and row[10] == row[17]
                 and row[11] == row[18]
                 and (row[3] != "accepted" or row[16] == 1)
+                and outcome_reason_valid
             )
             if integrity_valid:
                 try:
@@ -8781,6 +8836,9 @@ class Company:
             decision_counts[row[3]] += 1
             paid_counts[row[5]] += 1
             corrections_total += row[4]
+            outcome_reason_counts[outcome_reason] += 1
+            if outcome_reason == "legacy_unspecified":
+                legacy_outcome_reason_count += 1
             if row[7] is not None:
                 complete_measurements += 1
             if row[3] == "accepted" and row[5] == "yes" and row[4] <= 1 and row[7] is not None:
@@ -8792,11 +8850,16 @@ class Company:
                 "source": "coordinator_job", "review_id": row[0],
                 "job_id": row[1], "category": row[2],
                 "decision": row[3], "corrections": row[4],
+                "outcome_reason": outcome_reason,
                 "paid_setup_signal": row[5], "runtime_seconds": row[6],
                 "peak_memory_mb": row[7], "integrity": "current",
             })
 
         for row in experiment_rows:
+            outcome_reason = (
+                row[15] if row[15] is not None
+                else ("none" if row[5] == "accepted" else "legacy_unspecified")
+            )
             observation = {
                 "artifact_sha256": row[13], "category": row[4],
                 "checks_passed": bool(row[11]), "corrections": row[6],
@@ -8806,6 +8869,15 @@ class Company:
                 "project_id": row[2], "runner": row[12],
                 "runtime_seconds": row[8],
             }
+            if row[15] is not None:
+                observation["outcome_reason"] = row[15]
+            outcome_reason_valid = (
+                outcome_reason == "legacy_unspecified"
+                or (
+                    outcome_reason in PRODUCT_EVIDENCE_OUTCOME_REASONS
+                    and (row[5] == "accepted") == (outcome_reason == "none")
+                )
+            )
             integrity_valid = (
                 re.fullmatch(r"[0-9a-f]{12}", row[1] or "") is not None
                 and isinstance(row[3], str) and 1 <= len(row[3]) <= 80
@@ -8823,6 +8895,7 @@ class Company:
                 and re.fullmatch(r"[0-9a-f]{64}", row[14] or "") is not None
                 and product_experiment_observation_digest(observation) == row[14]
                 and (row[5] != "accepted" or (row[10] == 0 and row[11] == 1))
+                and outcome_reason_valid
             )
             if not integrity_valid:
                 stale_review_count += 1
@@ -8831,6 +8904,9 @@ class Company:
             decision_counts[row[5]] += 1
             paid_counts[row[7]] += 1
             corrections_total += row[6]
+            outcome_reason_counts[outcome_reason] += 1
+            if outcome_reason == "legacy_unspecified":
+                legacy_outcome_reason_count += 1
             complete_measurements += 1
             if row[5] == "accepted" and row[7] == "yes" and row[6] <= 1:
                 promotion_candidate_items.append({
@@ -8840,6 +8916,7 @@ class Company:
                 "source": "external_experiment", "review_id": row[0],
                 "experiment_id": row[1], "label": row[3], "category": row[4],
                 "decision": row[5], "corrections": row[6],
+                "outcome_reason": outcome_reason,
                 "paid_setup_signal": row[7], "runtime_seconds": row[8],
                 "peak_memory_mb": row[9], "exit_code": row[10],
                 "checks_passed": bool(row[11]), "runner": row[12],
@@ -8856,6 +8933,7 @@ class Company:
             and reviewed >= PRODUCT_EVIDENCE_MISSION_TARGET
             and not missing_categories
             and complete_measurements >= PRODUCT_EVIDENCE_MISSION_TARGET
+            and legacy_outcome_reason_count == 0
         )
         missing_proof: list[str] = []
         if reviewed < PRODUCT_EVIDENCE_MISSION_TARGET:
@@ -8866,6 +8944,8 @@ class Company:
             missing_proof.append("ten_peak_memory_measurements")
         if stale_review_count:
             missing_proof.append("stale_review_bindings")
+        if legacy_outcome_reason_count:
+            missing_proof.append("classified_review_outcomes")
         if capped:
             missing_proof.append("review_limit_exceeded")
         return {
@@ -8882,6 +8962,8 @@ class Company:
             "missing_categories": missing_categories,
             "decision_counts": decision_counts,
             "paid_setup_signal_counts": paid_counts,
+            "outcome_reason_counts": outcome_reason_counts,
+            "legacy_outcome_reason_count": legacy_outcome_reason_count,
             "complete_measurements": complete_measurements,
             "corrections_total": corrections_total,
             "average_corrections": round(corrections_total / reviewed, 2) if reviewed else None,
