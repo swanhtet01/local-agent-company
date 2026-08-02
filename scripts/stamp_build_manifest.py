@@ -23,6 +23,9 @@ OPERATIONAL_SCRIPT_RELATIVE_PATHS = (
     Path("scripts/check_live_build.py"),
     Path("scripts/check_readiness.py"),
     Path("scripts/check_runtime_supervisor.py"),
+    Path("scripts/local_ai.py"),
+    Path("scripts/run_local_company_prompt.py"),
+    Path("scripts/run_scheduled_cycle.py"),
     Path("scripts/runtime_guard.py"),
     Path("scripts/stamp_build_manifest.py"),
 )
@@ -48,7 +51,7 @@ Git reads to construct its health response.
 MANIFEST_DOCSTRING = """Generated, read-only identity for the local runtime build.
 
 The release digest covers every Python file in this package except this manifest,
-plus the fixed local lifecycle scripts used to check, recover, and verify it.
+plus the fixed local lifecycle and orchestration scripts used to operate it.
 Release validation recomputes it; the running service performs no filesystem or
 Git reads to construct its health response.
 """

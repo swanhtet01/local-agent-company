@@ -3930,6 +3930,9 @@ class CompanyTests(unittest.TestCase):
                 "scripts/check_live_build.py",
                 "scripts/check_readiness.py",
                 "scripts/check_runtime_supervisor.py",
+                "scripts/local_ai.py",
+                "scripts/run_local_company_prompt.py",
+                "scripts/run_scheduled_cycle.py",
                 "scripts/runtime_guard.py",
                 "scripts/stamp_build_manifest.py",
             )
@@ -3942,6 +3945,8 @@ class CompanyTests(unittest.TestCase):
             {
                 "scripts/check_live_build.py", "scripts/check_readiness.py",
                 "scripts/check_runtime_supervisor.py",
+                "scripts/local_ai.py", "scripts/run_local_company_prompt.py",
+                "scripts/run_scheduled_cycle.py",
                 "scripts/runtime_guard.py", "scripts/stamp_build_manifest.py",
                 "src/local_company/__init__.py", "src/local_company/cli.py",
                 "src/local_company/capacity.py",
