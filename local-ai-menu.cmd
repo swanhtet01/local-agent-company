@@ -14,12 +14,14 @@ echo 5. Inspect and review a completed product experiment ^(no model^)
 echo 6. Check whether a workflow is ready to package and sell ^(no model^)
 echo 7. Open local coding agent for a project
 echo 8. Check local AI readiness
-echo 9. Start local dashboard
+echo 9. Run one ready company mission ^(safe memory recovery^)
+echo A. Start local dashboard
 echo 0. Exit
 echo.
-choice /c 1234567890 /n /m "Choose 0-9: "
-if errorlevel 10 exit /b 0
-if errorlevel 9 goto dashboard
+choice /c 123456789A0 /n /m "Choose 0-9 or A: "
+if errorlevel 11 exit /b 0
+if errorlevel 10 goto dashboard
+if errorlevel 9 goto cycle
 if errorlevel 8 goto check
 if errorlevel 7 goto code
 if errorlevel 6 goto offer
@@ -72,6 +74,12 @@ goto menu
 
 :check
 call "%LOCAL_AI_ROOT%local-company-agent.cmd" --check
+echo.
+pause
+goto menu
+
+:cycle
+call "%LOCAL_AI_ROOT%local-ai.cmd" cycle --recover-memory
 echo.
 pause
 goto menu

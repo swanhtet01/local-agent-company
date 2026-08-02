@@ -52,6 +52,9 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
         self.assertEqual(translate(["run-next"]).command, ("queue", "run-next"))
         self.assertEqual(translate(["cycle", "--model", "local"]).command, ("--model", "local"))
+        self.assertEqual(translate(["cycle", "--recover-memory"]).command, ("--recover-memory",))
+        with self.assertRaisesRegex(ValueError, "cycle_recover_memory_may_be_used_once"):
+            translate(["cycle", "--recover-memory", "--recover-memory"])
         self.assertEqual(translate(["dashboard"]).command, ("service", "start"))
         self.assertEqual(translate(["data", "list"]).command, ("datasets", "list"))
         self.assertEqual(translate(["new", "Future Lab"]).command, ("projects", "create", "Future Lab"))
@@ -291,15 +294,23 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             (ready, "blocked", ["knowledge_changed"], 1, "evidence_required", True, "review_changed_project_knowledge"),
             (ready, "owner_gate_required", [], 1, "evidence_required", True, "review_queued_mission_owner_gate"),
             (ready, "none", [], 1, "evidence_required", True, "review_pending_product_experiment"),
-            (ready, "ready", [], 0, "ready_for_owner_packaging", True, "let_verified_autopilot_run_next_mission"),
+            (ready, "ready", [], 0, "ready_for_owner_packaging", True, 3 * 1024**3, "run_ready_mission_now_or_await_autopilot"),
+            (ready, "ready", [], 0, "evidence_required", True, 1024**3, "free_memory_then_run_ready_mission"),
+            (ready, "ready", [], 0, "evidence_required", True, None, "inspect_memory_before_ready_mission"),
             (ready, "none", [], 0, "ready_for_owner_packaging", True, "owner_review_sellable_offer"),
             (ready, "none", [], 0, "project_focus_required", False, "select_active_product_project"),
             (ready, "none", [], 0, "evidence_required", True, "await_or_run_next_measured_product_experiment"),
         ]
-        for autonomy, queue, blockers, pending, offer, focus, expected in cases:
+        cases = [
+            (*case[:6], 3 * 1024**3, case[6]) if len(case) == 7 else case
+            for case in cases
+        ]
+        for autonomy, queue, blockers, pending, offer, focus, available, expected in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(
-                    _brief_next_action(autonomy, queue, blockers, pending, offer, focus)[0], expected,
+                    _brief_next_action(
+                        autonomy, queue, blockers, pending, offer, focus, available,
+                    )[0], expected,
                 )
 
     def test_company_brief_is_pathless_model_free_and_queue_actionable(self) -> None:
@@ -323,11 +334,13 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             with (
                 patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
                 patch("scripts.local_ai._read_autopilot_status", return_value=autonomy),
+                patch("scripts.local_ai.available_memory_bytes", return_value=3 * 1024**3),
                 redirect_stdout(output),
             ):
                 self.assertEqual(run_company_brief(translate(["brief"])), 0)
             receipt = json.loads(output.getvalue())
-            self.assertEqual(receipt["nextAction"], "let_verified_autopilot_run_next_mission")
+            self.assertEqual(receipt["nextAction"], "run_ready_mission_now_or_await_autopilot")
+            self.assertTrue(receipt["resources"]["memoryAdmissionReady"])
             self.assertEqual(receipt["product"]["projectName"], "Future Lab")
             self.assertFalse(receipt["modelCalled"])
             self.assertFalse(receipt["stateMutated"])
@@ -348,6 +361,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-ai.cmd" offer', source)
         self.assertIn('local-ai.cmd" code "%LOCAL_AI_PROJECT_PATH%"', source)
         self.assertIn('local-company-agent.cmd" --check', source)
+        self.assertIn('local-ai.cmd" cycle --recover-memory', source)
         self.assertIn('local-ai.cmd" dashboard', source)
         self.assertNotIn("taskkill", source.lower())
         self.assertNotIn("powershell", source.lower())
@@ -792,6 +806,46 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["memoryShortfallBytes"], 1024**3)
             self.assertFalse(receipt["modelCalled"])
             self.assertEqual(run.call_count, 3)
+
+    def test_cycle_can_recover_memory_once_without_forwarding_control_flag(self) -> None:
+        queue_id, job_id = "0123456789ab", "abcdef012345"
+        ready = {
+            "schema": "local-company.queue-preflight.v1", "status": "ready",
+            "queue_id": queue_id, "reviewed_queue_matches": None,
+            "submission_allowed": True, "model_execution_ready": True,
+            "owner_gate_categories": [],
+        }
+        detail = {
+            "job": [job_id, "objective", "complete", "time", "C:\\report.md"],
+            "evaluation": {"passed": True, "score": 100, "checks": {"model_stopped_cleanly": True}},
+        }
+        completion = f"Queue item {queue_id} completed as job {job_id}; quality=passed\nReport: C:\\report.md\n"
+        recovery = {
+            "attempted": True, "status": "completed", "targetCount": 2,
+            "trimSucceeded": 2, "trimFailed": 0, "releasedWorkingSetMb": 900.0,
+            "processTerminationCalls": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.local_ai.subprocess.run",
+        ) as run, patch(
+            "scripts.local_ai.available_memory_bytes", side_effect=[1024**3, 3 * 1024**3],
+        ), patch("scripts.local_ai._recover_memory", return_value=recovery) as recover:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(ready), ""),
+                subprocess.CompletedProcess([], 0, json.dumps({**ready, "reviewed_queue_matches": True}), ""),
+                subprocess.CompletedProcess([], 0, completion, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(detail), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle", "--recover-memory"]), root), 0)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["memoryRecovery"], recovery)
+            self.assertNotIn("--recover-memory", run.call_args_list[3].args[0])
+            recover.assert_called_once_with(root)
 
     def test_cycle_rejects_malformed_preflight_and_user_selected_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "cycle_queue_id"):

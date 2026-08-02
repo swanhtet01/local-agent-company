@@ -68,7 +68,8 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
   local-ai.cmd run-next [options]              Run one due queued mission
-  local-ai.cmd cycle [model options]           Materialize and run at most one mission
+  local-ai.cmd cycle [--recover-memory] [model options]
+                                              Materialize and run at most one mission
   local-ai.cmd autopilot install|status|repair|remove
                                               Manage the six-hour local cycle task
   local-ai.cmd dashboard [options]             Start the local dashboard on 127.0.0.1
@@ -163,6 +164,8 @@ def translate(argv: list[str]) -> LaunchAction | None:
     if name == "cycle":
         if "--queue-id" in tail:
             raise ValueError("cycle_queue_id_is_selected_by_verified_preflight")
+        if tail.count("--recover-memory") > 1:
+            raise ValueError("cycle_recover_memory_may_be_used_once")
         return LaunchAction(tuple(tail), "cycle", "Materialize due schedules and run at most one exact, gate-cleared local mission.", True, True)
     if name == "autopilot":
         if len(tail) != 1 or tail[0].lower() not in {"install", "status", "repair", "remove"}:
@@ -757,7 +760,7 @@ def _read_autopilot_status(project_root: Path) -> dict[str, object]:
 
 def _brief_next_action(
     autonomy: dict[str, object], queue_status: str, queue_blockers: list[str], pending_count: int,
-    offer_status: str, focus_enabled: bool,
+    offer_status: str, focus_enabled: bool, available_memory: int | None,
 ) -> tuple[str, str]:
     if autonomy.get("verified") is not True or autonomy.get("status") != "ready":
         return "repair_autopilot", "local-ai.cmd autopilot repair"
@@ -774,7 +777,11 @@ def _brief_next_action(
     if pending_count:
         return "review_pending_product_experiment", "local-ai.cmd experiment-review-interactive"
     if queue_status == "ready":
-        return "let_verified_autopilot_run_next_mission", "local-ai.cmd autopilot status"
+        if available_memory is None:
+            return "inspect_memory_before_ready_mission", "local-ai.cmd status"
+        if available_memory < CYCLE_MINIMUM_AVAILABLE_BYTES:
+            return "free_memory_then_run_ready_mission", "local-ai.cmd cycle --recover-memory"
+        return "run_ready_mission_now_or_await_autopilot", "local-ai.cmd cycle --recover-memory"
     if offer_status == "ready_for_owner_packaging":
         return "owner_review_sellable_offer", "local-ai.cmd offer"
     if not focus_enabled:
@@ -816,6 +823,10 @@ def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
         "nextRunTime": autonomy_raw.get("nextRunTime"),
         "lastCycleCurrentForLastRun": autonomy_raw.get("lastCycleCurrentForLastRun"),
     }
+    try:
+        available_memory = available_memory_bytes()
+    except RuntimeError:
+        available_memory = None
     queue = company_status["queue"]
     queue_status = str(queue.get("status"))
     queue_blockers = queue.get("blockers")
@@ -825,7 +836,7 @@ def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
     ] if isinstance(queue_blockers, list) else []
     next_action, command = _brief_next_action(
         autonomy, queue_status, bounded_blockers, pending_count, offer_status,
-        focus.get("enabled") is True,
+        focus.get("enabled") is True, available_memory,
     )
     if (
         next_action == "review_changed_project_knowledge"
@@ -844,6 +855,18 @@ def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
             "projectId": focus.get("projectId"), "projectName": focus.get("projectName"),
             "pendingExperimentCount": pending_count,
             "offerStatus": offer_status, "offerMissingProof": offer_missing,
+        },
+        "resources": {
+            "availableMemoryBytes": available_memory,
+            "minimumExecutionMemoryBytes": CYCLE_MINIMUM_AVAILABLE_BYTES,
+            "memoryAdmissionReady": (
+                available_memory >= CYCLE_MINIMUM_AVAILABLE_BYTES
+                if available_memory is not None else None
+            ),
+            "memoryShortfallBytes": (
+                max(0, CYCLE_MINIMUM_AVAILABLE_BYTES - available_memory)
+                if available_memory is not None else None
+            ),
         },
         "nextAction": next_action, "command": command,
         "modelCalled": False, "stateMutated": False,
@@ -1025,6 +1048,28 @@ def run_cycle(action: LaunchAction, root: Path | None = None) -> int:
             minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
         ), separators=(",", ":"), sort_keys=True))
         return 0
+    recovery = None
+    if available < CYCLE_MINIMUM_AVAILABLE_BYTES and "--recover-memory" in action.command:
+        recovery = _recover_memory(project_root)
+        if recovery is None:
+            print(json.dumps(_cycle_receipt(
+                ok=False, status="error", reason="memory_recovery_invalid",
+                schedulesMaterialized=materialized, queueId=queue_id,
+                availableMemoryBytes=available,
+                minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
+                memoryShortfallBytes=CYCLE_MINIMUM_AVAILABLE_BYTES - available,
+            ), separators=(",", ":"), sort_keys=True), file=sys.stderr)
+            return 2
+        try:
+            available = available_memory_bytes()
+        except RuntimeError:
+            print(json.dumps(_cycle_receipt(
+                ok=True, status="blocked", reason="available_memory_unavailable_after_recovery",
+                schedulesMaterialized=materialized, queueId=queue_id,
+                minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
+                memoryRecovery=recovery,
+            ), separators=(",", ":"), sort_keys=True))
+            return 0
     if available < CYCLE_MINIMUM_AVAILABLE_BYTES:
         print(json.dumps(_cycle_receipt(
             ok=True, status="blocked", reason="insufficient_available_memory",
@@ -1032,12 +1077,17 @@ def run_cycle(action: LaunchAction, root: Path | None = None) -> int:
             availableMemoryBytes=available,
             minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
             memoryShortfallBytes=CYCLE_MINIMUM_AVAILABLE_BYTES - available,
-            recommendedAction="close_large_apps_then_run_cycle",
+            recommendedAction=(
+                "close_large_apps_then_run_cycle"
+                if recovery is not None else "run_cycle_with_memory_recovery_or_close_large_apps"
+            ),
+            **({"memoryRecovery": recovery} if recovery is not None else {}),
         ), separators=(",", ":"), sort_keys=True))
         return 0
 
+    execution_arguments = [item for item in action.command if item != "--recover-memory"]
     executed = _company_process(
-        ["queue", "run-next", "--queue-id", queue_id, *action.command],
+        ["queue", "run-next", "--queue-id", queue_id, *execution_arguments],
         project_root, environment,
     )
     sys.stdout.write(executed.stdout)
@@ -1074,6 +1124,7 @@ def run_cycle(action: LaunchAction, root: Path | None = None) -> int:
         report=report_path,
         modelUnloadedAfterRun=evaluation.get("checks", {}).get("model_stopped_cleanly") is True,
         recommendedAction="review_accepted_report" if passed else "review_failure_before_any_retry",
+        **({"memoryRecovery": recovery} if recovery is not None else {}),
     ), separators=(",", ":"), sort_keys=True))
     return 0 if passed else 1
 

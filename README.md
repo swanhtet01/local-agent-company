@@ -17,7 +17,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
-.\local-ai.cmd cycle
+.\local-ai.cmd cycle --recover-memory
 .\local-ai.cmd autopilot status
 .\local-ai.cmd brief
 .\local-ai.cmd autopilot install
@@ -40,13 +40,15 @@ For the complete one-click control panel, double-click **SuperMega Local AI
 Lab** on the desktop. Its fixed choices open company chat, show one bounded
 company brief, plan or run a measured product experiment, inspect and
 explicitly review a saved result, check whether evidence supports a sellable
-offer, launch a coding agent for a chosen folder, check readiness, start the
-loopback dashboard, or exit. The menu itself loads no model and grants no
+offer, launch a coding agent for a chosen folder, check readiness, run one
+ready company mission with safe memory recovery, start the loopback dashboard,
+or exit. The menu itself loads no model and grants no
 external authority.
 
 `local-ai.cmd brief` is the zero-model operating view. It combines the verified
 Windows task state and journal freshness with queue priority, the active
-project, pending experiment reviews, and the commercial evidence gate. Its
+project, pending experiment reviews, current memory admission, and the
+commercial evidence gate. Its
 code-owned priority order returns exactly one next action and one safe command;
 it does not quote objectives, reports, model responses, paths, or secrets.
 
@@ -96,7 +98,11 @@ Use `new` to create a project and `use` to select its one bounded execution slot
 Immediately before queue execution, `cycle` rechecks current physical memory
 and requires at least 2 GiB available. A lower or unavailable reading returns a
 blocked receipt with zero model calls and leaves the reviewed queue item intact
-for a later cycle.
+for a later cycle. Add `--recover-memory`—or choose **Run one ready company
+mission** in the desktop Lab—to apply the same verified non-terminating Codex
+working-set trim used by autopilot, recheck memory once, and run only if the
+hard 2 GiB floor is then satisfied. The control flag is never forwarded to the
+mission runner, and the receipt reports the validated recovery result.
 
 `autopilot install` registers the fixed `SuperMega Local Product Cycle` task for
 the current interactive user. It invokes one bounded cycle every six hours with
