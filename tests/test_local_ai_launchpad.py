@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -60,6 +60,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
         self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
+        self.assertEqual(translate(["brief"]).command, ())
 
     def test_effect_receipt_is_explicit_about_model_state_and_external_authority(self) -> None:
         planned = explain(translate(["plan", "Explore an idea"]))
@@ -281,6 +282,57 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertFalse(receipt["externalPublicationAuthorized"])
             self.assertFalse(receipt["modelCalled"])
             self.assertFalse(receipt["stateMutated"])
+
+    def test_company_brief_prioritizes_trust_activity_review_queue_offer_and_experiment(self) -> None:
+        ready = {"status": "ready", "verified": True, "currentActivity": "idle"}
+        cases = [
+            ({"status": "mismatch", "verified": False}, "none", [], 0, "evidence_required", True, "repair_autopilot"),
+            ({**ready, "currentActivity": "queued_by_windows"}, "ready", [], 1, "ready_for_owner_packaging", True, "wait_for_idle_or_cycle_completion"),
+            (ready, "blocked", ["knowledge_changed"], 1, "evidence_required", True, "review_changed_project_knowledge"),
+            (ready, "owner_gate_required", [], 1, "evidence_required", True, "review_queued_mission_owner_gate"),
+            (ready, "none", [], 1, "evidence_required", True, "review_pending_product_experiment"),
+            (ready, "ready", [], 0, "ready_for_owner_packaging", True, "let_verified_autopilot_run_next_mission"),
+            (ready, "none", [], 0, "ready_for_owner_packaging", True, "owner_review_sellable_offer"),
+            (ready, "none", [], 0, "project_focus_required", False, "select_active_product_project"),
+            (ready, "none", [], 0, "evidence_required", True, "await_or_run_next_measured_product_experiment"),
+        ]
+        for autonomy, queue, blockers, pending, offer, focus, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    _brief_next_action(autonomy, queue, blockers, pending, offer, focus)[0], expected,
+                )
+
+    def test_company_brief_is_pathless_model_free_and_queue_actionable(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            company = Company(home, MockModel())
+            project_id = company.create_project("Future Lab")
+            set_execution_focus(home, project_id, "Future Lab", 4)
+            company.enqueue("Prepare one internal product decision", project_id)
+            autonomy = {
+                "schema": "local-ai.autonomy-task.v1", "status": "ready",
+                "verified": True, "taskExecutionState": "Ready",
+                "currentActivity": "idle", "recommendedAction": "none",
+                "nextRunTime": "2030-01-01T00:00:00+00:00",
+                "lastCycleCurrentForLastRun": True,
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai._read_autopilot_status", return_value=autonomy),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_company_brief(translate(["brief"])), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["nextAction"], "let_verified_autopilot_run_next_mission")
+            self.assertEqual(receipt["product"]["projectName"], "Future Lab")
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
+            self.assertNotIn(str(home), str(receipt))
 
     def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")

@@ -24,6 +24,7 @@ SCHEMA = "local-ai.launchpad.v1"
 WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
 CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
+COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
 PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
@@ -74,6 +75,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd dashboard-status                Check the dashboard service
   local-ai.cmd stop                            Stop the verified local dashboard
   local-ai.cmd status                          Show machine, model, and queue health
+  local-ai.cmd brief                           Show one code-owned company next action
   local-ai.cmd jobs                            List mission history
   local-ai.cmd new "PROJECT" [--description]  Create a general project workspace
   local-ai.cmd use "PROJECT"                  Select it for model-backed work
@@ -179,6 +181,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         return LaunchAction(("service", "stop", *tail), "stop", "Stop only the verified local dashboard process.", False, True)
     if name == "status":
         return LaunchAction(("health", *tail), "status", "Show bounded local runtime, queue, and model health.", False, False)
+    if name == "brief":
+        if tail:
+            raise ValueError("brief_accepts_no_arguments")
+        return LaunchAction((), "brief", "Combine local autonomy, queue, evidence, and offer gates into one next action.", False, False)
     if name == "jobs":
         return LaunchAction(("status", *tail), "jobs", "List local mission history.", False, False)
     if name == "new":
@@ -728,6 +734,124 @@ def run_autopilot(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
+def _read_autopilot_status(project_root: Path) -> dict[str, object]:
+    completed = subprocess.run(
+        [
+            "powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(project_root / "scripts" / "manage_cycle_task.ps1"),
+            "-Mode", "Status",
+        ],
+        cwd=project_root, check=False, capture_output=True, text=True, timeout=30,
+    )
+    candidate = completed.stdout.strip() or completed.stderr.strip()
+    if len(candidate) > 65_536:
+        raise ValueError("autopilot_status_receipt_too_large")
+    try:
+        receipt = json.loads(candidate)
+    except json.JSONDecodeError as error:
+        raise ValueError("autopilot_status_receipt_invalid") from error
+    if not isinstance(receipt, dict) or receipt.get("schema") != "local-ai.autonomy-task.v1":
+        raise ValueError("autopilot_status_receipt_invalid")
+    return receipt
+
+
+def _brief_next_action(
+    autonomy: dict[str, object], queue_status: str, queue_blockers: list[str], pending_count: int,
+    offer_status: str, focus_enabled: bool,
+) -> tuple[str, str]:
+    if autonomy.get("verified") is not True or autonomy.get("status") != "ready":
+        return "repair_autopilot", "local-ai.cmd autopilot repair"
+    if autonomy.get("currentActivity") in {
+        "waiting_for_idle_or_cycle_running", "queued_by_windows",
+    }:
+        return "wait_for_idle_or_cycle_completion", "local-ai.cmd brief"
+    if queue_status == "owner_gate_required":
+        return "review_queued_mission_owner_gate", "local-ai.cmd next"
+    if queue_status == "blocked":
+        if "knowledge_changed" in queue_blockers:
+            return "review_changed_project_knowledge", "local-ai.cmd knowledge audit --project PROJECT"
+        return "inspect_blocked_queued_mission", "local-ai.cmd next"
+    if pending_count:
+        return "review_pending_product_experiment", "local-ai.cmd experiment-review-interactive"
+    if queue_status == "ready":
+        return "let_verified_autopilot_run_next_mission", "local-ai.cmd autopilot status"
+    if offer_status == "ready_for_owner_packaging":
+        return "owner_review_sellable_offer", "local-ai.cmd offer"
+    if not focus_enabled:
+        return "select_active_product_project", "local-ai.cmd projects list"
+    return "await_or_run_next_measured_product_experiment", "local-ai.cmd experiment"
+
+
+def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.mcp_server import CompanyTools, ProtocolError
+
+    home = default_company_home()
+    tools = CompanyTools(home)
+    company_status = tools.status({})
+    autonomy_raw = _read_autopilot_status(project_root)
+    pending_count = len(_pending_experiment_items(home))
+    focus = company_status["focus"]
+    offer_status = "project_focus_required"
+    offer_missing: list[str] = []
+    if focus.get("enabled") is True and isinstance(focus.get("projectId"), str):
+        try:
+            offer = tools.product_offer_next({"project": focus["projectId"]})
+            offer_status = str(offer["status"])
+            missing = offer.get("missingProof")
+            offer_missing = list(missing) if isinstance(missing, list) else []
+        except ProtocolError:
+            offer_status = "unavailable"
+    autonomy = {
+        "status": autonomy_raw.get("status"),
+        "verified": autonomy_raw.get("verified") is True,
+        "taskExecutionState": autonomy_raw.get("taskExecutionState"),
+        "currentActivity": autonomy_raw.get("currentActivity"),
+        "recommendedAction": autonomy_raw.get("recommendedAction"),
+        "nextRunTime": autonomy_raw.get("nextRunTime"),
+        "lastCycleCurrentForLastRun": autonomy_raw.get("lastCycleCurrentForLastRun"),
+    }
+    queue = company_status["queue"]
+    queue_status = str(queue.get("status"))
+    queue_blockers = queue.get("blockers")
+    bounded_blockers = [
+        item for item in queue_blockers
+        if isinstance(queue_blockers, list) and isinstance(item, str)
+    ] if isinstance(queue_blockers, list) else []
+    next_action, command = _brief_next_action(
+        autonomy, queue_status, bounded_blockers, pending_count, offer_status,
+        focus.get("enabled") is True,
+    )
+    if (
+        next_action == "review_changed_project_knowledge"
+        and isinstance(focus.get("projectId"), str)
+    ):
+        command = f'local-ai.cmd knowledge audit --project {focus["projectId"]}'
+    print(json.dumps({
+        "schema": COMPANY_BRIEF_SCHEMA, "status": "ready",
+        "autonomy": autonomy,
+        "queue": {
+            "status": queue_status, "queueId": queue.get("queueId"),
+            "blockers": bounded_blockers,
+            "ownerGateCategories": queue.get("ownerGateCategories"),
+        },
+        "product": {
+            "projectId": focus.get("projectId"), "projectName": focus.get("projectName"),
+            "pendingExperimentCount": pending_count,
+            "offerStatus": offer_status, "offerMissingProof": offer_missing,
+        },
+        "nextAction": next_action, "command": command,
+        "modelCalled": False, "stateMutated": False,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
 def run_work(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     environment = os.environ.copy()
@@ -1016,6 +1140,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_code(action)
         if action.mode == "autopilot":
             return run_autopilot(action)
+        if action.mode == "brief":
+            return run_company_brief(action)
         if action.mode == "use":
             return switch_project(action)
         if action.mode == "experiment":

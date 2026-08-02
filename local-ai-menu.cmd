@@ -7,28 +7,36 @@ cls
 echo SuperMega Local AI Lab
 echo ======================
 echo 1. Open local company chat
-echo 2. Plan next product experiment ^(no model^)
-echo 3. Run next product experiment ^(safe memory recovery^)
-echo 4. Inspect and review a completed product experiment ^(no model^)
-echo 5. Check whether a workflow is ready to package and sell ^(no model^)
-echo 6. Open local coding agent for a project
-echo 7. Check local AI readiness
-echo 8. Start local dashboard
-echo 9. Exit
+echo 2. Show company brief and exact next action ^(no model^)
+echo 3. Plan next product experiment ^(no model^)
+echo 4. Run next product experiment ^(safe memory recovery^)
+echo 5. Inspect and review a completed product experiment ^(no model^)
+echo 6. Check whether a workflow is ready to package and sell ^(no model^)
+echo 7. Open local coding agent for a project
+echo 8. Check local AI readiness
+echo 9. Start local dashboard
+echo 0. Exit
 echo.
-choice /c 123456789 /n /m "Choose 1-9: "
-if errorlevel 9 exit /b 0
-if errorlevel 8 goto dashboard
-if errorlevel 7 goto check
-if errorlevel 6 goto code
-if errorlevel 5 goto offer
-if errorlevel 4 goto review
-if errorlevel 3 goto experiment_run
-if errorlevel 2 goto experiment
+choice /c 1234567890 /n /m "Choose 0-9: "
+if errorlevel 10 exit /b 0
+if errorlevel 9 goto dashboard
+if errorlevel 8 goto check
+if errorlevel 7 goto code
+if errorlevel 6 goto offer
+if errorlevel 5 goto review
+if errorlevel 4 goto experiment_run
+if errorlevel 3 goto experiment
+if errorlevel 2 goto brief
 if errorlevel 1 goto company
 
 :company
 call "%LOCAL_AI_ROOT%local-company-agent.cmd"
+goto menu
+
+:brief
+call "%LOCAL_AI_ROOT%local-ai.cmd" brief
+echo.
+pause
 goto menu
 
 :experiment

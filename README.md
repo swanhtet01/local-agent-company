@@ -19,6 +19,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
 .\local-ai.cmd cycle
 .\local-ai.cmd autopilot status
+.\local-ai.cmd brief
 .\local-ai.cmd autopilot install
 .\local-ai.cmd code C:\path\to\any-project
 .\local-ai.cmd vision-lite --check
@@ -36,11 +37,18 @@ Local Company** on the Windows desktop or run:
 ```
 
 For the complete one-click control panel, double-click **SuperMega Local AI
-Lab** on the desktop. Its nine fixed choices open company chat, plan or run a
-measured product experiment, inspect and explicitly review a saved result,
-check whether evidence supports a sellable offer, launch a coding agent for a
-chosen folder, check readiness, start the loopback dashboard, or exit. The menu
-itself loads no model and grants no external authority.
+Lab** on the desktop. Its fixed choices open company chat, show one bounded
+company brief, plan or run a measured product experiment, inspect and
+explicitly review a saved result, check whether evidence supports a sellable
+offer, launch a coding agent for a chosen folder, check readiness, start the
+loopback dashboard, or exit. The menu itself loads no model and grants no
+external authority.
+
+`local-ai.cmd brief` is the zero-model operating view. It combines the verified
+Windows task state and journal freshness with queue priority, the active
+project, pending experiment reviews, and the commercial evidence gate. Its
+code-owned priority order returns exactly one next action and one safe command;
+it does not quote objectives, reports, model responses, paths, or secrets.
 
 The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
