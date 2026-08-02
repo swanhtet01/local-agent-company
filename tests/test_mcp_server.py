@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from local_company.mcp_server import (
     MAX_TOOL_CALLS,
+    PROJECT_CREATE_CONFIRMATION,
     RUN_CONFIRMATION,
     SCHEDULE_CHANGE_CONFIRMATION,
     SCHEDULE_CREATE_CONFIRMATION,
@@ -42,10 +43,10 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 {
                     "status", "projects", "preflight", "queue_list", "queue_add", "queue_run",
                     "jobs", "job_result", "schedule_list", "schedule_create",
-                    "schedule_set_enabled",
+                    "schedule_set_enabled", "playbooks", "project_create", "project_overview",
                 },
             )
-            self.assertEqual(len(tools), 11)
+            self.assertEqual(len(tools), 14)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -199,6 +200,37 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertIn("external_communication", result["preflight"]["owner_gate_categories"])
             self.assertEqual(session.company_tools.company.schedules(), [])
+
+    def test_project_workspace_creation_is_confirmed_and_overview_is_pathless(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            refused = self._call(session, "project_create", {"name": "Invention Lab"}, 3)
+            self.assertEqual(refused["error"]["message"], "project_confirmation_required")
+            self.assertEqual(session.company_tools.company.projects(), [])
+            created = self._call(session, "project_create", {
+                "name": "  Invention   Lab  ", "description": "Private product experiments.",
+                "projectConfirmation": PROJECT_CREATE_CONFIRMATION,
+            }, 4)["result"]["structuredContent"]
+            self.assertEqual(created["name"], "Invention Lab")
+            overview = self._call(session, "project_overview", {
+                "project": created["projectId"],
+            }, 5)["result"]["structuredContent"]
+            self.assertEqual(overview["project"]["name"], "Invention Lab")
+            self.assertEqual(overview["project"]["knowledgeSourceCount"], 0)
+            self.assertEqual(overview["project"]["missionCount"], 0)
+            self.assertNotIn(str(root), str(overview))
+            self.assertFalse(overview["stateMutated"])
+
+    def test_playbooks_are_model_free_and_expose_specialist_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            result = self._call(session, "playbooks", {}, 3)["result"]["structuredContent"]
+            product = next(item for item in result["playbooks"] if item["name"] == "product-build")
+            self.assertIn("engineering", product["roles"])
+            self.assertEqual(product["roleCount"], len(product["roles"]))
+            self.assertFalse(result["modelCalled"])
+            self.assertFalse(result["stateMutated"])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

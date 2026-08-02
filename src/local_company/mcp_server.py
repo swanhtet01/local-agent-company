@@ -24,6 +24,7 @@ MINIMUM_EXECUTION_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 RUN_CONFIRMATION = "RUN ONE LOCAL COMPANY MISSION"
 SCHEDULE_CREATE_CONFIRMATION = "CREATE RECURRING LOCAL MISSION"
 SCHEDULE_CHANGE_CONFIRMATION = "CHANGE LOCAL MISSION SCHEDULE"
+PROJECT_CREATE_CONFIRMATION = "CREATE LOCAL COMPANY PROJECT"
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -96,7 +97,7 @@ class CompanyTools:
         work = self.company.work_state_snapshot()
         return {
             "schema": SCHEMA, "status": "ready", "transport": "stdio",
-            "localOnly": True, "networkListener": False, "exposedTools": 11,
+            "localOnly": True, "networkListener": False, "exposedTools": 14,
             "modelCalled": False, "externalActionPerformed": False,
             "focus": {
                 "enabled": focus["enabled"], "projectId": focus.get("projectId"),
@@ -126,6 +127,67 @@ class CompanyTools:
                 for row in rows
             ],
             "count": len(rows), "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+
+    def playbooks(self, arguments: Any) -> dict[str, Any]:
+        _arguments(arguments, set())
+        return {
+            "schema": "local-company.mcp-playbooks.v1", "status": "ready",
+            "playbooks": [
+                {
+                    "name": name, "description": item["description"],
+                    "roles": list(item["roles"]), "roleCount": len(item["roles"]),
+                }
+                for name, item in PLAYBOOKS.items()
+            ],
+            "count": len(PLAYBOOKS), "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        }
+
+    def project_create(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"name", "description", "projectConfirmation"})
+        name = value.get("name")
+        description = value.get("description", "")
+        if value.get("projectConfirmation") != PROJECT_CREATE_CONFIRMATION:
+            raise ProtocolError(-32602, "project_confirmation_required")
+        if not isinstance(name, str) or not name.strip() or len(name) > 80:
+            raise ProtocolError(-32602, "invalid_project_name")
+        if not isinstance(description, str) or len(description) > 500:
+            raise ProtocolError(-32602, "invalid_project_description")
+        try:
+            project_id = self.company.create_project(name, description)
+        except ValueError as error:
+            raise ProtocolError(-32602, "invalid_project_request") from error
+        return {
+            "schema": "local-company.mcp-project-create.v1", "status": "created",
+            "created": True, "projectId": project_id, "name": " ".join(name.split()),
+            "modelCalled": False, "externalActionPerformed": False,
+        }
+
+    def project_overview(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"project"})
+        project = value.get("project")
+        if not isinstance(project, str) or not project.strip() or len(project) > 80:
+            raise ProtocolError(-32602, "invalid_project")
+        try:
+            detail = self.company.project_detail(project)
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_project") from error
+        item = detail["project"]
+        jobs = detail["jobs"][:10]
+        return {
+            "schema": "local-company.mcp-project-overview.v1", "status": "ready",
+            "project": {
+                "projectId": item[0], "name": item[1], "description": item[2],
+                "createdAt": item[3], "knowledgeSourceCount": len(detail["sources"]),
+                "missionCount": len(detail["jobs"]),
+                "recentJobs": [
+                    {"jobId": row[0], "status": row[1], "createdAt": row[2], "objective": row[3]}
+                    for row in jobs
+                ],
+            },
+            "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }
 
@@ -456,6 +518,24 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
     return (
         Tool("status", "Report pathless local-company, focus, queue, and schedule state.", _schema([], {}), company_tools.status, True),
         Tool("projects", "List pathless local-company project identities and mission counts.", _schema([], {}), company_tools.projects, True),
+        Tool("playbooks", "List reusable specialist teams and their roles.", _schema([], {}), company_tools.playbooks, True),
+        Tool(
+            "project_create", "Create one explicitly confirmed local project workspace.",
+            _schema(
+                ["name", "projectConfirmation"],
+                {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "description": {"type": "string", "maxLength": 500},
+                    "projectConfirmation": {"const": PROJECT_CREATE_CONFIRMATION},
+                },
+            ),
+            company_tools.project_create, False,
+        ),
+        Tool(
+            "project_overview", "Inspect one pathless project summary and recent mission history.",
+            _schema(["project"], {"project": project}),
+            company_tools.project_overview, True,
+        ),
         Tool(
             "queue_list", "List bounded local mission queue records without changing state.",
             _schema([], {
@@ -581,7 +661,7 @@ class McpSession:
                     "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "local-agent-company", "title": "Local Agent Company", "version": "1"},
-                    "instructions": "Local-only company coordination. Review queue_list and preflight before mutations. queue_run requires the exact reviewed queue ID and owner confirmation. Recurring missions require explicit create/change confirmations and remain pausable. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
+                    "instructions": "Local-only company coordination. Use playbooks and project_overview to plan scoped workspaces. Project creation, queue execution, and recurring missions require their exact owner confirmations. Review queue_list and preflight before mutations. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
                 })
             if not self.initialized:
                 raise ProtocolError(-32002, "server_not_initialized")
