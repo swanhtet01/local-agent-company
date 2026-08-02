@@ -11,18 +11,23 @@ $root = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $runner = Join-Path $root 'scripts\run_scheduled_cycle.py'
 $launcher = Join-Path $root 'scripts\local_ai.py'
+$optimizer = Join-Path (Split-Path -Parent $root) 'supermega-platform\tools\trim_codex_working_sets.ps1'
 $powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
 $runnerDigest = (Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash.ToLowerInvariant()
 $launcherDigest = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+$optimizerDigest = (Get-FileHash -LiteralPath $optimizer -Algorithm SHA256).Hash.ToLowerInvariant()
 $runnerLiteral = "'" + $runner.Replace("'", "''") + "'"
 $launcherLiteral = "'" + $launcher.Replace("'", "''") + "'"
+$optimizerLiteral = "'" + $optimizer.Replace("'", "''") + "'"
 $pythonLiteral = "'" + $python.Replace("'", "''") + "'"
 $guardCommand = @"
 `$ErrorActionPreference = 'Stop'
 `$runner = $runnerLiteral
 `$launcher = $launcherLiteral
+`$optimizer = $optimizerLiteral
 if ((Get-FileHash -LiteralPath `$runner -Algorithm SHA256).Hash.ToLowerInvariant() -ne '$runnerDigest') { exit 90 }
 if ((Get-FileHash -LiteralPath `$launcher -Algorithm SHA256).Hash.ToLowerInvariant() -ne '$launcherDigest') { exit 91 }
+if ((Get-FileHash -LiteralPath `$optimizer -Algorithm SHA256).Hash.ToLowerInvariant() -ne '$optimizerDigest') { exit 92 }
 & $pythonLiteral `$runner
 exit `$LASTEXITCODE
 "@
@@ -78,6 +83,9 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
                         reason = [string]$result.cycle.reason
                         missionsRun = $result.cycle.missionsRun
                         modelCalled = $result.cycle.modelCalled
+                        memoryRecoveryAttempted = $result.memoryRecovery.attempted
+                        memoryRecoveryStatus = [string]$result.memoryRecovery.status
+                        releasedWorkingSetMb = $result.memoryRecovery.releasedWorkingSetMb
                     }
                 }
             }
@@ -104,6 +112,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
             overlappingRunsAllowed = $false
             modelMemoryGateBytes = 2147483648
             sourceDigestsPinned = $true
+            boundedMemoryRecovery = $true
             externalActionsAllowed = $false
         }
     } | ConvertTo-Json -Depth 6 -Compress
@@ -113,6 +122,7 @@ try {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'task_python_missing' }
     if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw 'task_runner_missing' }
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'task_launcher_missing' }
+    if (-not (Test-Path -LiteralPath $optimizer -PathType Leaf)) { throw 'task_optimizer_missing' }
     $existing = Get-CycleTask
     if ($Mode -eq 'Status') {
         Write-Receipt -Status $(if ($null -eq $existing) { 'not_installed' } elseif (Test-CycleTask $existing) { 'ready' } else { 'mismatch' }) -Task $existing -Changed $false

@@ -47,6 +47,12 @@ rehashes both files before Python starts; runner drift returns task result `90`
 and launcher drift returns `91`, with no queue claim or model call. Deliberate
 source updates therefore require removing the verified task before editing and
 reinstalling it after tests pass.
+The task also pins the existing SuperMega non-terminating Codex working-set
+optimizer. When—and only when—the first cycle is blocked for insufficient
+memory, the runner applies that verified trim once, validates its zero-
+termination/zero-file/zero-network receipt, waits three seconds, and retries
+the cycle exactly once. Invalid recovery evidence stops the task without a
+queue claim or model call.
 
 ```powershell
 .\local-ai.cmd explain work "Research a new product"

@@ -110,22 +110,26 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn("$taskName = 'SuperMega Local Product Cycle'", source)
         self.assertIn("Get-FileHash -LiteralPath `$runner -Algorithm SHA256", source)
         self.assertIn("Get-FileHash -LiteralPath `$launcher -Algorithm SHA256", source)
+        self.assertIn("Get-FileHash -LiteralPath `$optimizer -Algorithm SHA256", source)
         self.assertIn("-EncodedCommand ' + $encodedGuard", source)
         self.assertIn("{ exit 90 }", source)
         self.assertIn("{ exit 91 }", source)
+        self.assertIn("{ exit 92 }", source)
         self.assertIn("$interval = 'PT6H'", source)
         self.assertIn("-LogonType Interactive -RunLevel Limited", source)
         self.assertIn("-MultipleInstances IgnoreNew", source)
         self.assertIn("modelMemoryGateBytes = 2147483648", source)
         self.assertIn("sourceDigestsPinned = $true", source)
+        self.assertIn("boundedMemoryRecovery = $true", source)
+        self.assertIn("memoryRecoveryAttempted = $result.memoryRecovery.attempted", source)
         self.assertIn("$Task.Settings.Enabled", source)
         self.assertIn("$info.LastTaskResult -ne 267011", source)
         self.assertIn("task_remove_refused_unverified_definition", source)
 
     def test_scheduled_cycle_journal_is_atomic_allowlisted_and_discards_raw_output(self) -> None:
         cycle = {
-            "schema": "local-ai.cycle-result.v1", "status": "blocked",
-            "reason": "insufficient_available_memory", "missionsRun": 0,
+            "schema": "local-ai.cycle-result.v1", "status": "no_due_mission",
+            "reason": "no_due_mission", "missionsRun": 0,
             "modelCalled": False, "memoryShortfallBytes": 123,
             "report": "C:\\private\\report.md", "secret": "SENTINEL",
         }
@@ -141,7 +145,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 code, journal = run_scheduled_cycle(root, state)
             self.assertEqual(code, 0)
             self.assertEqual(journal["schema"], SCHEDULED_CYCLE_SCHEMA)
-            self.assertEqual(journal["cycle"]["reason"], "insufficient_available_memory")
+            self.assertEqual(journal["cycle"]["reason"], "no_due_mission")
             stored = (state / "autopilot-cycle-result.json").read_text(encoding="utf-8")
             self.assertNotIn("SENTINEL", stored)
             self.assertNotIn("report.md", stored)
@@ -161,6 +165,48 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(journal["reason"], "cycle_receipt_missing_or_oversized")
             self.assertNotIn("SENTINEL", (state / "autopilot-cycle-result.json").read_text(encoding="utf-8"))
+
+    def test_scheduled_cycle_performs_one_validated_memory_trim_then_retries_once(self) -> None:
+        blocked = json.dumps({
+            "schema": "local-ai.cycle-result.v1", "status": "blocked",
+            "reason": "insufficient_available_memory", "missionsRun": 0,
+            "modelCalled": False,
+        }) + "\n"
+        ready = json.dumps({
+            "schema": "local-ai.cycle-result.v1", "status": "no_due_mission",
+            "reason": "no_due_mission", "missionsRun": 0, "modelCalled": False,
+        }) + "\n"
+        trim = json.dumps({
+            "contract": "supermega.ally-working-set-trim.v1", "ok": True,
+            "mode": "apply", "targetCount": 3, "trimSucceeded": 3,
+            "trimFailed": 0, "releasedWorkingSetMb": 512.5,
+            "controls": {
+                "processMutation": True, "processTerminationCalls": 0,
+                "filesModified": 0, "networkRequests": 0,
+            },
+        })
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+        ) as run:
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            optimizer = root.parent / "supermega-platform" / "tools" / "trim_codex_working_sets.ps1"
+            optimizer.parent.mkdir(parents=True)
+            optimizer.write_text("# fixture\n", encoding="utf-8")
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, blocked, ""),
+                subprocess.CompletedProcess([], 0, trim, ""),
+                subprocess.CompletedProcess([], 0, ready, ""),
+            ]
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state, settle=lambda _seconds: None)
+            self.assertEqual(code, 0)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(journal["cycle"]["status"], "no_due_mission")
+            self.assertEqual(journal["memoryRecovery"]["releasedWorkingSetMb"], 512.5)
+            self.assertEqual(journal["memoryRecovery"]["processTerminationCalls"], 0)
 
     def test_vision_modes_default_to_installed_vision_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
