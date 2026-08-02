@@ -187,6 +187,16 @@ def parser() -> argparse.ArgumentParser:
     )
     queue_cancel = queue_sub.add_parser("cancel", help="Cancel an item that has not started")
     queue_cancel.add_argument("queue_id")
+    queue_park = queue_sub.add_parser(
+        "park", help="Reversibly remove an unstarted item from queue selection"
+    )
+    queue_park.add_argument("queue_id")
+    queue_park.add_argument("--reason", required=True)
+    queue_unpark = queue_sub.add_parser(
+        "unpark", help="Restore a parked item with its original priority and due time"
+    )
+    queue_unpark.add_argument("queue_id")
+    queue_unpark.add_argument("--reason", required=True)
 
     schedules = sub.add_parser("schedules", help="Manage manually materialized recurring missions")
     schedule_sub = schedules.add_subparsers(dest="schedule_command", required=True)
@@ -726,6 +736,14 @@ def main() -> int:
             elif args.queue_command == "cancel":
                 company.cancel_queue_item(args.queue_id)
                 print(f"Queue item {args.queue_id} cancelled.")
+            elif args.queue_command == "park":
+                print(json.dumps(
+                    company.park_queue_item(args.queue_id, args.reason), indent=2,
+                ))
+            elif args.queue_command == "unpark":
+                print(json.dumps(
+                    company.unpark_queue_item(args.queue_id, args.reason), indent=2,
+                ))
         elif args.command == "schedules":
             if args.schedule_command == "create":
                 roles = [role.strip() for role in args.roles.split(",") if role.strip()] if args.roles else None

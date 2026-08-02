@@ -27,6 +27,7 @@ MINIMUM_EXECUTION_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 RUN_CONFIRMATION = "RUN ONE LOCAL COMPANY MISSION"
 SCHEDULE_CREATE_CONFIRMATION = "CREATE RECURRING LOCAL MISSION"
 SCHEDULE_CHANGE_CONFIRMATION = "CHANGE LOCAL MISSION SCHEDULE"
+QUEUE_LIFECYCLE_CONFIRMATION = "CHANGE LOCAL QUEUE LIFECYCLE"
 PROJECT_CREATE_CONFIRMATION = "CREATE LOCAL COMPANY PROJECT"
 KNOWLEDGE_ADD_CONFIRMATION = "ADD LOCAL PROJECT KNOWLEDGE"
 PRODUCT_REVIEW_CONFIRMATION = "RECORD HUMAN PRODUCT EVIDENCE REVIEW"
@@ -44,7 +45,7 @@ QUEUE_COMPLETION_PATTERN = re.compile(
 )
 QUEUE_STATUSES = {
     "queued", "running", "complete", "failed", "quality_failed", "needs_approval",
-    "cancelled", "superseded",
+    "cancelled", "superseded", "parked",
 }
 JOB_STATUSES = {"running", "complete", "failed", "interrupted"}
 MAX_SYNTHESIS_CHARS = 32_768
@@ -102,7 +103,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 23
+        self.exposed_tools = 25
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -127,6 +128,7 @@ class CompanyTools:
                 "blockers": queue["blockers"],
                 "ownerGateCategories": queue["owner_gate_categories"],
                 "modelExecutionReady": queue["model_execution_ready"],
+                "parkedCount": self.company.queue_status_count("parked"),
             },
             "schedules": {
                 "count": len(schedules),
@@ -867,6 +869,47 @@ class CompanyTools:
             "stateMutated": False, "externalActionPerformed": False,
         }
 
+    @staticmethod
+    def _queue_lifecycle_arguments(arguments: Any) -> tuple[str, str]:
+        value = _arguments(
+            arguments,
+            {"expectedQueueId", "reason", "queueLifecycleConfirmation"},
+        )
+        if value.get("queueLifecycleConfirmation") != QUEUE_LIFECYCLE_CONFIRMATION:
+            raise ProtocolError(-32602, "queue_lifecycle_confirmation_required")
+        queue_id = value.get("expectedQueueId")
+        reason = value.get("reason")
+        if (
+            not isinstance(queue_id, str)
+            or QUEUE_ID_PATTERN.fullmatch(queue_id) is None
+        ):
+            raise ProtocolError(-32602, "invalid_queue_id")
+        if not isinstance(reason, str) or not 20 <= len(" ".join(reason.split())) <= 240:
+            raise ProtocolError(-32602, "invalid_queue_lifecycle_reason")
+        return queue_id, reason
+
+    def queue_park(self, arguments: Any) -> dict[str, Any]:
+        queue_id, reason = self._queue_lifecycle_arguments(arguments)
+        try:
+            result = self.company.park_queue_item(queue_id, reason, source="mcp")
+        except ValueError as error:
+            raise ProtocolError(-32602, "invalid_queue_lifecycle") from error
+        return {
+            **result, "modelCalled": False, "stateMutated": True,
+            "externalActionPerformed": False,
+        }
+
+    def queue_unpark(self, arguments: Any) -> dict[str, Any]:
+        queue_id, reason = self._queue_lifecycle_arguments(arguments)
+        try:
+            result = self.company.unpark_queue_item(queue_id, reason, source="mcp")
+        except ValueError as error:
+            raise ProtocolError(-32602, "invalid_queue_lifecycle") from error
+        return {
+            **result, "modelCalled": False, "stateMutated": True,
+            "externalActionPerformed": False,
+        }
+
     def jobs(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(arguments, {"status", "limit"})
         status = value.get("status")
@@ -1280,6 +1323,30 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             }),
             company_tools.queue_list, True,
+        ),
+        Tool(
+            "queue_park", "Reversibly preserve one exact unstarted local mission outside queue selection.",
+            _schema(
+                ["expectedQueueId", "reason", "queueLifecycleConfirmation"],
+                {
+                    "expectedQueueId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                    "reason": {"type": "string", "minLength": 20, "maxLength": 240},
+                    "queueLifecycleConfirmation": {"const": QUEUE_LIFECYCLE_CONFIRMATION},
+                },
+            ),
+            company_tools.queue_park, False,
+        ),
+        Tool(
+            "queue_unpark", "Restore one exact parked local mission to its original queue position.",
+            _schema(
+                ["expectedQueueId", "reason", "queueLifecycleConfirmation"],
+                {
+                    "expectedQueueId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                    "reason": {"type": "string", "minLength": 20, "maxLength": 240},
+                    "queueLifecycleConfirmation": {"const": QUEUE_LIFECYCLE_CONFIRMATION},
+                },
+            ),
+            company_tools.queue_unpark, False,
         ),
         Tool(
             "jobs", "List bounded local mission history without reading report files into the client.",

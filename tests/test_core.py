@@ -34,7 +34,8 @@ from local_company.config import (
 from local_company.core import (
     Company, EVALUATOR_VERSION, ExecutionLeaseLost, MockModel, OllamaModel,
     PLAYBOOKS, ROLES,
-    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_SUPERSEDE_SCHEMA,
+    QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECOVERY_SCHEMA, QUEUE_PARK_SCHEMA,
+    QUEUE_SUPERSEDE_SCHEMA,
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     _required_ending_from_objective,
@@ -4486,6 +4487,135 @@ class CompanyTests(unittest.TestCase):
             company = Company(Path(tmp), MockModel())
             with self.assertRaisesRegex(ValueError, "cannot exceed 4000"):
                 company.enqueue("x" * 4001)
+
+    def test_queue_item_can_be_parked_and_restored_without_work_or_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            older_project = company.create_project("Older Lab")
+            active_project = company.create_project("Active Lab")
+            parked_id = company.enqueue(
+                "Prepare the older advisory brief", older_project, priority=80,
+            )
+            active_id = company.enqueue(
+                "Prepare the active advisory brief", active_project, priority=50,
+            )
+            scheduled_before = company.queue_items("queued")[0][3]
+            reason = "Preserve this mission while another project is the active focus."
+
+            parked = company.park_queue_item(
+                parked_id, reason, source="unit-test",
+            )
+
+            self.assertEqual(parked["schema"], QUEUE_PARK_SCHEMA)
+            self.assertEqual(parked["queue_id"], parked_id)
+            self.assertEqual(parked["project_id"], older_project)
+            self.assertEqual(parked["previous_status"], "queued")
+            self.assertEqual(parked["status"], "parked")
+            self.assertEqual(parked["reason"], reason)
+            self.assertTrue(parked["effects"]["database_mutated"])
+            self.assertTrue(parked["effects"]["queue_changed"])
+            self.assertTrue(all(
+                parked["effects"][key] is False for key in (
+                    "model_called", "work_started", "objective_changed",
+                    "schedule_changed", "queue_history_deleted",
+                )
+            ))
+            self.assertEqual(company.next_due_queue_item()[0], active_id)
+            self.assertEqual(company.queue_status_count("parked"), 1)
+            parked_row = company.queue_items("parked")[0]
+            self.assertEqual(parked_row[0], parked_id)
+            self.assertEqual(parked_row[3], scheduled_before)
+            self.assertEqual(parked_row[6], "Prepare the older advisory brief")
+            self.assertEqual(model.calls, 0)
+
+            restored = company.unpark_queue_item(
+                parked_id,
+                "Restore the preserved mission for its original queue position.",
+                source="unit-test",
+            )
+
+            self.assertEqual(restored["schema"], QUEUE_PARK_SCHEMA)
+            self.assertEqual(restored["previous_status"], "parked")
+            self.assertEqual(restored["status"], "queued")
+            self.assertEqual(company.next_due_queue_item()[0], parked_id)
+            self.assertEqual(company.queue_status_count("parked"), 0)
+            self.assertEqual(company.queue_items("queued")[0][3], scheduled_before)
+            self.assertEqual(model.calls, 0)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                events = list(db.execute(
+                    "SELECT kind, detail FROM events "
+                    "WHERE kind IN ('queue_parked', 'queue_unparked') ORDER BY id"
+                ))
+            self.assertEqual(
+                [event[0] for event in events],
+                ["queue_parked", "queue_unparked"],
+            )
+            self.assertEqual(json.loads(events[0][1])["reason"], reason)
+            self.assertTrue(all(
+                json.loads(event[1])["source"] == "unit-test"
+                for event in events
+            ))
+
+    def test_queue_park_lifecycle_fails_closed_and_cli_is_model_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            model = CountingMockModel()
+            company = Company(state, model)
+            queue_id = company.enqueue("Preserve one queued advisory mission")
+            database_before = company.db_path.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "20 to 240"):
+                company.park_queue_item(queue_id, "too short")
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            with self.assertRaisesRegex(ValueError, "12 lowercase"):
+                company.park_queue_item("not-an-id", "A sufficiently detailed audit reason for parking.")
+            lower_id = company.enqueue(
+                "A lower priority advisory mission", priority=1,
+            )
+            with self.assertRaisesRegex(RuntimeError, "no longer the due head"):
+                company.park_queue_item(
+                    lower_id,
+                    "Do not park a reviewed item after its queue position changes.",
+                    require_due_head=True,
+                )
+            self.assertEqual(company.queue_items("queued")[1][0], lower_id)
+
+            output = io.StringIO()
+            reason = "Temporarily preserve this mission while focused work proceeds."
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "queue", "park",
+                    queue_id, "--reason", reason,
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "parked")
+            self.assertEqual(model.calls, 0)
+
+            with self.assertRaisesRegex(ValueError, "queued item"):
+                company.park_queue_item(queue_id, reason)
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(state), "queue", "unpark",
+                    queue_id, "--reason",
+                    "Return this preserved mission to the executable queue.",
+                ],
+            ), patch(
+                "local_company.cli.selected_model", return_value=model,
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "queued")
+            self.assertEqual(model.calls, 0)
+            with self.assertRaisesRegex(ValueError, "parked item"):
+                company.unpark_queue_item(
+                    queue_id,
+                    "A detailed reason that should fail because it is already queued.",
+                )
 
     def test_queue_runs_highest_priority_due_playbook_and_passes_quality(self):
         with tempfile.TemporaryDirectory() as tmp:

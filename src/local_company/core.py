@@ -201,6 +201,7 @@ MISSION_PREFLIGHT_SCHEMA = "local-company.mission-preflight.v1"
 QUEUE_PREFLIGHT_SCHEMA = "local-company.queue-preflight.v1"
 QUEUE_RETRY_PREFLIGHT_SCHEMA = "local-company.queue-retry-preflight.v1"
 QUEUE_SUPERSEDE_SCHEMA = "local-company.queue-supersede.v2"
+QUEUE_PARK_SCHEMA = "local-company.queue-park.v1"
 QUALITY_SUPERSESSION_PREVIEW_SCHEMA = "local-company.quality-supersession-preview.v1"
 QUALITY_SUPERSESSION_LIST_SCHEMA = "local-company.quality-supersession-list.v2"
 QUALITY_RECOVERY_SCHEMA = "local-company.quality-recovery.v1"
@@ -4810,6 +4811,15 @@ class Company:
         with closing(self._connect()) as db:
             return list(db.execute(sql, params))
 
+    def queue_status_count(self, status: str) -> int:
+        self.initialize()
+        if not isinstance(status, str) or re.fullmatch(r"[a-z_]{1,32}", status) is None:
+            raise ValueError("Queue status must be a lowercase lifecycle name")
+        with closing(self._connect()) as db:
+            return int(db.execute(
+                "SELECT COUNT(*) FROM mission_queue WHERE status=?", (status,),
+            ).fetchone()[0])
+
     def has_due_queue_item(self) -> bool:
         return self.next_due_queue_item() is not None
 
@@ -5365,6 +5375,156 @@ class Company:
                 db, None, "queue_cancelled",
                 json.dumps({"queue_id": queue_id, "source": source}, sort_keys=True),
             )
+
+    @staticmethod
+    def _queue_park_fields(
+        queue_id: str, reason: str, source: str,
+    ) -> tuple[str, str, str]:
+        if (
+            not isinstance(queue_id, str)
+            or re.fullmatch(r"[0-9a-f]{12}", queue_id) is None
+        ):
+            raise ValueError(
+                "Queue item ID must be 12 lowercase hexadecimal characters"
+            )
+        if not isinstance(reason, str):
+            raise ValueError("Queue park reason must be text")
+        if any(
+            ord(character) < 32 and character not in "\t\r\n"
+            for character in reason
+        ):
+            raise ValueError("Queue park reason contains control characters")
+        normalized_reason = " ".join(reason.split())
+        if not 20 <= len(normalized_reason) <= 240:
+            raise ValueError("Queue park reason must contain 20 to 240 characters")
+        if not isinstance(source, str):
+            raise ValueError("Queue source must be text")
+        normalized_source = " ".join(source.split())
+        if not normalized_source or len(normalized_source) > 40:
+            raise ValueError("Queue source must contain 1 to 40 characters")
+        return queue_id, normalized_reason, normalized_source
+
+    @staticmethod
+    def _queue_park_receipt(
+        queue_id: str, project_id: str | None, previous_status: str,
+        status: str, reason: str,
+    ) -> dict[str, object]:
+        return {
+            "schema": QUEUE_PARK_SCHEMA,
+            "queue_id": queue_id,
+            "project_id": project_id,
+            "previous_status": previous_status,
+            "status": status,
+            "reason": reason,
+            "effects": {
+                "database_mutated": True,
+                "queue_changed": True,
+                "model_called": False,
+                "work_started": False,
+                "objective_changed": False,
+                "schedule_changed": False,
+                "queue_history_deleted": False,
+            },
+        }
+
+    def park_queue_item(
+        self, queue_id: str, reason: str, source: str = "cli", *,
+        require_due_head: bool = False,
+    ) -> dict[str, object]:
+        """Reversibly remove one unstarted mission from queue selection."""
+        self.initialize()
+        if type(require_due_head) is not bool:
+            raise ValueError("require_due_head must be a boolean")
+        queue_id, reason, source = self._queue_park_fields(
+            queue_id, reason, source,
+        )
+        with closing(self._connect(immediate=True)) as db, db:
+            if require_due_head:
+                head = db.execute(
+                    "SELECT id FROM mission_queue "
+                    "WHERE status='queued' AND scheduled_at<=? "
+                    "ORDER BY priority DESC, scheduled_at, created_at LIMIT 1",
+                    (utc_now(),),
+                ).fetchone()
+                if not head or head[0] != queue_id:
+                    raise RuntimeError(
+                        "Queue changed; reviewed mission is no longer the due head"
+                    )
+            row = db.execute(
+                "SELECT status, project_id, run_token, started_at, completed_at, job_id "
+                "FROM mission_queue WHERE id=?", (queue_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Unknown queue item: {queue_id}")
+            status, project_id, run_token, started_at, completed_at, job_id = row
+            if status != "queued":
+                raise ValueError("Only an existing queued item can be parked")
+            if any(value is not None for value in (
+                run_token, started_at, completed_at, job_id,
+            )):
+                raise RuntimeError(
+                    "Queued item has execution history and cannot be parked"
+                )
+            changed = db.execute(
+                "UPDATE mission_queue SET status='parked' "
+                "WHERE id=? AND status='queued' AND run_token IS NULL",
+                (queue_id,),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("Queue item changed before it could be parked")
+            self._event(
+                db, None, "queue_parked",
+                json.dumps({
+                    "previous_status": "queued", "project_id": project_id,
+                    "queue_id": queue_id, "reason": reason, "source": source,
+                    "exact_due_head": require_due_head,
+                }, sort_keys=True),
+            )
+        return self._queue_park_receipt(
+            queue_id, project_id, "queued", "parked", reason,
+        )
+
+    def unpark_queue_item(
+        self, queue_id: str, reason: str, source: str = "cli",
+    ) -> dict[str, object]:
+        """Restore one parked mission with its original priority and due time."""
+        self.initialize()
+        queue_id, reason, source = self._queue_park_fields(
+            queue_id, reason, source,
+        )
+        with closing(self._connect(immediate=True)) as db, db:
+            row = db.execute(
+                "SELECT status, project_id, run_token, started_at, completed_at, job_id "
+                "FROM mission_queue WHERE id=?", (queue_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Unknown queue item: {queue_id}")
+            status, project_id, run_token, started_at, completed_at, job_id = row
+            if status != "parked":
+                raise ValueError("Only an existing parked item can be restored")
+            if any(value is not None for value in (
+                run_token, started_at, completed_at, job_id,
+            )):
+                raise RuntimeError(
+                    "Parked item has execution history and cannot be restored"
+                )
+            changed = db.execute(
+                "UPDATE mission_queue SET status='queued' "
+                "WHERE id=? AND status='parked' AND run_token IS NULL",
+                (queue_id,),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("Queue item changed before it could be restored")
+            self._event(
+                db, None, "queue_unparked",
+                json.dumps({
+                    "previous_status": "parked", "project_id": project_id,
+                    "queue_id": queue_id, "reason": reason, "source": source,
+                }, sort_keys=True),
+            )
+        return self._queue_park_receipt(
+            queue_id, project_id, "parked", "queued", reason,
+        )
 
     def claim_next_queue_item(self, expected_queue_id: str | None = None) -> QueueClaim:
         self.initialize()

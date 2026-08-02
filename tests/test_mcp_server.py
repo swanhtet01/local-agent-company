@@ -12,6 +12,7 @@ from local_company.mcp_server import (
     PROJECT_CREATE_CONFIRMATION,
     PRODUCT_REVIEW_CONFIRMATION,
     PRODUCT_EXPERIMENT_CONFIRMATION,
+    QUEUE_LIFECYCLE_CONFIRMATION,
     RUN_CONFIRMATION,
     SCHEDULE_CHANGE_CONFIRMATION,
     SCHEDULE_CREATE_CONFIRMATION,
@@ -46,6 +47,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 {tool["name"] for tool in tools},
                 {
                     "status", "projects", "preflight", "queue_list", "queue_add", "queue_run",
+                    "queue_park", "queue_unpark",
                     "jobs", "job_result", "schedule_list", "schedule_create",
                     "schedule_set_enabled", "playbooks", "project_create", "project_overview",
                     "knowledge_list", "knowledge_add", "knowledge_search",
@@ -56,7 +58,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "product_experiment_review",
                 },
             )
-            self.assertEqual(len(tools), 23)
+            self.assertEqual(len(tools), 25)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -101,6 +103,49 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertFalse(receipt["stateMutated"])
             invalid = self._call(session, "queue_list", {"limit": 51}, 4)
             self.assertEqual(invalid["error"]["message"], "invalid_limit")
+
+    def test_queue_park_lifecycle_is_confirmed_reversible_and_model_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            queued = self._call(session, "queue_add", {
+                "objective": "Draft one internal product hypothesis",
+                "queueConfirmed": True,
+            })["result"]["structuredContent"]
+            queue_id = queued["queueId"]
+            refused = self._call(session, "queue_park", {
+                "expectedQueueId": queue_id,
+                "reason": "Preserve this mission while another project is active.",
+            }, 3)
+            self.assertEqual(
+                refused["error"]["message"],
+                "queue_lifecycle_confirmation_required",
+            )
+            parked = self._call(session, "queue_park", {
+                "expectedQueueId": queue_id,
+                "reason": "Preserve this mission while another project is active.",
+                "queueLifecycleConfirmation": QUEUE_LIFECYCLE_CONFIRMATION,
+            }, 4)["result"]["structuredContent"]
+            self.assertEqual(parked["status"], "parked")
+            self.assertTrue(parked["stateMutated"])
+            self.assertFalse(parked["modelCalled"])
+            self.assertFalse(parked["externalActionPerformed"])
+            listed = self._call(
+                session, "queue_list", {"status": "parked"}, 5,
+            )["result"]["structuredContent"]
+            self.assertEqual(listed["items"][0]["queueId"], queue_id)
+
+            restored = self._call(session, "queue_unpark", {
+                "expectedQueueId": queue_id,
+                "reason": "Restore this mission to its original executable queue position.",
+                "queueLifecycleConfirmation": QUEUE_LIFECYCLE_CONFIRMATION,
+            }, 6)["result"]["structuredContent"]
+            self.assertEqual(restored["status"], "queued")
+            self.assertTrue(restored["stateMutated"])
+            self.assertFalse(restored["modelCalled"])
+            self.assertEqual(
+                session.company_tools.company.queue_preflight()["queue_id"],
+                queue_id,
+            )
 
     def test_queue_run_requires_bound_confirmation_and_uses_injected_executor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

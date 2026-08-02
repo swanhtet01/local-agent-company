@@ -26,6 +26,7 @@ CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
 SUPERMEGA_WORKBENCH_SCHEMA = "local-ai.supermega-workbench.v1"
+SUPERMEGA_QUEUE_PARK_SCHEMA = "local-ai.supermega-queue-park.v1"
 OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
 VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v2"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
@@ -106,6 +107,7 @@ Examples:
   local-ai.cmd supermega
   local-ai.cmd supermega refresh
   local-ai.cmd supermega next
+  local-ai.cmd supermega park-next
   local-ai.cmd supermega plan "Choose one verified internal next action"
   local-ai.cmd supermega later "Draft one evidence-grounded release gap brief"
   local-ai.cmd supermega code --check
@@ -173,6 +175,14 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 ("queue", "preflight"), "supermega-next",
                 "Inspect the exact next queued mission and its blockers without running it.",
                 False, False,
+            )
+        if operation == "park-next":
+            if values:
+                raise ValueError("supermega_park_next_accepts_no_arguments")
+            return LaunchAction(
+                (), "supermega-park-next",
+                "Reversibly park only an incompatible exact queue head so SuperMega can proceed.",
+                False, True,
             )
         if operation in {"plan", "work", "later"}:
             objective = _supermega_objective(f"supermega_{operation}", values)
@@ -1211,7 +1221,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     if source not in sys.path:
         sys.path.insert(0, source)
     from local_company.config import default_company_home
-    from local_company.core import Company, MockModel
+    from local_company.core import Company, MockModel, QUEUE_PREFLIGHT_SCHEMA
     from local_company.focus import read_execution_focus
 
     company_home = default_company_home()
@@ -1220,7 +1230,8 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     focus: dict[str, object]
     queue: dict[str, object] = {
         "status": "unavailable", "queueId": None, "projectId": None,
-        "blockers": [], "ownerGateCategories": [],
+        "blockers": [], "ownerGateCategories": [], "parkableForFocus": False,
+        "parkedCount": None,
     }
     company = None
     try:
@@ -1257,6 +1268,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
             preflight = company.queue_preflight()
             blockers = preflight.get("blockers")
             owner_gates = preflight.get("owner_gate_categories")
+            preflight_effects = preflight.get("effects")
             queue = {
                 "status": preflight.get("status"),
                 "queueId": preflight.get("queue_id"),
@@ -1265,6 +1277,25 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
                 "ownerGateCategories": (
                     list(owner_gates[:10]) if isinstance(owner_gates, list) else []
                 ),
+                "parkableForFocus": (
+                    preflight.get("schema") == QUEUE_PREFLIGHT_SCHEMA
+                    and preflight.get("status") == "blocked"
+                    and blockers == ["execution_focus_mismatch"]
+                    and isinstance(preflight.get("queue_id"), str)
+                    and PENDING_EXPERIMENT_ID.fullmatch(preflight["queue_id"])
+                    is not None
+                    and isinstance(preflight.get("project_id"), str)
+                    and PENDING_EXPERIMENT_ID.fullmatch(preflight["project_id"])
+                    is not None
+                    and preflight.get("project_id") != project["projectId"]
+                    and focus["supermegaActive"] is True
+                    and preflight.get("submission_allowed") is False
+                    and preflight.get("model_execution_ready") is False
+                    and isinstance(preflight_effects, dict)
+                    and bool(preflight_effects)
+                    and all(value is False for value in preflight_effects.values())
+                ),
+                "parkedCount": company.queue_status_count("parked"),
             }
         except (KeyError, OSError, RuntimeError, TypeError, ValueError):
             pass
@@ -1289,6 +1320,9 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     elif queue["status"] == "unavailable":
         next_action = "inspect_unavailable_queue_state"
         command = "local-ai.cmd supermega next"
+    elif queue["parkableForFocus"] is True:
+        next_action = "park_incompatible_queue_head"
+        command = "local-ai.cmd supermega park-next"
     elif queue["status"] in {"blocked", "owner_gate_required"}:
         if queue["projectId"] != project["projectId"]:
             next_action = "inspect_incompatible_queue_head"
@@ -1332,6 +1366,8 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
             "refreshEvidence": "local-ai.cmd supermega refresh",
             "activateFocus": "local-ai.cmd supermega use",
             "inspectQueue": "local-ai.cmd supermega next",
+            "parkIncompatibleQueueHead": "local-ai.cmd supermega park-next",
+            "listParkedQueue": "local-ai.cmd company queue list --status parked",
             "plan": 'local-ai.cmd supermega plan "OBJECTIVE"',
             "queue": 'local-ai.cmd supermega later "OBJECTIVE"',
             "run": 'local-ai.cmd supermega work "OBJECTIVE"',
@@ -1343,6 +1379,100 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         "externalActionPerformed": False,
     }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0 if repository["status"] == "ready" and project["status"] == "ready" else 1
+
+
+def run_supermega_park_next(
+    action: LaunchAction, root: Path | None = None,
+) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.core import Company, MockModel, QUEUE_PREFLIGHT_SCHEMA
+    from local_company.focus import read_execution_focus
+
+    company_home = default_company_home()
+    try:
+        company = Company(company_home, MockModel())
+        detail = company.project_detail(SUPERMEGA_PROJECT_NAME)
+        project_row = detail["project"]
+        supermega_project_id = project_row[0]
+        focus = read_execution_focus(company_home)
+        preflight = company.queue_preflight()
+    except (
+        IndexError, KeyError, OSError, RuntimeError, TypeError, ValueError,
+    ) as error:
+        raise ValueError("supermega_queue_state_unavailable") from error
+    queue_id = preflight.get("queue_id")
+    queue_project_id = preflight.get("project_id")
+    blockers = preflight.get("blockers")
+    effects = preflight.get("effects")
+    safely_parkable = (
+        preflight.get("schema") == QUEUE_PREFLIGHT_SCHEMA
+        and preflight.get("status") == "blocked"
+        and preflight.get("submission_allowed") is False
+        and preflight.get("model_execution_ready") is False
+        and blockers == ["execution_focus_mismatch"]
+        and isinstance(queue_id, str)
+        and PENDING_EXPERIMENT_ID.fullmatch(queue_id) is not None
+        and isinstance(queue_project_id, str)
+        and PENDING_EXPERIMENT_ID.fullmatch(queue_project_id) is not None
+        and queue_project_id != supermega_project_id
+        and focus.get("enabled") is True
+        and focus.get("projectId") == supermega_project_id
+        and isinstance(effects, dict)
+        and bool(effects)
+        and all(value is False for value in effects.values())
+    )
+    if not safely_parkable:
+        raise ValueError("supermega_queue_head_not_safely_parkable")
+
+    reason = (
+        "Preserve an incompatible queue head while SuperMega remains the "
+        "active execution focus."
+    )
+    try:
+        parked = company.park_queue_item(
+            queue_id, reason, source="supermega-workbench",
+            require_due_head=True,
+        )
+    except RuntimeError as error:
+        raise ValueError("supermega_queue_changed_before_park") from error
+    try:
+        next_preflight = company.queue_preflight()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        next_preflight = {
+            "status": "unavailable", "queue_id": None,
+            "project_id": None, "blockers": [],
+        }
+    next_blockers = next_preflight.get("blockers")
+    print(json.dumps({
+        "schema": SUPERMEGA_QUEUE_PARK_SCHEMA,
+        "status": "parked",
+        "parkedQueueId": queue_id,
+        "parkedProjectId": queue_project_id,
+        "restorable": True,
+        "restoreCommand": (
+            f'local-ai.cmd company queue unpark {queue_id} --reason '
+            '"Restore this preserved mission to its original queue position."'
+        ),
+        "nextQueue": {
+            "status": next_preflight.get("status"),
+            "queueId": next_preflight.get("queue_id"),
+            "projectId": next_preflight.get("project_id"),
+            "blockers": (
+                list(next_blockers[:10])
+                if isinstance(next_blockers, list) else []
+            ),
+        },
+        "effects": parked["effects"],
+        "modelCalled": False,
+        "stateMutated": True,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
 
 
 def run_autopilot(action: LaunchAction, root: Path | None = None) -> int:
@@ -1811,6 +1941,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if action.mode == "supermega-status":
             return run_supermega_status(action)
+        if action.mode == "supermega-park-next":
+            return run_supermega_park_next(action)
         if action.mode == "supermega-code":
             return run_supermega_code(action)
         if action.mode in {"code", "vision", "vision-lite"}:

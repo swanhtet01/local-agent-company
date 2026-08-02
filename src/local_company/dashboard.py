@@ -929,7 +929,7 @@ def render_queue_retry_preflight(company: Company, queue_id: str) -> str:
         }
         or preflight.get("queue_status") not in {
             "queued", "running", "complete", "failed", "quality_failed",
-            "superseded", "cancelled", "needs_approval",
+            "superseded", "cancelled", "needs_approval", "parked",
         }
         or type(preflight.get("reset_eligible")) is not bool
         or type(preflight.get("retry_execution_ready")) is not bool

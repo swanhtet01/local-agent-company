@@ -101,20 +101,22 @@ echo 1. Show SuperMega status and exact next action ^(no model^)
 echo 2. Refresh changed SuperMega evidence ^(local state only^)
 echo 3. Make SuperMega the active execution focus
 echo 4. Inspect the exact queue head and blockers ^(no model^)
-echo 5. Preview a SuperMega team plan ^(no model^)
-echo 6. Queue SuperMega work for autopilot ^(no model^)
-echo 7. Run one bounded SuperMega team now
-echo 8. Check SuperMega coding-agent readiness
-echo 9. Open SuperMega coding agent
+echo 5. Park an incompatible queue head ^(local, reversible, no model^)
+echo 6. Preview a SuperMega team plan ^(no model^)
+echo 7. Queue SuperMega work for autopilot ^(no model^)
+echo 8. Run one bounded SuperMega team now
+echo 9. Check SuperMega coding-agent readiness
+echo A. Open SuperMega coding agent
 echo 0. Back to main menu
 echo.
-choice /c 1234567890 /n /m "Choose 0-9: "
-if errorlevel 10 goto menu
-if errorlevel 9 goto supermega_code
-if errorlevel 8 goto supermega_code_check
-if errorlevel 7 goto supermega_work
-if errorlevel 6 goto supermega_later
-if errorlevel 5 goto supermega_plan
+choice /c 123456789A0 /n /m "Choose 0-9, A, or 0: "
+if errorlevel 11 goto menu
+if errorlevel 10 goto supermega_code
+if errorlevel 9 goto supermega_code_check
+if errorlevel 8 goto supermega_work
+if errorlevel 7 goto supermega_later
+if errorlevel 6 goto supermega_plan
+if errorlevel 5 goto supermega_park_next
 if errorlevel 4 goto supermega_next
 if errorlevel 3 goto supermega_use
 if errorlevel 2 goto supermega_refresh
@@ -140,6 +142,12 @@ goto supermega_menu
 
 :supermega_next
 call "%LOCAL_AI_ROOT%local-ai.cmd" supermega next
+echo.
+pause
+goto supermega_menu
+
+:supermega_park_next
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega park-next
 echo.
 pause
 goto supermega_menu

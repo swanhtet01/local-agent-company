@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_supermega_code, run_supermega_status, run_validation_pack, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_supermega_code, run_supermega_park_next, run_supermega_status, run_validation_pack, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -69,6 +69,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["brief"]).command, ())
         self.assertEqual(translate(["supermega"]).mode, "supermega-status")
         self.assertEqual(translate(["supermega", "next"]).command, ("queue", "preflight"))
+        self.assertEqual(translate(["supermega", "park-next"]).mode, "supermega-park-next")
         self.assertEqual(
             translate(["supermega", "plan", "Review release proof"]).command,
             ("preflight", "Review release proof", "--project", "SuperMega"),
@@ -521,6 +522,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-ai.cmd" dashboard', source)
         self.assertIn('local-ai.cmd" supermega', source)
         self.assertIn('local-ai.cmd" supermega next', source)
+        self.assertIn('local-ai.cmd" supermega park-next', source)
         self.assertIn('if /I "%~1"=="--supermega" goto supermega_menu', source)
         self.assertNotIn("taskkill", source.lower())
         self.assertNotIn("powershell", source.lower())
@@ -584,10 +586,18 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             set_execution_focus(home, project_id, "SuperMega", 4)
             git_status = subprocess.CompletedProcess([], 0, "## main...origin/main\n", "")
             blocked = {
+                "schema": "local-company.queue-preflight.v1",
                 "status": "blocked", "queue_id": "a" * 12,
                 "project_id": "b" * 12,
                 "blockers": ["execution_focus_mismatch"],
                 "owner_gate_categories": [],
+                "submission_allowed": False,
+                "model_execution_ready": False,
+                "effects": {
+                    "queue_claimed": False, "job_created": False,
+                    "model_called": False, "state_mutated": False,
+                    "work_started": False,
+                },
             }
             output = io.StringIO()
             with (
@@ -601,9 +611,90 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             receipt = json.loads(output.getvalue())
             self.assertEqual(receipt["status"], "attention")
             self.assertEqual(receipt["queue"]["queueId"], "a" * 12)
-            self.assertEqual(receipt["nextAction"], "inspect_incompatible_queue_head")
-            self.assertEqual(receipt["command"], "local-ai.cmd supermega next")
+            self.assertTrue(receipt["queue"]["parkableForFocus"])
+            self.assertEqual(receipt["queue"]["parkedCount"], 0)
+            self.assertEqual(receipt["nextAction"], "park_incompatible_queue_head")
+            self.assertEqual(receipt["command"], "local-ai.cmd supermega park-next")
             self.assertNotIn(str(base), output.getvalue())
+
+    def test_supermega_can_park_only_an_exact_incompatible_queue_head(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "local-agent-company"
+            home = base / "company"
+            root.mkdir()
+            company = Company(home, MockModel())
+            older_id = company.create_project("Older Lab")
+            supermega_id = company.create_project("SuperMega")
+            evidence = base / "evidence.md"
+            evidence.write_text("Current local evidence.\n", encoding="utf-8")
+            company.add_knowledge(evidence, older_id)
+            company.add_knowledge(evidence, supermega_id)
+            blocked_queue = company.enqueue(
+                "Prepare one internal advisory brief", older_id, priority=70,
+            )
+            active_queue = company.enqueue(
+                "Prepare one internal SuperMega advisory brief",
+                supermega_id, priority=50,
+            )
+            set_execution_focus(home, supermega_id, "SuperMega", 4)
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    run_supermega_park_next(
+                        translate(["supermega", "park-next"]), root,
+                    ),
+                    0,
+                )
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "parked")
+            self.assertEqual(receipt["parkedQueueId"], blocked_queue)
+            self.assertEqual(receipt["nextQueue"]["queueId"], active_queue)
+            self.assertEqual(receipt["nextQueue"]["status"], "ready")
+            self.assertTrue(receipt["restorable"])
+            self.assertFalse(receipt["modelCalled"])
+            self.assertTrue(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
+            self.assertEqual(company.queue_items("parked")[0][0], blocked_queue)
+            self.assertNotIn("Prepare one", output.getvalue())
+            self.assertNotIn(str(base), output.getvalue())
+
+    def test_supermega_refuses_to_park_its_own_ready_queue_head(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "local-agent-company"
+            home = base / "company"
+            root.mkdir()
+            company = Company(home, MockModel())
+            supermega_id = company.create_project("SuperMega")
+            evidence = base / "evidence.md"
+            evidence.write_text("Current local evidence.\n", encoding="utf-8")
+            company.add_knowledge(evidence, supermega_id)
+            queue_id = company.enqueue(
+                "Prepare one internal SuperMega advisory brief", supermega_id,
+            )
+            set_execution_focus(home, supermega_id, "SuperMega", 4)
+            database_before = company.db_path.read_bytes()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                self.assertRaisesRegex(
+                    ValueError, "supermega_queue_head_not_safely_parkable",
+                ),
+            ):
+                run_supermega_park_next(
+                    translate(["supermega", "park-next"]), root,
+                )
+            self.assertEqual(company.db_path.read_bytes(), database_before)
+            self.assertEqual(company.queue_items("queued")[0][0], queue_id)
 
     def test_supermega_code_targets_exact_sibling_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
