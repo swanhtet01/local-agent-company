@@ -98,7 +98,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 22
+        self.exposed_tools = 23
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -508,10 +508,9 @@ class CompanyTools:
             PRODUCT_EXPERIMENT_CATEGORIES,
             key=lambda item: (category_counts.get(item, 0), PRODUCT_EXPERIMENT_CATEGORIES.index(item)),
         )
-        sequence = category_counts.get(category, 0) + 1
         plans = {
             "coding": {
-                "label": f"Coding operability review {sequence:02d}",
+                "label": "Coding operability review",
                 "requiredActions": ["status", "project_overview", "playbooks"],
                 "prompt": (
                     f"Use the local company tools only. Call status, project_overview for "
@@ -522,7 +521,7 @@ class CompanyTools:
                 ),
             },
             "business": {
-                "label": f"Business evidence decision {sequence:02d}",
+                "label": "Business evidence decision",
                 "requiredActions": ["product_evidence_status", "product_evidence_next"],
                 "prompt": (
                     f"Use the local company tools only. Call product_evidence_status and "
@@ -533,7 +532,7 @@ class CompanyTools:
                 ),
             },
             "data-research": {
-                "label": f"Evidence retrieval audit {sequence:02d}",
+                "label": "Evidence retrieval audit",
                 "requiredActions": ["knowledge_list", "knowledge_search"],
                 "prompt": (
                     f"Use the local company tools only. Call knowledge_list for project "
@@ -584,6 +583,82 @@ class CompanyTools:
                 "run_runner_invocation_then_human_review_then_product_experiment_review"
                 if plan else "inspect_evidence_and_decide_whether_to_design_a_new_milestone"
             ),
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+
+    def product_offer_next(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"project"})
+        project = value.get("project")
+        if not isinstance(project, str) or not project.strip() or len(project) > 80:
+            raise ProtocolError(-32602, "invalid_project")
+        try:
+            evidence = self.company.product_evidence_status(project)
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_project") from error
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for item in evidence["reviews"]:
+            if (
+                item.get("source") == "external_experiment"
+                and item.get("decision") == "accepted"
+                and item.get("paid_setup_signal") == "yes"
+                and type(item.get("corrections")) is int
+                and item["corrections"] <= 1
+                and item.get("checks_passed") is True
+                and isinstance(item.get("label"), str)
+                and isinstance(item.get("category"), str)
+            ):
+                groups.setdefault((item["category"], item["label"]), []).append(item)
+        repeated = [
+            (key, items) for key, items in groups.items() if len(items) >= 2
+        ]
+        repeated.sort(key=lambda entry: (-len(entry[1]), entry[0][0], entry[0][1]))
+        gate_results = {
+            "tenMeasuredCrossCategoryReviews": evidence["milestone_reached"] is True,
+            "repeatedAcceptedPaidSetupWorkflow": bool(repeated),
+            "staleBindingsAbsent": evidence["stale_review_count"] == 0,
+        }
+        ready = all(gate_results.values())
+        offer = None
+        if ready:
+            (category, label), items = repeated[0]
+            runtimes = [float(item["runtime_seconds"]) for item in items]
+            offer = {
+                "workflow": label, "category": category,
+                "evidenceRuns": len(items),
+                "maximumCorrectionsObserved": max(item["corrections"] for item in items),
+                "maximumPeakMemoryMbObserved": max(item["peak_memory_mb"] for item in items),
+                "runtimeSecondsRange": {
+                    "minimum": round(min(runtimes), 3),
+                    "maximum": round(max(runtimes), 3),
+                },
+                "package": [
+                    "private local installation", "validated workflow configuration",
+                    "operator training", "bounded maintenance and support",
+                ],
+                "allowedClaims": [
+                    f"{len(items)} integrity-checked local runs were accepted",
+                    "each supporting reviewer marked paid setup signal yes",
+                    "each supporting run required at most one correction",
+                ],
+                "prohibitedClaims": [
+                    "guaranteed customer ROI", "general model accuracy",
+                    "revenue already earned", "hosted or unattended production readiness",
+                ],
+            }
+        missing = [name for name, passed in gate_results.items() if not passed]
+        return {
+            "schema": "local-company.mcp-product-offer-next.v1",
+            "status": "ready_for_owner_packaging" if ready else "evidence_required",
+            "project": evidence["project"], "gateResults": gate_results,
+            "missingProof": missing, "offer": offer,
+            "reviewedMissions": evidence["reviewed_missions"],
+            "completeMeasurements": evidence["complete_measurements"],
+            "nextAction": (
+                "owner_review_offer_then_prepare_draft_materials_only"
+                if ready else "run_and_human_review_more_balanced_product_experiments"
+            ),
+            "externalPublicationAuthorized": False,
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }
@@ -1145,6 +1220,11 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             "product_experiment_next", "Plan the next category-balanced measured local product experiment.",
             _schema(["project"], {"project": project}),
             company_tools.product_experiment_next, True,
+        ),
+        Tool(
+            "product_offer_next", "Gate the strongest repeatably validated workflow for owner-reviewed packaging.",
+            _schema(["project"], {"project": project}),
+            company_tools.product_offer_next, True,
         ),
         Tool(
             "product_experiment_review", "Preserve one measured runner receipt and append a confirmed human product review.",

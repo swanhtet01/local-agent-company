@@ -81,3 +81,10 @@ autonomous iteration useful without manufacturing product-market evidence.
 `local-ai.cmd experiment-run` can execute that planned prompt and bind the
 runner receipt to its required tool actions, but it deliberately stops before
 the human acceptance and paid-setup judgment.
+
+The read-only MCP action `product_offer_next` permits owner-reviewed packaging
+only after the full ten-run measured cross-category milestone and at least two
+integrity-checked runs of the same labeled workflow were accepted with a
+positive paid-setup signal and no more than one correction each. It generates
+bounded evidence claims and explicit prohibited claims; it never authorizes
+publication, outreach, pricing promises, deployment, or revenue claims.

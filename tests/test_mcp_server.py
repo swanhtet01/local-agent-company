@@ -52,10 +52,11 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "product_evidence_status", "product_evidence_review",
                     "product_evidence_next",
                     "product_experiment_next",
+                    "product_offer_next",
                     "product_experiment_review",
                 },
             )
-            self.assertEqual(len(tools), 22)
+            self.assertEqual(len(tools), 23)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -417,6 +418,42 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 second["experiment"]["requiredActions"],
                 ["product_evidence_status", "product_evidence_next"],
             )
+
+    def test_product_offer_requires_milestone_and_repeated_paid_setup_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            project_id = session.company_tools.company.create_project("Offer Lab")
+            blocked = self._call(session, "product_offer_next", {
+                "project": project_id,
+            }, 3)["result"]["structuredContent"]
+            self.assertEqual(blocked["status"], "evidence_required")
+            self.assertIn("tenMeasuredCrossCategoryReviews", blocked["missingProof"])
+            self.assertIn("repeatedAcceptedPaidSetupWorkflow", blocked["missingProof"])
+            self.assertIsNone(blocked["offer"])
+
+            categories = ["coding", "coding", "business", "data-research"]
+            for index in range(10):
+                category = categories[index % len(categories)]
+                repeated = index < 2
+                session.company_tools.company.record_product_experiment_review(
+                    project_id,
+                    "Repository safety audit" if repeated else f"Workflow {index}",
+                    category, "accepted", 0 if repeated else 2,
+                    "yes" if repeated else "unknown",
+                    20.0 + index, 400 + index, 0, True, "fixture", f"{index + 1:064x}",
+                )
+            before = session.company_tools.company.product_evidence_status(project_id)
+            ready = self._call(session, "product_offer_next", {
+                "project": project_id,
+            }, 4)["result"]["structuredContent"]
+            after = session.company_tools.company.product_evidence_status(project_id)
+            self.assertEqual(ready["status"], "ready_for_owner_packaging")
+            self.assertEqual(ready["offer"]["workflow"], "Repository safety audit")
+            self.assertEqual(ready["offer"]["evidenceRuns"], 2)
+            self.assertFalse(ready["externalPublicationAuthorized"])
+            self.assertFalse(ready["modelCalled"])
+            self.assertFalse(ready["stateMutated"])
+            self.assertEqual(before["reviewed_missions"], after["reviewed_missions"])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
