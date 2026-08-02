@@ -8,13 +8,16 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from scripts.run_lmstudio_code import GIB, MODEL_IDENTIFIER, main
+from scripts.run_lmstudio_code import GIB, MODEL_IDENTIFIER, _validate_opencode_config, main
 
 
 class LmStudioLocalCodeTests(unittest.TestCase):
     def test_windows_launcher_routes_lmstudio_arguments_exactly(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-code.cmd").read_text(encoding="utf-8")
         self.assertIn('if /I "%~1"=="--lmstudio" goto RUN_LMSTUDIO', source)
+        self.assertIn('if /I "%~1"=="--vision" goto RUN_VISION', source)
+        self.assertIn(':RUN_VISION', source)
+        self.assertIn('--agent vision-product', source)
         self.assertIn(':RUN_LMSTUDIO', source)
         self.assertIn('python "%~dp0scripts\\run_lmstudio_code.py" %*', source)
 
@@ -32,8 +35,32 @@ class LmStudioLocalCodeTests(unittest.TestCase):
                 "options": {"baseURL": "http://127.0.0.1:1234/v1"},
                 "models": {MODEL_IDENTIFIER: {"name": "fixture"}},
             }},
+            "mcp": {"vision_product": {
+                "type": "local", "enabled": True, "command": ["vision.cmd", "mcp"],
+                "environment": {"SUPERMEGA_VISION_MCP_PROFILE": "product"},
+            }},
+            "agent": {"vision-product": {
+                "mode": "primary",
+                "permission": {
+                    name: "deny" for name in {
+                        "read", "edit", "glob", "grep", "list", "bash", "task",
+                        "external_directory", "webfetch", "websearch",
+                    }
+                },
+                "tools": {"vision_product_*": True},
+            }},
         }), encoding="utf-8")
         return root, lms, opencode, config
+
+    def test_product_agent_config_is_separate_restricted_and_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _root, _lms, _opencode, config = self._files(directory)
+            _validate_opencode_config(config, "vision-product")
+            value = json.loads(config.read_text(encoding="utf-8"))
+            del value["agent"]["vision-product"]["permission"]["bash"]
+            config.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "opencode_vision_product_config_invalid"):
+                _validate_opencode_config(config, "vision-product")
 
     @patch("scripts.run_lmstudio_code._model_installed", return_value=True)
     @patch("scripts.run_lmstudio_code._loaded_models", return_value=[])
@@ -127,6 +154,41 @@ class LmStudioLocalCodeTests(unittest.TestCase):
             self.assertIn([str(lms), "server", "stop"], commands)
             run.assert_called_once_with(
                 [str(opencode), ".", "--model", f"lmstudio/{MODEL_IDENTIFIER}"],
+                cwd=root, check=False,
+            )
+
+    @patch("scripts.run_lmstudio_code.available_memory_bytes", return_value=6 * GIB)
+    @patch("scripts.run_lmstudio_code.readiness")
+    @patch("scripts.run_lmstudio_code._loaded_models")
+    @patch("scripts.run_lmstudio_code._server_status")
+    @patch("scripts.run_lmstudio_code._command")
+    @patch("scripts.run_lmstudio_code.subprocess.run")
+    def test_product_agent_uses_quality_model_and_explicit_agent(
+        self, run, command, server_status, loaded_models, readiness, _memory,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, lms, opencode, _config = self._files(directory)
+            readiness.return_value = (root, lms, opencode)
+            command.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            server_status.side_effect = [{"running": True, "port": 1234}, {"running": False}]
+            loaded_models.side_effect = [[{"identifier": MODEL_IDENTIFIER}], []]
+            run.return_value = MagicMock(returncode=0)
+            with redirect_stdout(io.StringIO()):
+                code = main([
+                    str(root), "--agent", "vision-product",
+                    "--lms", str(lms), "--opencode", str(opencode),
+                ])
+            self.assertEqual(code, 0)
+            readiness.assert_called_once_with(
+                root, lms, opencode,
+                Path.home() / ".config" / "opencode" / "opencode.json",
+                6 * GIB, "vision-product",
+            )
+            run.assert_called_once_with(
+                [
+                    str(opencode), ".", "--model", f"lmstudio/{MODEL_IDENTIFIER}",
+                    "--agent", "vision-product",
+                ],
                 cwd=root, check=False,
             )
 

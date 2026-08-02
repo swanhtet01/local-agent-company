@@ -113,6 +113,23 @@ When the receipt is `ready`, start the interactive 4B coding agent with:
 local-code.cmd --lmstudio C:\path\to\project
 ```
 
+For the governed SuperMega Vision product tools, use the dedicated quality-model
+agent instead of the three-tool tiny-model starter profile:
+
+```powershell
+local-code.cmd --vision --check C:\Users\thesw\Projects\supermega-vision
+local-code.cmd --vision C:\Users\thesw\Projects\supermega-vision
+```
+
+The first command is read-only and starts no listener or model. The second uses
+the same bounded LM Studio 4B lifecycle, then opens OpenCode with the explicit
+`vision-product` agent. That agent can access the separate
+`SUPERMEGA_VISION_MCP_PROFILE=product` server while ordinary OpenCode sessions
+keep the original three-tool `vision` starter profile. Both agents deny file,
+shell, task, web, and external-directory tools; vision operations remain
+available only through their scoped MCP server. Closing OpenCode unloads the
+model and stops the loopback server.
+
 The launcher refuses an active Ollama model, an existing LM Studio server or
 loaded model, an unrecognized OpenCode provider, or less than 5 GiB currently
 available memory. An admitted run starts LM Studio only on `127.0.0.1:1234`

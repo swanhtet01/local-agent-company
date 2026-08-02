@@ -9,6 +9,7 @@ if not exist "%OPENCODE_EXE%" (
 )
 
 if /I "%~1"=="--run" goto RUN_HEADLESS
+if /I "%~1"=="--vision" goto RUN_VISION
 if /I "%~1"=="--lmstudio" goto RUN_LMSTUDIO
 
 set "CHECK_ONLY=0"
@@ -54,6 +55,17 @@ exit /b %EXIT_CODE%
 
 :RUN_HEADLESS
 python "%~dp0scripts\run_local_code_agent.py" %*
+exit /b %ERRORLEVEL%
+
+:RUN_VISION
+set "VISION_TARGET=%CD%"
+if /I "%~2"=="--check" (
+  if not "%~3"=="" set "VISION_TARGET=%~f3"
+  python "%~dp0scripts\run_lmstudio_code.py" --check "%VISION_TARGET%" --agent vision-product
+) else (
+  if not "%~2"=="" set "VISION_TARGET=%~f2"
+  python "%~dp0scripts\run_lmstudio_code.py" "%VISION_TARGET%" --agent vision-product
+)
 exit /b %ERRORLEVEL%
 
 :RUN_LMSTUDIO

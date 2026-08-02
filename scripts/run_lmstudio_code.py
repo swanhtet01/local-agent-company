@@ -99,7 +99,7 @@ def _ollama_model_loaded() -> bool:
     return bool(completed.stdout.splitlines()[1:])
 
 
-def _validate_opencode_config(path: Path) -> None:
+def _validate_opencode_config(path: Path, agent: str | None = None) -> None:
     supplied = path.absolute()
     if supplied.is_symlink() or not supplied.is_file() or supplied.stat().st_size > MAX_OUTPUT_BYTES:
         raise ValueError("opencode_lmstudio_config_invalid")
@@ -116,6 +116,29 @@ def _validate_opencode_config(path: Path) -> None:
         or MODEL_IDENTIFIER not in provider["models"]
     ):
         raise ValueError("opencode_lmstudio_config_invalid")
+    if agent == "vision-product":
+        product_mcp = value.get("mcp", {}).get("vision_product")
+        product_agent = value.get("agent", {}).get("vision-product")
+        if (
+            not isinstance(product_mcp, dict)
+            or product_mcp.get("type") != "local"
+            or product_mcp.get("enabled") is not True
+            or not isinstance(product_mcp.get("command"), list)
+            or product_mcp.get("environment") != {
+                "SUPERMEGA_VISION_MCP_PROFILE": "product",
+            }
+            or not isinstance(product_agent, dict)
+            or product_agent.get("mode") != "primary"
+            or product_agent.get("tools") != {"vision_product_*": True}
+            or any(
+                product_agent.get("permission", {}).get(name) != "deny"
+                for name in {
+                    "read", "edit", "glob", "grep", "list", "bash", "task",
+                    "external_directory", "webfetch", "websearch",
+                }
+            )
+        ):
+            raise ValueError("opencode_vision_product_config_invalid")
 
 
 def _receipt(*, status: str, reason: str, available: int, **extra: Any) -> dict[str, Any]:
@@ -135,13 +158,14 @@ def _receipt(*, status: str, reason: str, available: int, **extra: Any) -> dict[
 
 def readiness(
     project: Path, lms: Path, opencode: Path, config: Path, available: int,
+    agent: str | None = None,
 ) -> tuple[Path, Path, Path]:
     if type(available) is not int or available < 0:
         raise ValueError("available_memory_invalid")
     root = _project(project)
     trusted_lms = _safe_executable(lms, {".exe"})
     trusted_opencode = _safe_executable(opencode, {".cmd", ".exe"})
-    _validate_opencode_config(config)
+    _validate_opencode_config(config, agent)
     if _ollama_model_loaded():
         raise ValueError("ollama_model_already_loaded")
     if _server_status(trusted_lms)["running"]:
@@ -177,6 +201,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Run OpenCode on the existing LM Studio Qwen 3.5 4B model.")
     result.add_argument("--lmstudio", action="store_true", help=argparse.SUPPRESS)
     result.add_argument("--check", action="store_true")
+    result.add_argument("--agent", choices=["vision-product"])
     result.add_argument("project", nargs="?", type=Path, default=Path.cwd())
     result.add_argument("--lms", type=Path, default=DEFAULT_LMS)
     result.add_argument("--opencode", type=Path, default=DEFAULT_OPENCODE)
@@ -194,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         available = available_memory_bytes()
         root, lms, opencode = readiness(
-            args.project, args.lms, args.opencode, args.config, available,
+            args.project, args.lms, args.opencode, args.config, available, args.agent,
         )
         if args.check:
             print(json.dumps(_receipt(
@@ -219,9 +244,10 @@ def main(argv: list[str] | None = None) -> int:
             or not any(item.get("identifier") == MODEL_IDENTIFIER for item in loaded_values)
         ):
             raise RuntimeError("lmstudio_model_load_failed")
-        agent = subprocess.run(
-            [str(opencode), ".", "--model", OPENCODE_MODEL], cwd=root, check=False,
-        )
+        command = [str(opencode), ".", "--model", OPENCODE_MODEL]
+        if args.agent is not None:
+            command.extend(["--agent", args.agent])
+        agent = subprocess.run(command, cwd=root, check=False)
         model_unloaded, server_stopped = _cleanup(
             lms, load_attempted=load_attempted, server_started=server_started,
         )
