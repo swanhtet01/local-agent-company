@@ -68,7 +68,8 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
   local-ai.cmd run-next [options]              Run one due queued mission
   local-ai.cmd cycle [model options]           Materialize and run at most one mission
-  local-ai.cmd autopilot install|status|remove Manage the six-hour local cycle task
+  local-ai.cmd autopilot install|status|repair|remove
+                                              Manage the six-hour local cycle task
   local-ai.cmd dashboard [options]             Start the local dashboard on 127.0.0.1
   local-ai.cmd dashboard-status                Check the dashboard service
   local-ai.cmd stop                            Stop the verified local dashboard
@@ -162,7 +163,7 @@ def translate(argv: list[str]) -> LaunchAction | None:
             raise ValueError("cycle_queue_id_is_selected_by_verified_preflight")
         return LaunchAction(tuple(tail), "cycle", "Materialize due schedules and run at most one exact, gate-cleared local mission.", True, True)
     if name == "autopilot":
-        if len(tail) != 1 or tail[0].lower() not in {"install", "status", "remove"}:
+        if len(tail) != 1 or tail[0].lower() not in {"install", "status", "repair", "remove"}:
             raise ValueError("autopilot_action_required")
         operation = tail[0].lower()
         return LaunchAction(

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Install', 'Status', 'Remove')]
+    [ValidateSet('Install', 'Status', 'Remove', 'Repair')]
     [string]$Mode
 )
 
@@ -41,7 +41,7 @@ function Get-CycleTask {
     return Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 }
 
-function Test-CycleTask([object]$Task) {
+function Test-CycleTaskPolicy([object]$Task) {
     if ($null -eq $Task) { return $false }
     $actions = @($Task.Actions)
     $triggers = @($Task.Triggers)
@@ -50,7 +50,6 @@ function Test-CycleTask([object]$Task) {
     $trigger = $triggers[0]
     return (
         [string]::Equals([string]$action.Execute, $powerShell, [System.StringComparison]::OrdinalIgnoreCase) -and
-        [string]::Equals([string]$action.Arguments, $arguments, [System.StringComparison]::Ordinal) -and
         [string]::Equals([string]$action.WorkingDirectory, $root, [System.StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$trigger.Repetition.Interval, $interval, [System.StringComparison]::Ordinal) -and
         [string]::Equals([string]$Task.Principal.LogonType, 'Interactive', [System.StringComparison]::OrdinalIgnoreCase) -and
@@ -63,6 +62,31 @@ function Test-CycleTask([object]$Task) {
         -not $Task.Settings.IdleSettings.StopOnIdleEnd -and
         $Task.Settings.Enabled
     )
+}
+
+function Test-CycleTask([object]$Task) {
+    if (-not (Test-CycleTaskPolicy $Task)) { return $false }
+    $action = @($Task.Actions)[0]
+    return [string]::Equals([string]$action.Arguments, $arguments, [System.StringComparison]::Ordinal)
+}
+
+function Test-CycleTaskRepairable([object]$Task) {
+    if (-not (Test-CycleTaskPolicy $Task)) { return $false }
+    $action = @($Task.Actions)[0]
+    $prefix = '-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand '
+    $actualArguments = [string]$action.Arguments
+    if (-not $actualArguments.StartsWith($prefix, [System.StringComparison]::Ordinal)) { return $false }
+    $encoded = $actualArguments.Substring($prefix.Length)
+    if ($encoded -notmatch '\A[A-Za-z0-9+/]+={0,2}\z') { return $false }
+    try {
+        $actualGuard = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+    }
+    catch { return $false }
+    $digestPattern = "'[0-9a-f]{64}'"
+    if ([regex]::Matches($actualGuard, $digestPattern).Count -ne 3) { return $false }
+    $normalizedActual = [regex]::Replace($actualGuard, $digestPattern, "'<source-digest>'")
+    $normalizedExpected = [regex]::Replace($guardCommand, $digestPattern, "'<source-digest>'")
+    return [string]::Equals($normalizedActual, $normalizedExpected, [System.StringComparison]::Ordinal)
 }
 
 function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
@@ -145,6 +169,21 @@ try {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
         Write-Receipt -Status 'removed' -Task $null -Changed $true
         exit 0
+    }
+    if ($Mode -eq 'Repair' -and $null -ne $existing) {
+        if (Test-CycleTask $existing) {
+            Write-Receipt -Status 'ready' -Task $existing -Changed $false
+            exit 0
+        }
+        if (-not (Test-CycleTaskRepairable $existing)) {
+            throw 'task_repair_refused_untrusted_definition'
+        }
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+        $mutationCommitted = $true
+        $existing = $null
+    }
+    elseif ($Mode -eq 'Repair') {
+        throw 'task_repair_missing_definition'
     }
     if ($null -ne $existing) {
         if (-not (Test-CycleTask $existing)) { throw 'task_install_refused_unverified_definition' }

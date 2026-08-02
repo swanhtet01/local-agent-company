@@ -59,6 +59,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["vision"]).command, ("--vision",))
         self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
+        self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
 
     def test_effect_receipt_is_explicit_about_model_state_and_external_authority(self) -> None:
         planned = explain(translate(["plan", "Explore an idea"]))
@@ -344,6 +345,10 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn("-MultipleInstances IgnoreNew", source)
         self.assertIn("modelMemoryGateBytes = 2147483648", source)
         self.assertIn("sourceDigestsPinned = $true", source)
+        self.assertIn("Test-CycleTaskRepairable", source)
+        self.assertIn("task_repair_refused_untrusted_definition", source)
+        self.assertIn("[regex]::Matches($actualGuard, $digestPattern).Count -ne 3", source)
+        self.assertIn("Unregister-ScheduledTask -TaskName $taskName -Confirm:$false", source)
         self.assertIn("boundedMemoryRecovery = $true", source)
         self.assertIn("-RunOnlyIfIdle -IdleDuration (New-TimeSpan -Minutes 10)", source)
         self.assertIn("-IdleWaitTimeout (New-TimeSpan -Hours 6) -DontStopOnIdleEnd", source)

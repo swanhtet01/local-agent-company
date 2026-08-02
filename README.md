@@ -106,8 +106,13 @@ The scheduled-task action also stores SHA-256 pins for both
 `run_scheduled_cycle.py` and `local_ai.py`. A task-resident PowerShell preflight
 rehashes both files before Python starts; runner drift returns task result `90`
 and launcher drift returns `91`, with no queue claim or model call. Deliberate
-source updates therefore require removing the verified task before editing and
-reinstalling it after tests pass.
+source updates therefore require refreshing the task pins after tests pass.
+If only those pinned source digests become stale after a verified local update,
+`autopilot repair` decodes the existing task action and requires its complete
+command template, paths, cadence, idle policy, user scope, privilege, overlap
+policy, and execution limit to remain exact. It then replaces and re-verifies
+that same task with current pins. Any other mismatch is refused; `repair` cannot
+adopt or overwrite an arbitrary scheduled task.
 The task also pins the existing SuperMega non-terminating Codex working-set
 optimizer. When—and only when—the first cycle is blocked for insufficient
 memory, the runner applies that verified trim once, validates its zero-
