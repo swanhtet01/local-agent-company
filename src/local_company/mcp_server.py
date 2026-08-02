@@ -22,6 +22,8 @@ MAX_TOOL_CALLS = 128
 SCHEMA = "local-company.mcp-capabilities.v1"
 MINIMUM_EXECUTION_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 RUN_CONFIRMATION = "RUN ONE LOCAL COMPANY MISSION"
+SCHEDULE_CREATE_CONFIRMATION = "CREATE RECURRING LOCAL MISSION"
+SCHEDULE_CHANGE_CONFIRMATION = "CHANGE LOCAL MISSION SCHEDULE"
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -94,7 +96,7 @@ class CompanyTools:
         work = self.company.work_state_snapshot()
         return {
             "schema": SCHEMA, "status": "ready", "transport": "stdio",
-            "localOnly": True, "networkListener": False, "exposedTools": 8,
+            "localOnly": True, "networkListener": False, "exposedTools": 11,
             "modelCalled": False, "externalActionPerformed": False,
             "focus": {
                 "enabled": focus["enabled"], "projectId": focus.get("projectId"),
@@ -221,6 +223,111 @@ class CompanyTools:
                 "checks": checks if isinstance(checks, dict) else {},
             }
         return result
+
+    def schedule_list(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"limit"})
+        limit = value.get("limit", 20)
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ProtocolError(-32602, "invalid_limit")
+        rows = self.company.schedules()[:limit]
+        return {
+            "schema": "local-company.mcp-schedule-list.v1", "status": "ready",
+            "schedules": [
+                {
+                    "scheduleId": row[0], "name": row[1], "enabled": bool(row[2]),
+                    "cadenceDays": row[3], "nextRunAt": row[4], "project": row[5] or None,
+                    "playbook": row[6] or None, "priority": row[7], "objective": row[8],
+                }
+                for row in rows
+            ],
+            "count": len(rows), "limit": limit, "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        }
+
+    def schedule_create(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {
+            "name", "objective", "project", "playbook", "priority", "cadenceDays",
+            "nextRunAt", "scheduleConfirmation",
+        })
+        if value.get("scheduleConfirmation") != SCHEDULE_CREATE_CONFIRMATION:
+            raise ProtocolError(-32602, "schedule_confirmation_required")
+        name = value.get("name")
+        cadence_days = value.get("cadenceDays")
+        next_run_at = value.get("nextRunAt")
+        priority = value.get("priority", 50)
+        if not isinstance(name, str) or not name.strip() or len(name) > 80:
+            raise ProtocolError(-32602, "invalid_schedule_name")
+        if type(cadence_days) is not int or not 1 <= cadence_days <= 365:
+            raise ProtocolError(-32602, "invalid_cadence_days")
+        if not isinstance(next_run_at, str) or not next_run_at.strip() or len(next_run_at) > 64:
+            raise ProtocolError(-32602, "invalid_next_run_at")
+        if type(priority) is not int or not 0 <= priority <= 100:
+            raise ProtocolError(-32602, "invalid_priority")
+        preflight = self.preflight({
+            key: value[key] for key in ("objective", "project", "playbook") if key in value
+        })
+        if preflight["status"] != "ready" or preflight["model_execution_ready"] is not True:
+            return {
+                "schema": "local-company.mcp-schedule-create.v1", "status": "blocked",
+                "created": False, "preflight": preflight,
+                "modelCalled": False, "externalActionPerformed": False,
+            }
+        focus = read_execution_focus(self.company.home)
+        enforce_execution_focus(
+            focus, preflight["project_id"], preflight["team"]["roles"], "mcp schedule_create",
+        )
+        try:
+            schedule_id = self.company.create_schedule(
+                name, value["objective"], cadence_days, next_run_at,
+                project=value.get("project"), playbook=value.get("playbook"), priority=priority,
+            )
+        except ValueError as error:
+            raise ProtocolError(-32602, "invalid_schedule_request") from error
+        return {
+            "schema": "local-company.mcp-schedule-create.v1", "status": "created",
+            "created": True, "scheduleId": schedule_id, "enabled": True,
+            "preflight": preflight, "modelCalled": False, "externalActionPerformed": False,
+        }
+
+    def schedule_set_enabled(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"scheduleId", "enabled", "scheduleConfirmation"})
+        schedule_id = value.get("scheduleId")
+        enabled = value.get("enabled")
+        if not isinstance(schedule_id, str) or QUEUE_ID_PATTERN.fullmatch(schedule_id) is None:
+            raise ProtocolError(-32602, "invalid_schedule_id")
+        if type(enabled) is not bool:
+            raise ProtocolError(-32602, "invalid_enabled")
+        if value.get("scheduleConfirmation") != SCHEDULE_CHANGE_CONFIRMATION:
+            raise ProtocolError(-32602, "schedule_confirmation_required")
+        row = next((item for item in self.company.schedules() if item[0] == schedule_id), None)
+        if row is None:
+            raise ProtocolError(-32602, "unknown_schedule")
+        preflight = None
+        if enabled:
+            preflight = self.preflight({
+                "objective": row[8],
+                **({"project": row[5]} if row[5] else {}),
+                **({"playbook": row[6]} if row[6] else {}),
+            })
+            if preflight["status"] != "ready" or preflight["model_execution_ready"] is not True:
+                return {
+                    "schema": "local-company.mcp-schedule-state.v1", "status": "blocked",
+                    "changed": False, "scheduleId": schedule_id, "enabled": bool(row[2]),
+                    "preflight": preflight, "modelCalled": False,
+                    "externalActionPerformed": False,
+                }
+            focus = read_execution_focus(self.company.home)
+            enforce_execution_focus(
+                focus, preflight["project_id"], preflight["team"]["roles"],
+                "mcp schedule_set_enabled",
+            )
+        self.company.set_schedule_enabled(schedule_id, enabled)
+        return {
+            "schema": "local-company.mcp-schedule-state.v1", "status": "changed",
+            "changed": True, "scheduleId": schedule_id, "enabled": enabled,
+            "preflight": preflight, "modelCalled": False,
+            "externalActionPerformed": False,
+        }
 
     def queue_add(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(
@@ -373,6 +480,38 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             company_tools.job_result, True,
         ),
         Tool(
+            "schedule_list", "List bounded recurring local missions without changing state.",
+            _schema([], {"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+            company_tools.schedule_list, True,
+        ),
+        Tool(
+            "schedule_create", "Create one explicitly confirmed recurring local mission after preflight.",
+            _schema(
+                ["name", "objective", "cadenceDays", "nextRunAt", "scheduleConfirmation"],
+                {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "objective": objective, "project": project, "playbook": playbook,
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "cadenceDays": {"type": "integer", "minimum": 1, "maximum": 365},
+                    "nextRunAt": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "scheduleConfirmation": {"const": SCHEDULE_CREATE_CONFIRMATION},
+                },
+            ),
+            company_tools.schedule_create, False,
+        ),
+        Tool(
+            "schedule_set_enabled", "Pause or re-enable one exact recurring local mission.",
+            _schema(
+                ["scheduleId", "enabled", "scheduleConfirmation"],
+                {
+                    "scheduleId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                    "enabled": {"type": "boolean"},
+                    "scheduleConfirmation": {"const": SCHEDULE_CHANGE_CONFIRMATION},
+                },
+            ),
+            company_tools.schedule_set_enabled, False,
+        ),
+        Tool(
             "preflight", "Preview one team, knowledge state, and owner gates without queuing or calling a model.",
             _schema(["objective"], {"objective": objective, "project": project, "playbook": playbook}),
             company_tools.preflight, True,
@@ -442,7 +581,7 @@ class McpSession:
                     "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "local-agent-company", "title": "Local Agent Company", "version": "1"},
-                    "instructions": "Local-only company coordination. Review queue_list and preflight before mutations. queue_run requires the exact reviewed queue ID and owner confirmation. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
+                    "instructions": "Local-only company coordination. Review queue_list and preflight before mutations. queue_run requires the exact reviewed queue ID and owner confirmation. Recurring missions require explicit create/change confirmations and remain pausable. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
                 })
             if not self.initialized:
                 raise ProtocolError(-32002, "server_not_initialized")

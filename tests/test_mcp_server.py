@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_company.mcp_server import MAX_TOOL_CALLS, RUN_CONFIRMATION, McpSession
+from local_company.mcp_server import (
+    MAX_TOOL_CALLS,
+    RUN_CONFIRMATION,
+    SCHEDULE_CHANGE_CONFIRMATION,
+    SCHEDULE_CREATE_CONFIRMATION,
+    McpSession,
+)
 
 
 class LocalCompanyMcpTests(unittest.TestCase):
@@ -35,10 +41,11 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 {tool["name"] for tool in tools},
                 {
                     "status", "projects", "preflight", "queue_list", "queue_add", "queue_run",
-                    "jobs", "job_result",
+                    "jobs", "job_result", "schedule_list", "schedule_create",
+                    "schedule_set_enabled",
                 },
             )
-            self.assertEqual(len(tools), 8)
+            self.assertEqual(len(tools), 11)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -153,6 +160,45 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertFalse(receipt["stateMutated"])
             unknown = self._call(session, "job_result", {"jobId": "f" * 12}, 5)
             self.assertEqual(unknown["error"]["message"], "unknown_job")
+
+    def test_recurring_mission_requires_confirmation_and_can_be_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            request = {
+                "name": "Weekly product review",
+                "objective": "Prepare one internal product decision",
+                "cadenceDays": 7, "nextRunAt": "2030-01-01T09:00:00+00:00",
+            }
+            refused = self._call(session, "schedule_create", request, 3)
+            self.assertEqual(refused["error"]["message"], "schedule_confirmation_required")
+            created = self._call(session, "schedule_create", {
+                **request, "scheduleConfirmation": SCHEDULE_CREATE_CONFIRMATION,
+            }, 4)["result"]["structuredContent"]
+            self.assertTrue(created["created"])
+            listed = self._call(session, "schedule_list", {"limit": 1}, 5)
+            schedule = listed["result"]["structuredContent"]["schedules"][0]
+            self.assertEqual(schedule["scheduleId"], created["scheduleId"])
+            self.assertTrue(schedule["enabled"])
+            paused = self._call(session, "schedule_set_enabled", {
+                "scheduleId": created["scheduleId"], "enabled": False,
+                "scheduleConfirmation": SCHEDULE_CHANGE_CONFIRMATION,
+            }, 6)["result"]["structuredContent"]
+            self.assertTrue(paused["changed"])
+            self.assertFalse(paused["enabled"])
+            self.assertFalse(paused["modelCalled"])
+            self.assertFalse(paused["externalActionPerformed"])
+
+    def test_recurring_external_action_is_blocked_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(Path(directory))
+            result = self._call(session, "schedule_create", {
+                "name": "Customer outreach", "objective": "Send an email to every customer",
+                "cadenceDays": 1, "nextRunAt": "2030-01-01T09:00:00+00:00",
+                "scheduleConfirmation": SCHEDULE_CREATE_CONFIRMATION,
+            }, 3)["result"]["structuredContent"]
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("external_communication", result["preflight"]["owner_gate_categories"])
+            self.assertEqual(session.company_tools.company.schedules(), [])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
