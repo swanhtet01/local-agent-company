@@ -28,10 +28,19 @@ except ModuleNotFoundError:  # Direct execution from the scripts directory.
 
 
 SCHEMA = "local-ai.company-prompt-result.v1"
-DEFAULT_OPENCODE = Path(r"C:\Users\thesw\tools\node-v24.18.0-win-x64\opencode.cmd")
 MAX_PROMPT_CHARS = 4_000
 MAX_OUTPUT_CHARS = 131_072
 EXPECTED_TOOL = "local_company_company"
+
+
+def default_opencode() -> Path:
+    configured = os.getenv("LOCAL_OPENCODE")
+    if configured:
+        return Path(configured)
+    discovered = shutil.which("opencode.cmd") or shutil.which("opencode")
+    if discovered:
+        return Path(discovered)
+    return Path.home() / "AppData" / "Roaming" / "npm" / "opencode.cmd"
 
 
 def _receipt(**values: object) -> dict[str, object]:
@@ -169,7 +178,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("prompt", nargs="+")
     result.add_argument("--timeout-seconds", type=int, default=600)
     result.add_argument("--requested-model", default=os.getenv("LOCAL_CODE_MODEL"))
-    result.add_argument("--opencode", type=Path, default=DEFAULT_OPENCODE)
+    result.add_argument("--opencode", type=Path, default=default_opencode())
     return result
 
 

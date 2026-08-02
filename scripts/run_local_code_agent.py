@@ -27,10 +27,19 @@ except ModuleNotFoundError:  # Direct execution from the scripts directory.
 
 
 SCHEMA = "local-ai.coding-run.v1"
-DEFAULT_OPENCODE = Path(r"C:\Users\thesw\tools\node-v24.18.0-win-x64\opencode.cmd")
 MAX_TASK_BYTES = 32_000
 MAX_OUTPUT_CHARS = 64_000
 MAX_CHANGED_FILES = 50
+
+
+def default_opencode() -> Path:
+    configured = os.getenv("LOCAL_OPENCODE")
+    if configured:
+        return Path(configured)
+    discovered = shutil.which("opencode.cmd") or shutil.which("opencode")
+    if discovered:
+        return Path(discovered)
+    return Path.home() / "AppData" / "Roaming" / "npm" / "opencode.cmd"
 
 
 def _receipt(**values: object) -> dict[str, object]:
@@ -183,7 +192,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--protect", action="append", default=[], type=Path)
     result.add_argument("--timeout-seconds", type=int, default=300)
     result.add_argument("--requested-model", default=os.getenv("LOCAL_CODE_MODEL"))
-    result.add_argument("--opencode", type=Path, default=DEFAULT_OPENCODE)
+    result.add_argument("--opencode", type=Path, default=default_opencode())
     result.add_argument("--test", nargs=argparse.REMAINDER, required=True)
     return result
 

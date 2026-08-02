@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,11 +10,33 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_local_code_agent import main as run_agent_main
+from scripts.run_lmstudio_code import default_opencode as lmstudio_default_opencode
+from scripts.run_local_code_agent import default_opencode as agent_default_opencode, main as run_agent_main
+from scripts.run_local_company_prompt import default_opencode as company_default_opencode
 from scripts.select_local_code_model import GIB, main, select_model
 
 
 class LocalCodeModelSelectionTests(unittest.TestCase):
+    def test_opencode_defaults_are_portable_and_explicit_setting_wins(self) -> None:
+        functions = (
+            agent_default_opencode, company_default_opencode, lmstudio_default_opencode,
+        )
+        explicit = r"D:\Local Tools\opencode.cmd"
+        with patch.dict(os.environ, {"LOCAL_OPENCODE": explicit}, clear=True):
+            for function in functions:
+                self.assertEqual(function(), Path(explicit))
+        discovered = r"C:\Portable\opencode.cmd"
+        with patch.dict(os.environ, {}, clear=True):
+            for function in functions:
+                with patch(f"{function.__module__}.shutil.which", side_effect=[discovered, None]):
+                    self.assertEqual(function(), Path(discovered))
+        root = Path(__file__).resolve().parents[1]
+        for name in (
+            "run_local_code_agent.py", "run_local_company_prompt.py", "run_lmstudio_code.py",
+        ):
+            source = (root / "scripts" / name).read_text(encoding="utf-8")
+            self.assertNotIn(r"C:\Users\thesw", source)
+
     def test_prefers_quality_model_only_when_installed_and_memory_admitted(self) -> None:
         selected = select_model({"qwen3.5:4b", "qwen3.5:0.8b"}, 6 * GIB)
         self.assertEqual(selected.model, "qwen3.5:4b")

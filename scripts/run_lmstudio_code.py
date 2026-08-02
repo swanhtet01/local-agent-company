@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,9 +23,18 @@ OPENCODE_MODEL = f"lmstudio/{MODEL_IDENTIFIER}"
 BASE_URL = "http://127.0.0.1:1234/v1"
 MINIMUM_AVAILABLE_BYTES = 5 * GIB
 DEFAULT_LMS = Path.home() / ".lmstudio" / "bin" / "lms.exe"
-DEFAULT_OPENCODE = Path(r"C:\Users\thesw\tools\node-v24.18.0-win-x64\opencode.cmd")
 DEFAULT_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 MAX_OUTPUT_BYTES = 256_000
+
+
+def default_opencode() -> Path:
+    configured = os.getenv("LOCAL_OPENCODE")
+    if configured:
+        return Path(configured)
+    discovered = shutil.which("opencode.cmd") or shutil.which("opencode")
+    if discovered:
+        return Path(discovered)
+    return Path.home() / "AppData" / "Roaming" / "npm" / "opencode.cmd"
 
 
 def _command(command: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -204,7 +214,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--agent", choices=["vision-product"])
     result.add_argument("project", nargs="?", type=Path, default=Path.cwd())
     result.add_argument("--lms", type=Path, default=DEFAULT_LMS)
-    result.add_argument("--opencode", type=Path, default=DEFAULT_OPENCODE)
+    result.add_argument("--opencode", type=Path, default=default_opencode())
     result.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     return result
 
