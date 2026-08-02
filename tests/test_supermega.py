@@ -1,10 +1,12 @@
 import csv
 import json
 import hashlib
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from local_company.cli import _interactive_vision_sales_intake, parser
 from local_company.supermega import (
@@ -12,6 +14,7 @@ from local_company.supermega import (
     create_vision_founding_pilot_packages,
     create_vision_prospect_drafts,
     create_vision_sales_intake,
+    default_vision_product_root,
     import_vision_prospects,
     run_vision_sales,
     vision_commercial_status,
@@ -37,6 +40,17 @@ class SuperMegaCapabilityTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_default_vision_product_root_is_portable_and_overrideable(self):
+        explicit = self.root / "explicit-product"
+        with patch.dict(
+            os.environ, {"SUPERMEGA_VISION_PRODUCT_ROOT": str(explicit)}, clear=True,
+        ):
+            self.assertEqual(default_vision_product_root(), explicit)
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}, clear=True):
+            self.assertEqual(
+                default_vision_product_root(), self.root / "SuperMega" / "vision-product",
+            )
 
     def _write_product_evidence(self, *, ready=False):
         product = self.root / "vision-product"

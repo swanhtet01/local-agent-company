@@ -66,10 +66,9 @@ def default_vision_product_root() -> Path:
     configured = os.getenv("SUPERMEGA_VISION_PRODUCT_ROOT")
     if configured:
         return Path(configured)
-    return (
-        Path.home() / "OneDrive - BDA" / "SuperMega"
-        / "vision-workflow-capture-demo-20260731"
-    )
+    local = os.getenv("LOCALAPPDATA")
+    base = Path(local) if local else Path.home() / ".local" / "state"
+    return base / "SuperMega" / "vision-product"
 
 
 def default_vision_repo_root() -> Path:
