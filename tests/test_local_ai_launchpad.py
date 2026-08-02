@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_code, run_company, run_cycle, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_work, switch_project, translate
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -26,6 +26,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["use", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["vision"]).command, ("--vision",))
         self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
+        self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
 
     def test_effect_receipt_is_explicit_about_model_state_and_external_authority(self) -> None:
         planned = explain(translate(["plan", "Explore an idea"]))
@@ -49,7 +50,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["mode"], "work")
 
     def test_unknown_or_incomplete_commands_fail_closed(self) -> None:
-        cases = [(["unknown"], "launchpad_command_unknown"), (["work"], "work_objective_required"), (["company"], "company_command_required")]
+        cases = [(["unknown"], "launchpad_command_unknown"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required")]
         for args, reason in cases:
             error = io.StringIO()
             with self.subTest(args=args), redirect_stderr(error):
@@ -87,6 +88,33 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(command[1:], list(action.command))
             self.assertEqual(command[2], "C:\\Project With Spaces")
             self.assertFalse(run.call_args.kwargs["check"])
+
+    def test_autopilot_routes_only_fixed_task_manager_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "manage_cycle_task.ps1").write_text("# fixture\n", encoding="utf-8")
+            run.return_value = subprocess.CompletedProcess([], 0)
+            self.assertEqual(run_autopilot(translate(["autopilot", "install"]), root), 0)
+            command = run.call_args.args[0]
+            self.assertEqual(command[-2:], ["-Mode", "Install"])
+            self.assertEqual(command[-4], "-File")
+            self.assertEqual(Path(command[-3]), root / "scripts" / "manage_cycle_task.ps1")
+            self.assertFalse(run.call_args.kwargs["check"])
+
+    def test_autopilot_task_contract_is_fixed_local_limited_and_non_overlapping(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "manage_cycle_task.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("$taskName = 'SuperMega Local Product Cycle'", source)
+        self.assertIn("$arguments = '\"' + $launcher + '\" cycle'", source)
+        self.assertIn("$interval = 'PT6H'", source)
+        self.assertIn("-LogonType Interactive -RunLevel Limited", source)
+        self.assertIn("-MultipleInstances IgnoreNew", source)
+        self.assertIn("modelMemoryGateBytes = 2147483648", source)
+        self.assertIn("$Task.Settings.Enabled", source)
+        self.assertIn("$info.LastTaskResult -ne 267011", source)
+        self.assertIn("task_remove_refused_unverified_definition", source)
 
     def test_vision_modes_default_to_installed_vision_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:

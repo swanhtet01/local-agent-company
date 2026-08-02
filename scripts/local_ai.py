@@ -50,6 +50,7 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
   local-ai.cmd run-next [options]              Run one due queued mission
   local-ai.cmd cycle [model options]           Materialize and run at most one mission
+  local-ai.cmd autopilot install|status|remove Manage the six-hour local cycle task
   local-ai.cmd dashboard [options]             Start the local dashboard on 127.0.0.1
   local-ai.cmd dashboard-status                Check the dashboard service
   local-ai.cmd stop                            Stop the verified local dashboard
@@ -109,6 +110,15 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if "--queue-id" in tail:
             raise ValueError("cycle_queue_id_is_selected_by_verified_preflight")
         return LaunchAction(tuple(tail), "cycle", "Materialize due schedules and run at most one exact, gate-cleared local mission.", True, True)
+    if name == "autopilot":
+        if len(tail) != 1 or tail[0].lower() not in {"install", "status", "remove"}:
+            raise ValueError("autopilot_action_required")
+        operation = tail[0].lower()
+        return LaunchAction(
+            (operation,), "autopilot",
+            f"{operation.title()} the verified six-hour local cycle task.",
+            False, operation != "status",
+        )
     if name == "dashboard":
         return LaunchAction(("service", "start", *tail), "dashboard", "Start the owner-controlled loopback dashboard and one local worker.", False, True)
     if name == "dashboard-status":
@@ -187,6 +197,20 @@ def run_code(action: LaunchAction, root: Path | None = None) -> int:
             command.append(default_project)
     completed = subprocess.run(
         [str(project_root / "local-code.cmd"), *command],
+        cwd=project_root, check=False,
+    )
+    return completed.returncode
+
+
+def run_autopilot(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    mode = action.command[0].title()
+    completed = subprocess.run(
+        [
+            "powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(project_root / "scripts" / "manage_cycle_task.ps1"),
+            "-Mode", mode,
+        ],
         cwd=project_root, check=False,
     )
     return completed.returncode
@@ -478,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if action.mode in {"code", "vision", "vision-lite"}:
             return run_code(action)
+        if action.mode == "autopilot":
+            return run_autopilot(action)
         if action.mode == "use":
             return switch_project(action)
         if action.mode == "work":

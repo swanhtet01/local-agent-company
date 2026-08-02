@@ -13,6 +13,8 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
 .\local-ai.cmd cycle
+.\local-ai.cmd autopilot status
+.\local-ai.cmd autopilot install
 .\local-ai.cmd code C:\path\to\any-project
 .\local-ai.cmd vision-lite --check
 .\local-ai.cmd vision-lite
@@ -26,6 +28,14 @@ Immediately before queue execution, `cycle` rechecks current physical memory
 and requires at least 2 GiB available. A lower or unavailable reading returns a
 blocked receipt with zero model calls and leaves the reviewed queue item intact
 for a later cycle.
+
+`autopilot install` registers the fixed `SuperMega Local Product Cycle` task for
+the current interactive user. It invokes one bounded cycle every six hours with
+limited privilege, ignores overlapping starts, and retains the same focus,
+evidence, owner-gate, one-mission, and 2 GiB memory checks. `autopilot status`
+verifies the exact action, working directory, cadence, account mode, privilege,
+overlap policy, and execution limit without changing the task. `autopilot
+remove` deletes only a definition that still matches that complete contract.
 
 ```powershell
 .\local-ai.cmd explain work "Research a new product"
