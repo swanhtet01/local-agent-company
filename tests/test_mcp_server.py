@@ -49,9 +49,10 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "schedule_set_enabled", "playbooks", "project_create", "project_overview",
                     "knowledge_list", "knowledge_add", "knowledge_search",
                     "product_evidence_status", "product_evidence_review",
+                    "product_evidence_next",
                 },
             )
-            self.assertEqual(len(tools), 19)
+            self.assertEqual(len(tools), 20)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -301,6 +302,37 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(status["paid_setup_signal_counts"]["yes"], 1)
             self.assertEqual(len(status["reviews"]), 1)
             self.assertFalse(status["externalActionPerformed"])
+
+    def test_next_product_review_excludes_reviewed_jobs_and_stays_pathless(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            project_id = session.company_tools.company.create_project("Product Lab")
+            older, _ = session.company_tools.company.run(
+                "Review business workflow", project=project_id,
+            )
+            newer, _ = session.company_tools.company.run(
+                "Review coding workflow", project=project_id,
+            )
+            session.company_tools.company.record_product_evidence_review(
+                newer, "coding", "accepted", 0, "unknown", 512,
+            )
+            result = self._call(session, "product_evidence_next", {
+                "project": project_id,
+            }, 3)["result"]["structuredContent"]
+            self.assertEqual(result["status"], "candidate_ready")
+            self.assertEqual(result["candidate"]["jobId"], older)
+            self.assertNotEqual(result["candidate"]["jobId"], newer)
+            self.assertEqual(result["evidenceProgress"]["reviewedMissions"], 1)
+            self.assertEqual(
+                result["nextAction"],
+                "inspect_job_result_then_ask_human_for_actual_measurements",
+            )
+            self.assertEqual(
+                result["humanReviewFields"]["confirmation"], PRODUCT_REVIEW_CONFIRMATION,
+            )
+            self.assertNotIn(str(root), str(result))
+            self.assertFalse(result["stateMutated"])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

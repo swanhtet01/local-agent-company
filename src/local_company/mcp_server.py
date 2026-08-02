@@ -95,7 +95,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 19
+        self.exposed_tools = 20
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -398,6 +398,93 @@ class CompanyTools:
             "schema": "local-company.mcp-product-evidence-review.v1",
             "status": "recorded", "recorded": True, "review": review,
             "modelCalled": False, "externalActionPerformed": False,
+        }
+
+    def product_evidence_next(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"project"})
+        project = value.get("project")
+        if project is not None and (
+            not isinstance(project, str) or not project.strip() or len(project) > 80
+        ):
+            raise ProtocolError(-32602, "invalid_project")
+        try:
+            evidence = self.company.product_evidence_status(project)
+            rows = (
+                self.company.project_detail(project)["jobs"]
+                if project is not None else self.company.jobs()
+            )
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_project") from error
+        reviewed_job_ids = {
+            item["job_id"] for item in evidence["reviews"]
+            if isinstance(item, dict) and isinstance(item.get("job_id"), str)
+        }
+        candidate = None
+        inspected = 0
+        for row in rows:
+            if inspected >= 100:
+                break
+            inspected += 1
+            job_id = row[0]
+            if row[1] != "complete" or job_id in reviewed_job_ids:
+                continue
+            try:
+                detail = self.company.job_detail(job_id)
+            except ValueError:
+                continue
+            job = detail["job"]
+            evaluation = detail.get("evaluation")
+            checks = evaluation.get("checks") if isinstance(evaluation, dict) else None
+            current = (
+                isinstance(evaluation, dict)
+                and isinstance(checks, dict)
+                and checks.get("report_integrity_valid") is True
+                and checks.get("evidence_manifest_valid") is True
+                and checks.get("model_stopped_cleanly") is True
+                and isinstance(job[8], str) and len(job[8]) == 64
+                and isinstance(job[9], str) and len(job[9]) == 64
+                and bool(detail.get("report"))
+            )
+            if not current:
+                continue
+            synthesis = job[7] if isinstance(job[7], str) else ""
+            candidate = {
+                "jobId": job[0], "objective": job[1], "status": job[2],
+                "createdAt": job[3], "project": job[6],
+                "roles": [assignment[1] for assignment in detail["assignments"]],
+                "qualityPassed": evaluation.get("passed") is True,
+                "qualityScore": evaluation.get("score"),
+                "reportSha256": job[8], "evidenceManifestSha256": job[9],
+                "synthesisPreview": synthesis[:1_000],
+                "synthesisPreviewTruncated": len(synthesis) > 1_000,
+            }
+            break
+        return {
+            "schema": "local-company.mcp-product-evidence-next.v1",
+            "status": "candidate_ready" if candidate else "no_candidate",
+            "candidate": candidate,
+            "evidenceProgress": {
+                "missionTarget": evidence["mission_target"],
+                "reviewedMissions": evidence["reviewed_missions"],
+                "remainingMissions": evidence["remaining_missions"],
+                "completeMeasurements": evidence["complete_measurements"],
+                "missingProof": evidence["missing_proof"],
+            },
+            "humanReviewFields": {
+                "category": ["coding", "business", "data-research"],
+                "decision": ["accepted", "rejected"],
+                "corrections": "integer from 0 to 100",
+                "paidSetupSignal": ["yes", "no", "unknown"],
+                "peakMemoryMb": "measured positive integer or omit if unmeasured",
+                "confirmation": PRODUCT_REVIEW_CONFIRMATION,
+            },
+            "nextAction": (
+                "inspect_job_result_then_ask_human_for_actual_measurements"
+                if candidate else "run_and_review_another_bounded_product_mission"
+            ),
+            "jobsInspected": inspected,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
         }
 
     def preflight(self, arguments: Any) -> dict[str, Any]:
@@ -807,6 +894,11 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
                 },
             ),
             company_tools.product_evidence_review, False,
+        ),
+        Tool(
+            "product_evidence_next", "Select the next sealed unreviewed job and required human evidence fields.",
+            _schema([], {"project": project}),
+            company_tools.product_evidence_next, True,
         ),
         Tool(
             "queue_list", "List bounded local mission queue records without changing state.",
