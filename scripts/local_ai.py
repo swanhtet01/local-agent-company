@@ -8,6 +8,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from .select_local_code_model import GIB, available_memory_bytes
+except ImportError:
+    from select_local_code_model import GIB, available_memory_bytes
+
 
 SCHEMA = "local-ai.launchpad.v1"
 WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
@@ -18,6 +23,7 @@ QUEUE_COMPLETION_PATTERN = re.compile(
     re.MULTILINE,
 )
 SCHEDULE_TICK_PATTERN = re.compile(r"^Materialized (\d+) due schedule\(s\)\.$", re.MULTILINE)
+CYCLE_MINIMUM_AVAILABLE_BYTES = 2 * GIB
 
 
 @dataclass(frozen=True)
@@ -349,6 +355,26 @@ def run_cycle(action: LaunchAction, root: Path | None = None) -> int:
             schedulesMaterialized=materialized, queueId=queue_id,
         ), separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 2
+
+    try:
+        available = available_memory_bytes()
+    except RuntimeError:
+        print(json.dumps(_cycle_receipt(
+            ok=True, status="blocked", reason="available_memory_unavailable",
+            schedulesMaterialized=materialized, queueId=queue_id,
+            minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
+        ), separators=(",", ":"), sort_keys=True))
+        return 0
+    if available < CYCLE_MINIMUM_AVAILABLE_BYTES:
+        print(json.dumps(_cycle_receipt(
+            ok=True, status="blocked", reason="insufficient_available_memory",
+            schedulesMaterialized=materialized, queueId=queue_id,
+            availableMemoryBytes=available,
+            minimumAvailableBytes=CYCLE_MINIMUM_AVAILABLE_BYTES,
+            memoryShortfallBytes=CYCLE_MINIMUM_AVAILABLE_BYTES - available,
+            recommendedAction="close_large_apps_then_run_cycle",
+        ), separators=(",", ":"), sort_keys=True))
+        return 0
 
     executed = _company_process(
         ["queue", "run-next", "--queue-id", queue_id, *action.command],

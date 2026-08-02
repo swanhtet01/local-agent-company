@@ -213,7 +213,9 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             "evaluation": {"passed": True, "score": 100, "checks": {"model_stopped_cleanly": True}},
         }
         completion = f"Queue item {queue_id} completed as job {job_id}; quality=passed\nReport: C:\\report.md\n"
-        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run, patch(
+            "scripts.local_ai.available_memory_bytes", return_value=3 * 1024**3,
+        ):
             root = Path(directory)
             (root / "src").mkdir()
             run.side_effect = [
@@ -234,6 +236,35 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 execution[-6:],
                 ["queue", "run-next", "--queue-id", queue_id, "--keep-alive", "0s"],
             )
+
+    def test_cycle_blocks_before_execution_when_memory_is_below_safe_floor(self) -> None:
+        queue_id = "0123456789ab"
+        ready = {
+            "schema": "local-company.queue-preflight.v1", "status": "ready",
+            "queue_id": queue_id, "reviewed_queue_matches": None,
+            "submission_allowed": True, "model_execution_ready": True,
+            "owner_gate_categories": [],
+        }
+        bound = {**ready, "reviewed_queue_matches": True}
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run, patch(
+            "scripts.local_ai.available_memory_bytes", return_value=1024**3,
+        ):
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, "Materialized 0 due schedule(s).\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(ready), ""),
+                subprocess.CompletedProcess([], 0, json.dumps(bound), ""),
+            ]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(run_cycle(translate(["cycle"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "blocked")
+            self.assertEqual(receipt["reason"], "insufficient_available_memory")
+            self.assertEqual(receipt["memoryShortfallBytes"], 1024**3)
+            self.assertFalse(receipt["modelCalled"])
+            self.assertEqual(run.call_count, 3)
 
     def test_cycle_rejects_malformed_preflight_and_user_selected_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "cycle_queue_id"):
@@ -262,7 +293,9 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             "job": [job_id, "objective", "complete", "time", "C:\\report.md"],
             "evaluation": {"passed": False, "score": 75, "checks": {"model_stopped_cleanly": True}},
         }
-        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run, patch(
+            "scripts.local_ai.available_memory_bytes", return_value=3 * 1024**3,
+        ):
             root = Path(directory)
             (root / "src").mkdir()
             run.side_effect = [
