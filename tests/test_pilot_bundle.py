@@ -4,14 +4,30 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.build_pilot_bundle import build_pilot_bundle
+from scripts.build_pilot_bundle import (
+    BundleBuildError, _personal_path_markers, _validated_source_payload,
+    build_pilot_bundle,
+)
 from scripts.verify_pilot_bundle import (
     BUNDLE_SCHEMA, BundleVerificationError, MANIFEST_NAME, verify_pilot_bundle,
 )
 
 
 class PilotBundleTests(unittest.TestCase):
+    def test_personal_absolute_paths_are_rejected_before_packaging(self) -> None:
+        marker = b"private" + b"-home-root"
+        payload = b"root = '" + marker + b"/project'"
+        with patch(
+            "scripts.build_pilot_bundle._personal_path_markers",
+            return_value=(marker,),
+        ):
+            with self.assertRaisesRegex(
+                BundleBuildError, "bundle_source_contains_personal_path",
+            ):
+                _validated_source_payload("example.py", payload)
+
     def test_bundle_is_deterministic_sanitized_and_tamper_evident(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
@@ -34,6 +50,11 @@ class PilotBundleTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as bundle:
                 names = bundle.namelist()
                 manifest = json.loads(bundle.read(MANIFEST_NAME))
+                bundled_payload = b"\n".join(
+                    bundle.read(name).lower()
+                    for name in names
+                    if name != MANIFEST_NAME
+                )
             self.assertEqual(manifest["schema"], BUNDLE_SCHEMA)
             self.assertEqual(manifest["licenseStatus"], "no_license_grant")
             self.assertIn("BUNDLE-README.txt", names)
@@ -42,6 +63,8 @@ class PilotBundleTests(unittest.TestCase):
             self.assertTrue(any(name.startswith("src/local_company/") for name in names))
             forbidden = (".git/", ".env", "company.db", "outputs/", "validation-packs/")
             self.assertFalse(any(any(token in name for token in forbidden) for name in names))
+            for marker in _personal_path_markers():
+                self.assertNotIn(marker, bundled_payload)
 
             tampered = output / "tampered.zip"
             shutil.copyfile(archive, tampered)

@@ -36,6 +36,34 @@ class BundleBuildError(ValueError):
     pass
 
 
+def _personal_path_markers() -> tuple[bytes, ...]:
+    candidates: list[str | Path | None] = [
+        Path.home(),
+        os.getenv("USERPROFILE"),
+        os.getenv("ONEDRIVE"),
+        os.getenv("OneDriveConsumer"),
+        os.getenv("OneDriveCommercial"),
+    ]
+    markers = {b"onedrive" + b" - bda"}
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        value = str(candidate).strip().rstrip("\\/").lower()
+        if not value:
+            continue
+        markers.add(value.encode("utf-8"))
+        markers.add(value.replace("\\", "/").encode("utf-8"))
+        markers.add(value.replace("/", "\\").encode("utf-8"))
+    return tuple(sorted(markers))
+
+
+def _validated_source_payload(name: str, payload: bytes) -> tuple[str, bytes]:
+    lowered = payload.lower()
+    if any(marker in lowered for marker in _personal_path_markers()):
+        raise BundleBuildError(f"bundle_source_contains_personal_path:{name}")
+    return name, payload
+
+
 def _selected_files(root: Path) -> list[Path]:
     values = [root / name for name in ROOT_FILES]
     for directory, pattern in SOURCE_PATTERNS:
@@ -92,7 +120,9 @@ def build_pilot_bundle(project_root: Path, output_directory: Path) -> dict[str, 
 
     source_payloads: list[tuple[str, bytes]] = []
     for path in _selected_files(root):
-        source_payloads.append((path.relative_to(root).as_posix(), path.read_bytes()))
+        source_payloads.append(_validated_source_payload(
+            path.relative_to(root).as_posix(), path.read_bytes(),
+        ))
     source_payloads.append(("BUNDLE-README.txt", _bundle_readme()))
     source_payloads.sort(key=lambda item: item[0])
 

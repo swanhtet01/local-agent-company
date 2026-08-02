@@ -11,9 +11,11 @@ if /I "%~1"=="--vision-lite" (
   shift
 )
 
-set "OPENCODE_EXE=C:\Users\thesw\tools\node-v24.18.0-win-x64\opencode.cmd"
+set "OPENCODE_EXE=%LOCAL_OPENCODE%"
+if not defined OPENCODE_EXE for /f "delims=" %%I in ('where opencode.cmd 2^>nul') do if not defined OPENCODE_EXE set "OPENCODE_EXE=%%I"
+if not defined OPENCODE_EXE if defined APPDATA set "OPENCODE_EXE=%APPDATA%\npm\opencode.cmd"
 if not exist "%OPENCODE_EXE%" (
-  echo ERROR: OpenCode is not installed at the expected local path.
+  echo ERROR: OpenCode was not found in LOCAL_OPENCODE, PATH, or APPDATA\npm.
   echo Run: ollama launch opencode --model qwen3.5:0.8b -y
   exit /b 1
 )

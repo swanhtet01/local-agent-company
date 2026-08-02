@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -35,7 +36,7 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
             "run_local_code_agent.py", "run_local_company_prompt.py", "run_lmstudio_code.py",
         ):
             source = (root / "scripts" / name).read_text(encoding="utf-8")
-            self.assertNotIn(r"C:\Users\thesw", source)
+            self.assertIsNone(re.search(r"(?i)[a-z]:\\users\\[^\\]+", source))
 
     def test_prefers_quality_model_only_when_installed_and_memory_admitted(self) -> None:
         selected = select_model({"qwen3.5:4b", "qwen3.5:0.8b"}, 6 * GIB)
@@ -96,6 +97,10 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "local-code.cmd").read_text(
             encoding="utf-8",
         )
+        self.assertIn('set "OPENCODE_EXE=%LOCAL_OPENCODE%"', source)
+        self.assertIn("where opencode.cmd", source)
+        self.assertIn('%APPDATA%\\npm\\opencode.cmd', source)
+        self.assertIsNone(re.search(r"(?i)[a-z]:\\users\\[^\\]+", source))
         self.assertIn('if /I "%~1"=="--run" goto RUN_HEADLESS', source)
         self.assertIn(':RUN_HEADLESS', source)
         self.assertIn('exit /b %ERRORLEVEL%', source)
