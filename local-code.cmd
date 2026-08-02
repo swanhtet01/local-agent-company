@@ -12,7 +12,7 @@ if /I "%~1"=="--vision-lite" (
 )
 
 set "OPENCODE_EXE=%LOCAL_OPENCODE%"
-if not defined OPENCODE_EXE for /f "delims=" %%I in ('where opencode.cmd 2^>nul') do if not defined OPENCODE_EXE set "OPENCODE_EXE=%%I"
+if not defined OPENCODE_EXE for %%I in (opencode.cmd) do set "OPENCODE_EXE=%%~$PATH:I"
 if not defined OPENCODE_EXE if defined APPDATA set "OPENCODE_EXE=%APPDATA%\npm\opencode.cmd"
 if not exist "%OPENCODE_EXE%" (
   echo ERROR: OpenCode was not found in LOCAL_OPENCODE, PATH, or APPDATA\npm.
@@ -37,8 +37,9 @@ if not exist "%TARGET_DIR%\." (
   exit /b 2
 )
 
-where ollama >nul 2>nul
-if errorlevel 1 (
+set "OLLAMA_EXE="
+for %%I in (ollama.exe) do set "OLLAMA_EXE=%%~$PATH:I"
+if not exist "%OLLAMA_EXE%" (
   echo ERROR: Ollama is not available on PATH.
   exit /b 3
 )
@@ -67,7 +68,7 @@ if defined OPENCODE_AGENT (
   call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
 )
 set "EXIT_CODE=%ERRORLEVEL%"
-ollama stop "%LOCAL_MODEL%" >nul 2>nul
+"%OLLAMA_EXE%" stop "%LOCAL_MODEL%" >nul 2>nul
 if errorlevel 1 echo WARNING: Ollama could not unload %LOCAL_MODEL%; run ollama stop %LOCAL_MODEL%.
 popd
 exit /b %EXIT_CODE%
