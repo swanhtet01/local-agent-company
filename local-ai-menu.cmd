@@ -8,7 +8,7 @@ echo SuperMega Local AI Lab
 echo ======================
 echo 1. Open local company chat
 echo 2. Show company brief and exact next action ^(no model^)
-echo 3. Plan next product experiment ^(no model^)
+echo 3. Generate product validation dossier and next experiment ^(no model^)
 echo 4. Run next product experiment ^(safe memory recovery^)
 echo 5. Inspect and review a completed product experiment ^(no model^)
 echo 6. Check and package a proven workflow for owner review ^(no model^)
@@ -27,7 +27,7 @@ if errorlevel 7 goto code
 if errorlevel 6 goto offer
 if errorlevel 5 goto review
 if errorlevel 4 goto experiment_run
-if errorlevel 3 goto experiment
+if errorlevel 3 goto validation_pack
 if errorlevel 2 goto brief
 if errorlevel 1 goto company
 
@@ -41,8 +41,8 @@ echo.
 pause
 goto menu
 
-:experiment
-call "%LOCAL_AI_ROOT%local-ai.cmd" experiment
+:validation_pack
+call "%LOCAL_AI_ROOT%local-ai.cmd" validation-pack
 echo.
 pause
 goto menu

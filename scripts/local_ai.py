@@ -26,6 +26,7 @@ CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
 OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
+VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v1"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
 PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
@@ -61,6 +62,7 @@ Use one command for local coding, business teams, research, planning, and queued
                                               Run that test locally and return its receipt
   local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
   local-ai.cmd offer-pack [PROJECT]            Write an owner-review offer pack when proven
+  local-ai.cmd validation-pack [PROJECT]       Write the current private validation dossier
   local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
   local-ai.cmd experiment-review-interactive   Review one pending receipt with local prompts
   local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
@@ -147,6 +149,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if len(tail) > 1 or (tail and not tail[0].strip()):
             raise ValueError("offer_pack_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "offer-pack", "Write a local owner-review pack only from evidence-gated offer claims.", False, True)
+    if name == "validation-pack":
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError("validation_pack_accepts_at_most_one_project")
+        return LaunchAction(tuple(tail), "validation-pack", "Write a private evidence scoreboard and exact next product experiment.", False, True)
     if name == "experiment-pending":
         if tail:
             raise ValueError("experiment_pending_accepts_no_arguments")
@@ -315,21 +321,61 @@ def run_offer(action: LaunchAction, root: Path | None = None) -> int:
     return 0 if result.get("status") == "ready_for_owner_packaging" else 1
 
 
+def _markdown_text(value: object, *, limit: int = 200, reason: str) -> str:
+    normalized = " ".join(value.split()) if isinstance(value, str) else ""
+    if not normalized or len(normalized) > limit:
+        raise ValueError(reason)
+    return (
+        normalized.replace("\\", "\\\\").replace("`", "\\`")
+        .replace("[", "\\[").replace("]", "\\]").replace("|", "\\|")
+    )
+
+
+def _store_private_markdown(
+    home: Path, directory_name: str, filename_prefix: str, document_id: str,
+    content: str, *, reason_prefix: str,
+) -> tuple[Path, bool, str]:
+    encoded = content.encode("utf-8")
+    if len(encoded) > 65_536:
+        raise ValueError(f"{reason_prefix}_too_large")
+    directory = home / directory_name
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError(f"{reason_prefix}_directory_unsafe")
+    target = directory / f"{filename_prefix}-{document_id}.md"
+    stored = False
+    if target.exists():
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != encoded:
+            raise ValueError(f"{reason_prefix}_collision")
+    else:
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=directory, prefix=f".{filename_prefix}-",
+                suffix=".tmp", delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+            stored = True
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    return target, stored, hashlib.sha256(encoded).hexdigest()
+
+
 def _offer_pack_text(result: dict[str, object], pack_id: str) -> str:
     project = result.get("project")
     offer = result.get("offer")
     if not isinstance(project, dict) or not isinstance(offer, dict):
         raise ValueError("offer_pack_source_invalid")
 
-    def text_value(value: object, limit: int = 200) -> str:
-        normalized = " ".join(value.split()) if isinstance(value, str) else ""
-        if not normalized or len(normalized) > limit:
-            raise ValueError("offer_pack_source_invalid")
-        return normalized.replace("\\", "\\\\").replace("`", "\\`").replace("[", "\\[").replace("]", "\\]")
-
-    project_name = text_value(project.get("name"), 80)
-    workflow = text_value(offer.get("workflow"), 80)
-    category = text_value(offer.get("category"), 40)
+    project_name = _markdown_text(project.get("name"), limit=80, reason="offer_pack_source_invalid")
+    workflow = _markdown_text(offer.get("workflow"), limit=80, reason="offer_pack_source_invalid")
+    category = _markdown_text(offer.get("category"), limit=40, reason="offer_pack_source_invalid")
     evidence_runs = offer.get("evidenceRuns")
     corrections = offer.get("maximumCorrectionsObserved")
     peak_memory = offer.get("maximumPeakMemoryMbObserved")
@@ -351,7 +397,7 @@ def _offer_pack_text(result: dict[str, object], pack_id: str) -> str:
             or any(not isinstance(item, str) for item in values)
         ):
             raise ValueError("offer_pack_source_invalid")
-        return [f"- {text_value(item)}" for item in values]
+        return [f"- {_markdown_text(item, reason='offer_pack_source_invalid')}" for item in values]
 
     return "\n".join([
         f"# Private Local AI Workflow Offer: {workflow}", "",
@@ -388,40 +434,186 @@ def run_offer_pack(action: LaunchAction, root: Path | None = None) -> int:
         return 1
     canonical = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     pack_id = hashlib.sha256(b"local-ai.offer-pack.v1\0" + canonical).hexdigest()[:12]
-    encoded = _offer_pack_text(result, pack_id).encode("utf-8")
-    if len(encoded) > 65_536:
-        raise ValueError("offer_pack_too_large")
-    directory = home / "offer-packs"
-    directory.mkdir(parents=True, exist_ok=True)
-    if directory.is_symlink() or not directory.is_dir():
-        raise ValueError("offer_pack_directory_unsafe")
-    target = directory / f"offer-pack-{pack_id}.md"
-    stored = False
-    if target.exists():
-        if target.is_symlink() or not target.is_file() or target.read_bytes() != encoded:
-            raise ValueError("offer_pack_collision")
-    else:
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb", dir=directory, prefix=".offer-pack-", suffix=".tmp", delete=False,
-            ) as stream:
-                temporary = Path(stream.name)
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-            temporary = None
-            stored = True
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+    target, stored, digest = _store_private_markdown(
+        home, "offer-packs", "offer-pack", pack_id,
+        _offer_pack_text(result, pack_id), reason_prefix="offer_pack",
+    )
     print(json.dumps({
         "schema": OFFER_PACK_SCHEMA, "status": "ready_for_owner_review",
         "offerPackId": pack_id, "offerPackPath": str(target),
-        "offerPackSha256": hashlib.sha256(encoded).hexdigest(),
+        "offerPackSha256": digest,
         "packStored": stored, "ownerReviewRequired": True,
         "stateMutated": stored,
+        "externalPublicationAuthorized": False, "modelCalled": False,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def _product_validation_result(
+    action: LaunchAction, project_root: Path,
+) -> tuple[Path, dict[str, object]]:
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.mcp_server import CompanyTools, ProtocolError
+
+    home = default_company_home()
+    project = _resolved_product_project(action, home)
+    tools = CompanyTools(home)
+    try:
+        evidence = tools.product_evidence_status({
+            "project": project, "includeReviews": True, "reviewLimit": 20,
+        })
+        experiment = tools.product_experiment_next({"project": project})
+        offer = tools.product_offer_next({"project": project})
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    return home, {"evidence": evidence, "experiment": experiment, "offer": offer}
+
+
+def _validation_pack_text(source: dict[str, object], dossier_id: str) -> str:
+    evidence = source.get("evidence")
+    experiment = source.get("experiment")
+    offer = source.get("offer")
+    if not all(isinstance(item, dict) for item in (evidence, experiment, offer)):
+        raise ValueError("validation_pack_source_invalid")
+    project = evidence.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("validation_pack_source_invalid")
+    project_name = _markdown_text(
+        project.get("name"), limit=80, reason="validation_pack_source_invalid",
+    )
+    target = evidence.get("mission_target")
+    reviewed = evidence.get("reviewed_missions")
+    remaining = evidence.get("remaining_missions")
+    measurements = evidence.get("complete_measurements")
+    stale = evidence.get("stale_review_count")
+    average = evidence.get("average_corrections")
+    if (
+        any(type(value) is not int or value < 0 for value in (target, reviewed, remaining, measurements, stale))
+        or (average is not None and type(average) not in {int, float})
+    ):
+        raise ValueError("validation_pack_source_invalid")
+
+    def counts(name: str, allowed: tuple[str, ...]) -> list[str]:
+        values = evidence.get(name)
+        if not isinstance(values, dict) or set(values) != set(allowed):
+            raise ValueError("validation_pack_source_invalid")
+        rows = []
+        for label in allowed:
+            count = values.get(label)
+            if type(count) is not int or count < 0:
+                raise ValueError("validation_pack_source_invalid")
+            rows.append(f"| {label} | {count} |")
+        return rows
+
+    missing = evidence.get("missing_proof")
+    reviews = evidence.get("reviews")
+    gate_results = offer.get("gateResults")
+    offer_missing = offer.get("missingProof")
+    if (
+        not isinstance(missing, list) or any(not isinstance(item, str) for item in missing)
+        or not isinstance(reviews, list) or len(reviews) > 20
+        or not isinstance(gate_results, dict)
+        or not isinstance(offer_missing, list)
+        or any(not isinstance(item, str) for item in offer_missing)
+    ):
+        raise ValueError("validation_pack_source_invalid")
+
+    review_rows = []
+    for item in reviews:
+        if not isinstance(item, dict):
+            raise ValueError("validation_pack_source_invalid")
+        category = _markdown_text(item.get("category"), limit=40, reason="validation_pack_source_invalid")
+        decision = _markdown_text(item.get("decision"), limit=20, reason="validation_pack_source_invalid")
+        paid = _markdown_text(item.get("paid_setup_signal"), limit=20, reason="validation_pack_source_invalid")
+        corrections = item.get("corrections")
+        runtime = item.get("runtime_seconds")
+        peak = item.get("peak_memory_mb")
+        if (
+            type(corrections) is not int or corrections < 0
+            or type(runtime) not in {int, float} or runtime < 0
+            or (peak is not None and (type(peak) is not int or peak < 1))
+        ):
+            raise ValueError("validation_pack_source_invalid")
+        label_value = item.get("label") or item.get("source")
+        label = _markdown_text(label_value, limit=80, reason="validation_pack_source_invalid")
+        review_rows.append(
+            f"| {label} | {category} | {decision} | {corrections} | {paid} | "
+            f"{runtime} | {peak if peak is not None else 'not recorded'} |"
+        )
+    if not review_rows:
+        review_rows.append("| No reviewed runs yet | - | - | - | - | - | - |")
+
+    gate_rows = []
+    for name in sorted(gate_results):
+        value = gate_results[name]
+        if type(value) is not bool:
+            raise ValueError("validation_pack_source_invalid")
+        gate_rows.append(f"| {_markdown_text(name, reason='validation_pack_source_invalid')} | {'pass' if value else 'missing'} |")
+
+    next_lines = ["Milestone reached; define the next owner-reviewed validation milestone."]
+    planned = experiment.get("experiment")
+    if planned is not None:
+        if not isinstance(planned, dict):
+            raise ValueError("validation_pack_source_invalid")
+        next_lines = [
+            f"Category: {_markdown_text(experiment.get('selectedCategory'), limit=40, reason='validation_pack_source_invalid')}",
+            f"Workflow label: {_markdown_text(planned.get('label'), limit=80, reason='validation_pack_source_invalid')}",
+            "Run locally: `local-ai.cmd experiment-run --recover-memory`",
+            "Then review: `local-ai.cmd experiment-review-interactive`",
+        ]
+
+    return "\n".join([
+        "# Local AI Product Validation Dossier", "",
+        "**Status: private validation record; not a sales claim or publication-ready paper.**", "",
+        f"Dossier ID: `{dossier_id}`", f"Project: {project_name}", "",
+        "## Evidence scoreboard", "", "| Metric | Current | Target |", "|---|---:|---:|",
+        f"| Human-reviewed missions | {reviewed} | {target} |",
+        f"| Complete memory measurements | {measurements} | {target} |",
+        f"| Remaining missions | {remaining} | 0 |",
+        f"| Stale evidence bindings | {stale} | 0 |",
+        f"| Average corrections | {average if average is not None else 'not available'} | lower is better |", "",
+        "## Category coverage", "", "| Category | Reviews |", "|---|---:|",
+        *counts("category_counts", ("business", "coding", "data-research")), "",
+        "## Human outcomes", "", "| Outcome | Count |", "|---|---:|",
+        *counts("decision_counts", ("accepted", "rejected")), "",
+        "## Paid-setup observations", "", "| Signal | Count |", "|---|---:|",
+        *counts("paid_setup_signal_counts", ("no", "unknown", "yes")), "",
+        "## Reviewed runs", "",
+        "| Workflow | Category | Decision | Corrections | Paid setup | Runtime seconds | Peak memory MiB |",
+        "|---|---|---|---:|---|---:|---:|", *review_rows, "",
+        "## Product milestone gaps", "",
+        *([f"- {_markdown_text(item, reason='validation_pack_source_invalid')}" for item in missing] or ["- None"]), "",
+        "## Offer gate", "", "| Gate | Result |", "|---|---|", *gate_rows, "",
+        "Missing commercial proof:",
+        *([f"- {_markdown_text(item, reason='validation_pack_source_invalid')}" for item in offer_missing] or ["- None"]), "",
+        "## Exact next experiment", "", *next_lines, "",
+        "## Boundary", "",
+        "No customer demand, revenue, ROI, production readiness, or publication authorization is inferred by this dossier.", "",
+    ])
+
+
+def run_validation_pack(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    home, source = _product_validation_result(action, project_root)
+    canonical = json.dumps(source, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    dossier_id = hashlib.sha256(b"local-ai.validation-pack.v1\0" + canonical).hexdigest()[:12]
+    target, stored, digest = _store_private_markdown(
+        home, "validation-packs", "validation-pack", dossier_id,
+        _validation_pack_text(source, dossier_id), reason_prefix="validation_pack",
+    )
+    evidence = source["evidence"]
+    offer = source["offer"]
+    print(json.dumps({
+        "schema": VALIDATION_PACK_SCHEMA, "status": "ready_for_owner_review",
+        "validationPackId": dossier_id, "validationPackPath": str(target),
+        "validationPackSha256": digest, "packStored": stored,
+        "reviewedMissions": evidence.get("reviewed_missions"),
+        "missionTarget": evidence.get("mission_target"),
+        "offerStatus": offer.get("status"), "stateMutated": stored,
         "externalPublicationAuthorized": False, "modelCalled": False,
         "externalActionPerformed": False,
     }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
@@ -1333,6 +1525,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_offer(action)
         if action.mode == "offer-pack":
             return run_offer_pack(action)
+        if action.mode == "validation-pack":
+            return run_validation_pack(action)
         if action.mode == "work":
             return run_work(action)
         if action.mode == "cycle":

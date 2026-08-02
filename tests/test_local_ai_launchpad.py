@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_validation_pack, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -41,6 +41,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         )
         self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["offer-pack", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["validation-pack", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["experiment-pending"]).command, ())
         self.assertEqual(translate(["experiment-review-interactive"]).command, ())
         self.assertEqual(translate([
@@ -336,6 +337,58 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertIn("Claims this pack does not support", content)
             self.assertFalse(receipts[0]["externalPublicationAuthorized"])
 
+    def test_validation_pack_writes_current_scoreboard_and_next_experiment(self) -> None:
+        source = {
+            "evidence": {
+                "project": {"id": "1" * 12, "name": "Future Lab"},
+                "mission_target": 10, "reviewed_missions": 3,
+                "remaining_missions": 7, "complete_measurements": 2,
+                "stale_review_count": 0, "average_corrections": 1.0,
+                "category_counts": {"business": 1, "coding": 1, "data-research": 1},
+                "decision_counts": {"accepted": 2, "rejected": 1},
+                "paid_setup_signal_counts": {"no": 1, "unknown": 2, "yes": 0},
+                "missing_proof": ["ten_current_reviewed_missions"],
+                "reviews": [{
+                    "source": "external_experiment", "label": "Coding operability review",
+                    "category": "coding", "decision": "accepted", "corrections": 1,
+                    "paid_setup_signal": "unknown", "runtime_seconds": 15.5,
+                    "peak_memory_mb": 512,
+                }],
+            },
+            "experiment": {
+                "selectedCategory": "business",
+                "experiment": {"label": "Business evidence decision"},
+            },
+            "offer": {
+                "status": "evidence_required",
+                "gateResults": {
+                    "tenMeasuredCrossCategoryReviews": False,
+                    "repeatedAcceptedPaidSetupWorkflow": False,
+                    "staleBindingsAbsent": True,
+                },
+                "missingProof": ["tenMeasuredCrossCategoryReviews"],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            root = Path(directory) / "repo"
+            root.mkdir()
+            receipts = []
+            with patch("scripts.local_ai._product_validation_result", return_value=(home, source)):
+                for _ in range(2):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(run_validation_pack(translate(["validation-pack"]), root), 0)
+                    receipts.append(json.loads(output.getvalue()))
+            self.assertTrue(receipts[0]["packStored"])
+            self.assertFalse(receipts[1]["packStored"])
+            self.assertEqual(receipts[0]["validationPackId"], receipts[1]["validationPackId"])
+            content = Path(receipts[0]["validationPackPath"]).read_text(encoding="utf-8")
+            self.assertIn("| Human-reviewed missions | 3 | 10 |", content)
+            self.assertIn("local-ai.cmd experiment-run --recover-memory", content)
+            self.assertIn("not a sales claim", content)
+            self.assertFalse(receipts[0]["externalPublicationAuthorized"])
+
     def test_company_brief_prioritizes_trust_activity_review_queue_offer_and_experiment(self) -> None:
         ready = {"status": "ready", "verified": True, "currentActivity": "idle"}
         cases = [
@@ -408,6 +461,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-company-agent.cmd"', source)
         self.assertIn('local-ai.cmd" experiment', source)
         self.assertIn('local-ai.cmd" experiment-run --recover-memory', source)
+        self.assertIn('local-ai.cmd" validation-pack', source)
         self.assertIn('local-ai.cmd" offer-pack', source)
         self.assertIn('local-ai.cmd" code "%LOCAL_AI_PROJECT_PATH%"', source)
         self.assertIn('local-company-agent.cmd" --check', source)

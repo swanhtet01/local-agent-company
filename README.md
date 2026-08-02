@@ -15,6 +15,7 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd experiment-review-interactive
 .\local-ai.cmd offer
 .\local-ai.cmd offer-pack
+.\local-ai.cmd validation-pack
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
@@ -96,6 +97,14 @@ prohibited claims, and remaining owner decisions. Its receipt includes a
 content hash and explicitly withholds publication authority; reruns reuse the
 identical pack instead of creating conflicting drafts. Desktop Lab option **6**
 provides the same check-and-package flow without loading a model.
+
+`validation-pack` creates the private work-in-progress dossier available as
+desktop Lab option **3**. It combines current integrity-checked review counts,
+category coverage, human outcomes, paid-setup observations, correction and
+resource measurements, commercial gate failures, and the exact next experiment
+into one deterministic Markdown file with a content-hashed receipt. Unlike an
+offer pack, it is useful before the milestone passes and clearly states that it
+is not a sales claim or publication-ready paper.
 
 Add `--recover-memory` when Codex or another desktop app has filled RAM. Only
 after an initial zero-model memory block, the command invokes the existing
