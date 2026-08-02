@@ -9,8 +9,24 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_offer, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
+
+
+def accepted_prompt_receipt(actions: list[str]) -> dict[str, object]:
+    return {
+        "schema": "local-ai.company-prompt-result.v1",
+        "autoPermissionsEnabled": False, "externalActionPerformed": False,
+        "modelCalled": True, "ok": True, "paidApiUsed": False,
+        "reason": "accepted", "status": "accepted", "wallSeconds": 42.5,
+        "model": "qwen3.5:0.8b", "toolActions": actions,
+        "toolCallCount": len(actions), "response": "Grounded local review.",
+        "observedCost": 0.0, "modelUnloadedAfterRun": True, "agentExitCode": 0,
+        "admissionAvailableBytes": 3 * 1024**3,
+        "minimumAvailableBytesObserved": 2 * 1024**3,
+        "peakIncrementalMemoryBytes": 1024**3,
+        "peakIncrementalMemoryMb": 1024.0,
+    }
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -24,6 +40,12 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             ("Future Lab", "--recover-memory"),
         )
         self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["experiment-pending"]).command, ())
+        self.assertEqual(translate([
+            "experiment-review", "a" * 12, "--decision", "accepted",
+            "--corrections", "0", "--paid-setup", "unknown",
+            "--confirm-human-review",
+        ]).mode, "experiment-review")
         self.assertEqual(translate(["work", "Build a plan"]).command, ("run", "Build a plan"))
         self.assertEqual(translate(["later", "Research market"]).command, ("queue", "add", "Research market"))
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
@@ -102,12 +124,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "company"
             Company(home, MockModel()).create_project("Future Lab")
-            runner_receipt = {
-                "schema": "local-ai.company-prompt-result.v1", "ok": True,
-                "status": "accepted", "reason": "accepted", "modelCalled": True,
-                "externalActionPerformed": False,
-                "toolActions": ["status", "project_overview"],
-            }
+            runner_receipt = accepted_prompt_receipt(["status", "project_overview"])
             completed = subprocess.CompletedProcess(
                 [], 0, stdout=json.dumps(runner_receipt), stderr="",
             )
@@ -138,12 +155,12 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 "status": "blocked", "reason": "installed_models_memory_blocked",
                 "modelCalled": False, "externalActionPerformed": False,
             }))
-            accepted = subprocess.CompletedProcess([], 0, stdout=json.dumps({
-                "schema": "local-ai.company-prompt-result.v1", "ok": True,
-                "status": "accepted", "reason": "accepted", "modelCalled": True,
-                "externalActionPerformed": False,
-                "toolActions": ["status", "project_overview", "playbooks"],
-            }), stderr="")
+            accepted = subprocess.CompletedProcess(
+                [], 0,
+                stdout=json.dumps(accepted_prompt_receipt([
+                    "status", "project_overview", "playbooks",
+                ])), stderr="",
+            )
             recovery = {
                 "attempted": True, "status": "completed", "targetCount": 2,
                 "trimSucceeded": 2, "trimFailed": 0,
@@ -164,9 +181,58 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["status"], "accepted")
             self.assertEqual(receipt["attemptCount"], 2)
             self.assertEqual(receipt["memoryRecovery"], recovery)
+            self.assertTrue(receipt["pendingReceiptStored"])
+            self.assertTrue(receipt["stateMutated"])
             self.assertEqual(run.call_count, 2)
             recover.assert_called_once()
             sleep.assert_called_once_with(3.0)
+
+    def test_pending_experiment_can_be_inspected_and_human_reviewed_once(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            project_id = Company(home, MockModel()).create_project("Future Lab")
+            completed = subprocess.CompletedProcess(
+                [], 0,
+                stdout=json.dumps(accepted_prompt_receipt([
+                    "status", "project_overview", "playbooks",
+                ])), stderr="",
+            )
+            run_output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai.subprocess.run", return_value=completed),
+                redirect_stdout(run_output),
+            ):
+                self.assertEqual(
+                    run_experiment_agent(translate(["experiment-run", "Future Lab"])), 0,
+                )
+            pending_id = json.loads(run_output.getvalue())["pendingExperimentId"]
+
+            pending_output = io.StringIO()
+            with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(pending_output):
+                self.assertEqual(run_pending_experiments(translate(["experiment-pending"])), 0)
+            pending = json.loads(pending_output.getvalue())
+            self.assertEqual(pending["count"], 1)
+            self.assertEqual(pending["items"][0]["experimentId"], pending_id)
+            self.assertEqual(pending["items"][0]["response"], "Grounded local review.")
+
+            review_output = io.StringIO()
+            review_action = translate([
+                "experiment-review", pending_id, "--decision", "accepted",
+                "--corrections", "0", "--paid-setup", "unknown",
+                "--confirm-human-review",
+            ])
+            with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(review_output):
+                self.assertEqual(run_experiment_review(review_action), 0)
+            review = json.loads(review_output.getvalue())
+            self.assertTrue(review["recorded"])
+            self.assertTrue(review["pendingArchived"])
+            self.assertEqual(review["experimentId"], pending_id)
+            status = Company(home, MockModel()).product_evidence_status(project_id)
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["reviews"][0]["experiment_id"], pending_id)
 
     def test_offer_command_reports_missing_proof_without_model_or_mutation(self) -> None:
         from local_company.core import Company, MockModel

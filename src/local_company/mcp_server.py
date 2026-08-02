@@ -730,7 +730,7 @@ class CompanyTools:
 
     def product_experiment_review(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(arguments, {
-            "project", "label", "category", "decision", "corrections",
+            "experimentId", "project", "label", "category", "decision", "corrections",
             "paidSetupSignal", "receipt", "reviewConfirmation",
         })
         if value.get("reviewConfirmation") != PRODUCT_EXPERIMENT_CONFIRMATION:
@@ -741,6 +741,12 @@ class CompanyTools:
         decision = value.get("decision")
         corrections = value.get("corrections")
         paid_signal = value.get("paidSetupSignal")
+        experiment_id = value.get("experimentId")
+        if experiment_id is not None and (
+            not isinstance(experiment_id, str)
+            or QUEUE_ID_PATTERN.fullmatch(experiment_id) is None
+        ):
+            raise ProtocolError(-32602, "invalid_experiment_id")
         if not isinstance(project, str) or not project.strip() or len(project) > 80:
             raise ProtocolError(-32602, "invalid_project")
         if not isinstance(label, str) or not label.strip() or len(label) > 80:
@@ -790,7 +796,7 @@ class CompanyTools:
                 project, label, category, decision, corrections, paid_signal,
                 float(receipt["wallSeconds"]), peak_memory_mb,
                 receipt["agentExitCode"], checks_passed,
-                f"local-company/{receipt['model']}", digest,
+                f"local-company/{receipt['model']}", digest, experiment_id,
             )
         except ValueError as error:
             if created_file:
@@ -1235,6 +1241,7 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
                 ],
                 {
                     "project": project,
+                    "experimentId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
                     "label": {"type": "string", "minLength": 1, "maxLength": 80},
                     "category": {"type": "string", "enum": ["coding", "business", "data-research"]},
                     "decision": {"type": "string", "enum": ["accepted", "rejected"]},

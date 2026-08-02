@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +24,8 @@ SCHEMA = "local-ai.launchpad.v1"
 WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
 CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
+PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
+PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -53,6 +58,10 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd experiment-run [PROJECT] [--recover-memory]
                                               Run that test locally and return its receipt
   local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
+  local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
+  local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
+      --paid-setup yes|no|unknown --confirm-human-review
+                                              Record one actual human review
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
@@ -122,11 +131,19 @@ def translate(argv: list[str]) -> LaunchAction | None:
         ):
             raise ValueError("experiment_run_accepts_at_most_one_project")
         command = tuple(project_values + (["--recover-memory"] if recover_count else []))
-        return LaunchAction(command, "experiment-run", "Run the next planned product test locally and return a receipt without recording human evidence.", True, False)
+        return LaunchAction(command, "experiment-run", "Run the next planned product test locally, preserve an accepted receipt, and stop before human review.", True, True)
     if name == "offer":
         if len(tail) > 1 or (tail and not tail[0].strip()):
             raise ValueError("offer_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "offer", "Check whether repeatable measured evidence supports owner-reviewed offer packaging.", False, False)
+    if name == "experiment-pending":
+        if tail:
+            raise ValueError("experiment_pending_accepts_no_arguments")
+        return LaunchAction((), "experiment-pending", "Inspect pending measured experiment receipts without changing state.", False, False)
+    if name == "experiment-review":
+        if not tail:
+            raise ValueError("experiment_review_arguments_required")
+        return LaunchAction(tuple(tail), "experiment-review", "Record one explicitly confirmed human review of a pending measured experiment.", False, True)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -291,6 +308,236 @@ def _invoke_experiment_runner(
     return completed, runner_receipt
 
 
+def _pending_experiment_directory(home: Path, *, reviewed: bool = False) -> Path:
+    name = "reviewed-product-experiments" if reviewed else "pending-product-experiments"
+    return home.resolve() / name
+
+
+def _pending_experiment_payload(
+    plan: dict[str, object], experiment: dict[str, object],
+    runner_receipt: dict[str, object],
+) -> dict[str, object]:
+    identity = {
+        "project": plan["project"], "label": experiment["label"],
+        "category": plan["selectedCategory"],
+        "requiredActions": experiment["requiredActions"],
+        "runnerReceipt": runner_receipt,
+    }
+    canonical = json.dumps(
+        identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    experiment_id = hashlib.sha256(
+        b"local-ai.pending-product-experiment.v1\0" + canonical,
+    ).hexdigest()[:12]
+    return {"schema": PENDING_EXPERIMENT_SCHEMA, "experimentId": experiment_id, **identity}
+
+
+def _pending_experiment_bytes(payload: dict[str, object]) -> bytes:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > 65_536:
+        raise ValueError("pending_experiment_too_large")
+    return encoded
+
+
+def _validate_pending_experiment(payload: object) -> dict[str, object]:
+    required = {
+        "schema", "experimentId", "project", "label", "category",
+        "requiredActions", "runnerReceipt",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("pending_experiment_invalid")
+    experiment_id = payload.get("experimentId")
+    project = payload.get("project")
+    if (
+        payload.get("schema") != PENDING_EXPERIMENT_SCHEMA
+        or not isinstance(experiment_id, str)
+        or PENDING_EXPERIMENT_ID.fullmatch(experiment_id) is None
+        or not isinstance(project, dict)
+        or not isinstance(project.get("id"), str)
+        or not isinstance(project.get("name"), str)
+        or not isinstance(payload.get("label"), str)
+        or payload.get("category") not in {"coding", "business", "data-research"}
+        or not isinstance(payload.get("requiredActions"), list)
+        or not isinstance(payload.get("runnerReceipt"), dict)
+    ):
+        raise ValueError("pending_experiment_invalid")
+    expected = _pending_experiment_payload(
+        {"project": project, "selectedCategory": payload["category"]},
+        {"label": payload["label"], "requiredActions": payload["requiredActions"]},
+        payload["runnerReceipt"],
+    )
+    if expected != payload:
+        raise ValueError("pending_experiment_integrity_invalid")
+    return dict(payload)
+
+
+def _store_pending_experiment(home: Path, payload: dict[str, object]) -> tuple[str, bool]:
+    validated = _validate_pending_experiment(payload)
+    directory = _pending_experiment_directory(home)
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("pending_experiment_directory_unsafe")
+    experiment_id = str(validated["experimentId"])
+    target = directory / f"pending-{experiment_id}.json"
+    encoded = _pending_experiment_bytes(validated)
+    if target.exists():
+        if target.is_symlink() or target.read_bytes() != encoded:
+            raise ValueError("pending_experiment_collision")
+        return experiment_id, False
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=directory, prefix=".pending-", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return experiment_id, True
+
+
+def _load_pending_experiment(home: Path, experiment_id: str) -> tuple[Path, dict[str, object]]:
+    if PENDING_EXPERIMENT_ID.fullmatch(experiment_id) is None:
+        raise ValueError("pending_experiment_id_invalid")
+    path = _pending_experiment_directory(home) / f"pending-{experiment_id}.json"
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise ValueError("pending_experiment_unknown") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 65_536:
+        raise ValueError("pending_experiment_file_unsafe")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("pending_experiment_invalid") from error
+    validated = _validate_pending_experiment(payload)
+    if validated["experimentId"] != experiment_id:
+        raise ValueError("pending_experiment_integrity_invalid")
+    return path, validated
+
+
+def run_pending_experiments(action: LaunchAction, root: Path | None = None) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+
+    home = default_company_home()
+    directory = _pending_experiment_directory(home)
+    items = []
+    if directory.exists():
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("pending_experiment_directory_unsafe")
+        paths = sorted(directory.glob("pending-*.json"))
+        if len(paths) > 100:
+            raise ValueError("pending_experiment_limit_exceeded")
+        for path in paths:
+            match = re.fullmatch(r"pending-([0-9a-f]{12})\.json", path.name)
+            if match is None:
+                raise ValueError("pending_experiment_filename_invalid")
+            _, payload = _load_pending_experiment(home, match.group(1))
+            receipt = payload["runnerReceipt"]
+            items.append({
+                "experimentId": payload["experimentId"], "project": payload["project"],
+                "label": payload["label"], "category": payload["category"],
+                "response": receipt.get("response"), "model": receipt.get("model"),
+                "wallSeconds": receipt.get("wallSeconds"),
+                "peakIncrementalMemoryMb": receipt.get("peakIncrementalMemoryMb"),
+            })
+    print(json.dumps({
+        "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
+        "items": items, "count": len(items), "modelCalled": False,
+        "stateMutated": False, "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def _experiment_review_values(command: tuple[str, ...]) -> dict[str, object]:
+    if not command or PENDING_EXPERIMENT_ID.fullmatch(command[0]) is None:
+        raise ValueError("experiment_review_id_invalid")
+    values: dict[str, object] = {"experimentId": command[0]}
+    index = 1
+    while index < len(command):
+        token = command[index]
+        if token == "--confirm-human-review":
+            if "confirmed" in values:
+                raise ValueError("experiment_review_arguments_invalid")
+            values["confirmed"] = True
+            index += 1
+            continue
+        names = {"--decision": "decision", "--corrections": "corrections", "--paid-setup": "paidSetupSignal"}
+        name = names.get(token)
+        if name is None or name in values or index + 1 >= len(command):
+            raise ValueError("experiment_review_arguments_invalid")
+        raw = command[index + 1]
+        if name == "corrections":
+            try:
+                values[name] = int(raw)
+            except ValueError as error:
+                raise ValueError("experiment_review_corrections_invalid") from error
+        else:
+            values[name] = raw
+        index += 2
+    if set(values) != {"experimentId", "decision", "corrections", "paidSetupSignal", "confirmed"}:
+        raise ValueError("experiment_review_arguments_required")
+    return values
+
+
+def run_experiment_review(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.mcp_server import (
+        CompanyTools, PRODUCT_EXPERIMENT_CONFIRMATION, ProtocolError,
+    )
+
+    values = _experiment_review_values(action.command)
+    home = default_company_home()
+    source_path, pending = _load_pending_experiment(home, str(values["experimentId"]))
+    project = pending["project"]
+    try:
+        result = CompanyTools(home).product_experiment_review({
+            "experimentId": pending["experimentId"], "project": project["id"],
+            "label": pending["label"], "category": pending["category"],
+            "decision": values["decision"], "corrections": values["corrections"],
+            "paidSetupSignal": values["paidSetupSignal"],
+            "receipt": pending["runnerReceipt"],
+            "reviewConfirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
+        })
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    reviewed_directory = _pending_experiment_directory(home, reviewed=True)
+    reviewed_directory.mkdir(parents=True, exist_ok=True)
+    if reviewed_directory.is_symlink() or not reviewed_directory.is_dir():
+        raise ValueError("reviewed_experiment_directory_unsafe")
+    destination = reviewed_directory / source_path.name
+    if destination.exists():
+        if destination.is_symlink() or destination.read_bytes() != source_path.read_bytes():
+            raise ValueError("reviewed_experiment_collision")
+        source_path.unlink()
+    else:
+        os.replace(source_path, destination)
+    print(json.dumps({
+        "schema": "local-ai.product-experiment-human-review.v1",
+        "status": "recorded", "recorded": True,
+        "experimentId": pending["experimentId"], "pendingArchived": True,
+        "review": result["review"], "modelCalled": False,
+        "stateMutated": True, "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
 def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     plan = _product_experiment_plan(action, project_root)
@@ -338,7 +585,28 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     if not isinstance(observed_actions, list):
         observed_actions = []
     missing_actions = [name for name in required_actions if name not in observed_actions]
-    accepted = completed.returncode == 0 and runner_receipt.get("ok") is True and not missing_actions
+    preliminary_acceptance = (
+        completed.returncode == 0
+        and runner_receipt.get("ok") is True
+        and runner_receipt.get("status") == "accepted"
+        and runner_receipt.get("externalActionPerformed") is False
+        and runner_receipt.get("paidApiUsed") is False
+        and runner_receipt.get("autoPermissionsEnabled") is False
+        and runner_receipt.get("modelCalled") is True
+        and runner_receipt.get("modelUnloadedAfterRun") is True
+        and runner_receipt.get("observedCost") == 0
+        and not missing_actions
+    )
+    receipt_contract_valid = False
+    if preliminary_acceptance:
+        from local_company.mcp_server import CompanyTools, ProtocolError
+
+        try:
+            runner_receipt = CompanyTools._validated_company_prompt_receipt(runner_receipt)
+            receipt_contract_valid = True
+        except ProtocolError:
+            receipt_contract_valid = False
+    accepted = preliminary_acceptance and receipt_contract_valid
     status = (
         "accepted" if accepted else
         "rejected" if completed.returncode == 0 else
@@ -347,21 +615,36 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     reason = (
         "accepted" if accepted else
         "required_company_actions_missing" if completed.returncode == 0 and missing_actions else
+        "runner_receipt_not_reviewable" if completed.returncode == 0 and not receipt_contract_valid else
         runner_receipt.get("reason", "experiment_runner_failed")
     )
+    pending_id = None
+    pending_created = False
+    if accepted:
+        source = str(project_root / "src")
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        from local_company.config import default_company_home
+
+        pending_payload = _pending_experiment_payload(plan, experiment, runner_receipt)
+        pending_id, pending_created = _store_pending_experiment(
+            default_company_home(), pending_payload,
+        )
     output = {
         "schema": EXPERIMENT_RUN_SCHEMA, "ok": accepted, "status": status,
         "reason": reason, "project": plan["project"],
         "selectedCategory": plan["selectedCategory"], "label": experiment.get("label"),
         "requiredActions": required_actions, "missingActions": missing_actions,
         "runnerReceipt": runner_receipt, "attemptCount": attempts,
-        "humanReviewRecorded": False,
+        "humanReviewRecorded": False, "pendingExperimentId": pending_id,
+        "pendingReceiptStored": pending_id is not None,
+        "pendingReceiptCreated": pending_created,
         "nextAction": (
-            "perform_actual_human_review_then_call_product_experiment_review"
+            "inspect_experiment_pending_then_record_actual_human_review"
             if accepted else "resolve_runner_block_or_failed_acceptance_check"
         ),
         "modelCalled": runner_receipt.get("modelCalled") is True,
-        "stateMutated": False,
+        "stateMutated": pending_id is not None,
         "externalActionPerformed": runner_receipt.get("externalActionPerformed") is True,
     }
     if recovery is not None:
@@ -692,6 +975,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_experiment(action)
         if action.mode == "experiment-run":
             return run_experiment_agent(action)
+        if action.mode == "experiment-pending":
+            return run_pending_experiments(action)
+        if action.mode == "experiment-review":
+            return run_experiment_review(action)
         if action.mode == "offer":
             return run_offer(action)
         if action.mode == "work":

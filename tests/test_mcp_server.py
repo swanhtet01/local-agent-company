@@ -357,6 +357,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 "peakIncrementalMemoryMb": 1024.0,
             }
             request = {
+                "experimentId": "b" * 12,
                 "project": project_id, "label": "Compact status workflow",
                 "category": "business", "decision": "accepted", "corrections": 0,
                 "paidSetupSignal": "unknown", "receipt": receipt,
@@ -371,6 +372,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
             }, 4)["result"]["structuredContent"]
             self.assertTrue(recorded["recorded"])
             self.assertTrue(recorded["receiptStored"])
+            self.assertEqual(recorded["review"]["experiment_id"], "b" * 12)
             self.assertRegex(recorded["receiptSha256"], r"^[0-9a-f]{64}$")
             self.assertNotIn(str(root), str(recorded))
             status = session.company_tools.company.product_evidence_status(project_id)
