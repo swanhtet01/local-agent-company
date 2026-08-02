@@ -97,6 +97,11 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
         self.assertIn("if errorlevel 1 exit /b 3", company)
         self.assertIn('call "%COMPANY_ROOT%local-code.cmd" --company "%COMPANY_ROOT%"', company)
         self.assertNotIn("--model openai/", company.lower())
+        exit_capture = code.index('set "EXIT_CODE=%ERRORLEVEL%"')
+        unload = code.index('ollama stop "%LOCAL_MODEL%" >nul 2>nul')
+        final_exit = code.index('exit /b %EXIT_CODE%', unload)
+        self.assertLess(exit_capture, unload)
+        self.assertLess(unload, final_exit)
 
     @staticmethod
     def _fixture(directory: str) -> tuple[Path, Path]:

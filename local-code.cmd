@@ -65,6 +65,8 @@ if defined OPENCODE_AGENT (
   call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
 )
 set "EXIT_CODE=%ERRORLEVEL%"
+ollama stop "%LOCAL_MODEL%" >nul 2>nul
+if errorlevel 1 echo WARNING: Ollama could not unload %LOCAL_MODEL%; run ollama stop %LOCAL_MODEL%.
 popd
 exit /b %EXIT_CODE%
 
