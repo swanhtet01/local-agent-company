@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from local_company.mcp_server import (
     MAX_TOOL_CALLS,
+    KNOWLEDGE_ADD_CONFIRMATION,
     PROJECT_CREATE_CONFIRMATION,
     RUN_CONFIRMATION,
     SCHEDULE_CHANGE_CONFIRMATION,
@@ -44,9 +45,10 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "status", "projects", "preflight", "queue_list", "queue_add", "queue_run",
                     "jobs", "job_result", "schedule_list", "schedule_create",
                     "schedule_set_enabled", "playbooks", "project_create", "project_overview",
+                    "knowledge_list", "knowledge_add", "knowledge_search",
                 },
             )
-            self.assertEqual(len(tools), 14)
+            self.assertEqual(len(tools), 17)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -231,6 +233,42 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(product["roleCount"], len(product["roles"]))
             self.assertFalse(result["modelCalled"])
             self.assertFalse(result["stateMutated"])
+
+    def test_confirmed_inline_knowledge_is_retrievable_and_pathless(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            project = self._call(session, "project_create", {
+                "name": "Vision Lab", "projectConfirmation": PROJECT_CREATE_CONFIRMATION,
+            }, 3)["result"]["structuredContent"]
+            refused = self._call(session, "knowledge_add", {
+                "project": project["projectId"], "title": "Pilot premise",
+                "content": "The pilot milestone is ten reviewed workflows.",
+            }, 4)
+            self.assertEqual(refused["error"]["message"], "knowledge_confirmation_required")
+            self.assertEqual(session.company_tools.company.knowledge_items(project["projectId"]), [])
+            added = self._call(session, "knowledge_add", {
+                "project": project["projectId"], "title": "Pilot premise",
+                "content": "The pilot milestone is ten reviewed workflows.",
+                "knowledgeConfirmation": KNOWLEDGE_ADD_CONFIRMATION,
+            }, 5)["result"]["structuredContent"]
+            self.assertTrue(added["added"])
+            listed = self._call(session, "knowledge_list", {
+                "project": project["projectId"],
+            }, 6)["result"]["structuredContent"]
+            self.assertEqual(listed["sources"][0]["sourceId"], added["sourceId"])
+            self.assertTrue(listed["sources"][0]["managedInline"])
+            searched = self._call(session, "knowledge_search", {
+                "project": project["projectId"], "query": "pilot milestone reviewed workflows",
+            }, 7)["result"]["structuredContent"]
+            self.assertEqual(searched["hits"][0]["sourceId"], added["sourceId"])
+            self.assertIn("ten reviewed workflows", searched["hits"][0]["excerpt"])
+            self.assertNotIn(str(root), str(listed) + str(searched))
+            preflight = self._call(session, "preflight", {
+                "objective": "Review the pilot milestone", "project": project["projectId"],
+            }, 8)["result"]["structuredContent"]
+            self.assertEqual(preflight["status"], "ready")
+            self.assertTrue(preflight["model_execution_ready"])
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
