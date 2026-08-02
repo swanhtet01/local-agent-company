@@ -172,6 +172,18 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('python "%LAUNCHPAD_ROOT%scripts\\local_ai.py" %*', source)
         self.assertNotIn("shift", source.lower())
 
+    def test_desktop_menu_exposes_only_bounded_local_entrypoints(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "local-ai-menu.cmd").read_text(encoding="utf-8")
+        self.assertIn('local-company-agent.cmd"', source)
+        self.assertIn('local-ai.cmd" experiment', source)
+        self.assertIn('local-ai.cmd" experiment-run --recover-memory', source)
+        self.assertIn('local-ai.cmd" code "%LOCAL_AI_PROJECT_PATH%"', source)
+        self.assertIn('local-company-agent.cmd" --check', source)
+        self.assertIn('local-ai.cmd" dashboard', source)
+        self.assertNotIn("taskkill", source.lower())
+        self.assertNotIn("powershell", source.lower())
+
     def test_code_mode_forwards_exact_arguments_without_a_shell(self) -> None:
         action = translate([
             "code", "--run", "C:\\Project With Spaces", "TASK.md",

@@ -32,6 +32,12 @@ Local Company** on the Windows desktop or run:
 .\local-company-agent.cmd --check
 ```
 
+For the complete one-click control panel, double-click **SuperMega Local AI
+Lab** on the desktop. Its seven fixed choices open company chat, plan or run a
+measured product experiment, launch a coding agent for a chosen folder, check
+readiness, start the loopback dashboard, or exit. The menu itself loads no
+model and grants no external authority.
+
 The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
 only the dedicated OpenCode agent backed by the locally selected Qwen model.
