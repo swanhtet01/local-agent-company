@@ -67,7 +67,8 @@ class LocalCompanyPromptTests(unittest.TestCase):
             ), patch(
                 "scripts.run_local_company_prompt.available_memory_bytes", return_value=3 * GIB,
             ), patch(
-                "scripts.run_local_company_prompt._invoke_agent", return_value=completed,
+                "scripts.run_local_company_prompt._invoke_agent",
+                return_value=(completed, 2 * GIB),
             ), patch(
                 "scripts.run_local_company_prompt._unload_model", return_value=True,
             ), patch(
@@ -81,6 +82,10 @@ class LocalCompanyPromptTests(unittest.TestCase):
             self.assertEqual(receipt["observedCost"], 0)
             self.assertTrue(receipt["modelUnloadedAfterRun"])
             self.assertFalse(receipt["externalActionPerformed"])
+            self.assertEqual(receipt["admissionAvailableBytes"], 3 * GIB)
+            self.assertEqual(receipt["minimumAvailableBytesObserved"], 2 * GIB)
+            self.assertEqual(receipt["peakIncrementalMemoryBytes"], GIB)
+            self.assertEqual(receipt["peakIncrementalMemoryMb"], 1024.0)
 
     def test_paid_or_tool_free_output_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -98,7 +103,7 @@ class LocalCompanyPromptTests(unittest.TestCase):
                     "scripts.run_local_company_prompt.available_memory_bytes", return_value=3 * GIB,
                 ), patch(
                     "scripts.run_local_company_prompt._invoke_agent",
-                    return_value=subprocess.CompletedProcess([], 0, stdout, ""),
+                    return_value=(subprocess.CompletedProcess([], 0, stdout, ""), 2 * GIB),
                 ), patch(
                     "scripts.run_local_company_prompt._unload_model", return_value=True,
                 ), redirect_stdout(output):

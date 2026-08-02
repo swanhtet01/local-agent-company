@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -56,14 +57,47 @@ def _unload_model(ollama: str | None, model: str) -> bool:
 
 def _invoke_agent(
     opencode: Path, model: str, prompt: str, root: Path, timeout: int,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            str(opencode), "run", "--agent", "local-company", "--model",
-            f"ollama/{model}", "--format", "json", prompt,
-        ],
-        cwd=root, check=False, capture_output=True, text=True, timeout=timeout,
+    baseline_memory: int,
+) -> tuple[subprocess.CompletedProcess[str], int]:
+    command = [
+        str(opencode), "run", "--agent", "local-company", "--model",
+        f"ollama/{model}", "--format", "json", prompt,
+    ]
+    process = subprocess.Popen(
+        command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    stop = threading.Event()
+    minimum = [baseline_memory]
+
+    def sample() -> None:
+        while not stop.wait(0.25):
+            try:
+                minimum[0] = min(minimum[0], available_memory_bytes())
+            except RuntimeError:
+                pass
+
+    sampler = threading.Thread(
+        target=sample, name="local-company-memory-sampler", daemon=True,
+    )
+    sampler.start()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False, capture_output=True, text=True, timeout=30,
+            )
+        else:
+            process.kill()
+        process.communicate()
+        raise
+    finally:
+        stop.set()
+        sampler.join(timeout=2)
+    return subprocess.CompletedProcess(
+        command, process.returncode, stdout, stderr,
+    ), minimum[0]
 
 
 def parse_events(output: str) -> dict[str, Any]:
@@ -156,9 +190,9 @@ def main(argv: list[str] | None = None) -> int:
             installed_ollama_models(), available_memory_bytes(), args.requested_model,
         )
         model = selection.model
-        completed = _invoke_agent(
+        completed, minimum_memory = _invoke_agent(
             opencode, model, prompt, Path(__file__).resolve(strict=True).parents[1],
-            args.timeout_seconds,
+            args.timeout_seconds, selection.available_memory_bytes,
         )
         if len(completed.stderr) > MAX_OUTPUT_CHARS:
             raise ValueError("agent_output_limit_exceeded")
@@ -192,6 +226,15 @@ def main(argv: list[str] | None = None) -> int:
             modelUnloadedAfterRun=cleanup_done,
             agentExitCode=completed.returncode,
             wallSeconds=round(time.perf_counter() - started, 3),
+            admissionAvailableBytes=selection.available_memory_bytes,
+            minimumAvailableBytesObserved=minimum_memory,
+            peakIncrementalMemoryBytes=max(
+                0, selection.available_memory_bytes - minimum_memory,
+            ),
+            peakIncrementalMemoryMb=round(
+                max(0, selection.available_memory_bytes - minimum_memory) / (1024 * 1024),
+                1,
+            ),
         ), separators=(",", ":"), sort_keys=True))
         return 0 if ok else 1
     except subprocess.TimeoutExpired:
@@ -202,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(json.dumps(_receipt(
-            ok=False, status="blocked", reason=str(error), modelCalled=False,
+            ok=False, status="blocked", reason=str(error), modelCalled=model is not None,
             wallSeconds=round(time.perf_counter() - started, 3),
         ), separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 2
