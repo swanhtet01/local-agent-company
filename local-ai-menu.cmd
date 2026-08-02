@@ -1,6 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 set "LOCAL_AI_ROOT=%~dp0"
+if /I "%~1"=="--supermega" goto supermega_menu
 
 :menu
 cls
@@ -16,10 +17,12 @@ echo 7. Open local coding agent for a project
 echo 8. Check local AI readiness
 echo 9. Run one ready company mission ^(safe memory recovery^)
 echo A. Start local dashboard
+echo S. Open SuperMega workbench
 echo 0. Exit
 echo.
-choice /c 123456789A0 /n /m "Choose 0-9 or A: "
-if errorlevel 11 exit /b 0
+choice /c 123456789AS0 /n /m "Choose 0-9, A, S, or 0: "
+if errorlevel 12 exit /b 0
+if errorlevel 11 goto supermega_menu
 if errorlevel 10 goto dashboard
 if errorlevel 9 goto cycle
 if errorlevel 8 goto check
@@ -89,3 +92,91 @@ call "%LOCAL_AI_ROOT%local-ai.cmd" dashboard
 echo.
 pause
 goto menu
+
+:supermega_menu
+cls
+echo SuperMega AI Workbench
+echo ======================
+echo 1. Show SuperMega status and exact next action ^(no model^)
+echo 2. Refresh changed SuperMega evidence ^(local state only^)
+echo 3. Make SuperMega the active execution focus
+echo 4. Preview a SuperMega team plan ^(no model^)
+echo 5. Queue SuperMega work for autopilot ^(no model^)
+echo 6. Run one bounded SuperMega team now
+echo 7. Check SuperMega coding-agent readiness
+echo 8. Open SuperMega coding agent
+echo 9. Start local dashboard
+echo 0. Back to main menu
+echo.
+choice /c 1234567890 /n /m "Choose 0-9: "
+if errorlevel 10 goto menu
+if errorlevel 9 goto supermega_dashboard
+if errorlevel 8 goto supermega_code
+if errorlevel 7 goto supermega_code_check
+if errorlevel 6 goto supermega_work
+if errorlevel 5 goto supermega_later
+if errorlevel 4 goto supermega_plan
+if errorlevel 3 goto supermega_use
+if errorlevel 2 goto supermega_refresh
+if errorlevel 1 goto supermega_status
+
+:supermega_status
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega
+echo.
+pause
+goto supermega_menu
+
+:supermega_refresh
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega refresh
+echo.
+pause
+goto supermega_menu
+
+:supermega_use
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega use
+echo.
+pause
+goto supermega_menu
+
+:supermega_plan
+set "SUPERMEGA_OBJECTIVE="
+set /p "SUPERMEGA_OBJECTIVE=Objective to preview: "
+if not defined SUPERMEGA_OBJECTIVE goto supermega_menu
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega plan "%SUPERMEGA_OBJECTIVE%"
+echo.
+pause
+goto supermega_menu
+
+:supermega_later
+set "SUPERMEGA_OBJECTIVE="
+set /p "SUPERMEGA_OBJECTIVE=Objective to queue: "
+if not defined SUPERMEGA_OBJECTIVE goto supermega_menu
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega later "%SUPERMEGA_OBJECTIVE%"
+echo.
+pause
+goto supermega_menu
+
+:supermega_work
+set "SUPERMEGA_OBJECTIVE="
+set /p "SUPERMEGA_OBJECTIVE=Objective to run now: "
+if not defined SUPERMEGA_OBJECTIVE goto supermega_menu
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega work "%SUPERMEGA_OBJECTIVE%"
+echo.
+pause
+goto supermega_menu
+
+:supermega_code_check
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega code --check
+echo.
+pause
+goto supermega_menu
+
+:supermega_code
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega code
+goto supermega_menu
+
+:supermega_dashboard
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega dashboard
+echo.
+pause
+goto supermega_menu

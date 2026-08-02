@@ -25,6 +25,7 @@ WORK_RESULT_SCHEMA = "local-ai.work-result.v1"
 CYCLE_RESULT_SCHEMA = "local-ai.cycle-result.v1"
 EXPERIMENT_RUN_SCHEMA = "local-ai.experiment-run.v1"
 COMPANY_BRIEF_SCHEMA = "local-ai.company-brief.v1"
+SUPERMEGA_WORKBENCH_SCHEMA = "local-ai.supermega-workbench.v1"
 OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
 VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v2"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
@@ -36,6 +37,9 @@ QUEUE_COMPLETION_PATTERN = re.compile(
 )
 SCHEDULE_TICK_PATTERN = re.compile(r"^Materialized (\d+) due schedule\(s\)\.$", re.MULTILINE)
 CYCLE_MINIMUM_AVAILABLE_BYTES = 2 * GIB
+SUPERMEGA_PROJECT_NAME = "SuperMega"
+SUPERMEGA_REPOSITORY_DIRECTORY = "supermega-platform"
+MAX_GIT_STATUS_BYTES = 64 * 1024
 PRODUCT_OUTCOME_REASONS = (
     "none", "inaccurate", "incomplete", "not_actionable", "too_slow",
     "too_resource_heavy", "unsafe", "tool_failure", "other",
@@ -57,6 +61,7 @@ HELP = r"""Local AI Launchpad
 Use one command for local coding, business teams, research, planning, and queued work.
 
   local-ai.cmd check [model options]          Check Ollama and the configured model
+  local-ai.cmd supermega [ACTION] ...         Operate SuperMega without retyping paths
   local-ai.cmd code [PROJECT_PATH]            Open a local coding agent in a project
   local-ai.cmd vision [--check] [PROJECT]     Use the full local Vision product agent
   local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
@@ -98,6 +103,11 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd company ...                     Access the complete advanced CLI
 
 Examples:
+  local-ai.cmd supermega
+  local-ai.cmd supermega refresh
+  local-ai.cmd supermega plan "Choose one verified internal next action"
+  local-ai.cmd supermega later "Draft one evidence-grounded release gap brief"
+  local-ai.cmd supermega code --check
   local-ai.cmd code C:\path\to\a-project
   local-ai.cmd vision-lite --check
   local-ai.cmd vision-lite
@@ -122,6 +132,13 @@ def _require_tail(name: str, values: list[str]) -> list[str]:
     return values
 
 
+def _supermega_objective(name: str, values: list[str]) -> list[str]:
+    objective = _require_tail(name, values)
+    if any(item == "--project" or item.startswith("--project=") for item in objective):
+        raise ValueError("supermega_project_override_forbidden")
+    return objective
+
+
 def translate(argv: list[str]) -> LaunchAction | None:
     if not argv or argv[0].lower() in {"help", "-h", "--help"}:
         return None
@@ -129,6 +146,52 @@ def translate(argv: list[str]) -> LaunchAction | None:
     tail = argv[1:]
     if name == "check":
         return LaunchAction(("doctor", *tail), "check", "Check the local model dependency without generating text.", False, False)
+    if name == "supermega":
+        operation = tail[0].lower() if tail else "status"
+        values = tail[1:]
+        if operation == "status":
+            if values:
+                raise ValueError("supermega_status_accepts_no_arguments")
+            return LaunchAction((), "supermega-status", "Show one pathless SuperMega operating status and next action.", False, False)
+        if operation == "refresh":
+            if values:
+                raise ValueError("supermega_refresh_accepts_no_arguments")
+            return LaunchAction(
+                ("knowledge", "refresh", "--project", SUPERMEGA_PROJECT_NAME),
+                "supermega-refresh", "Refresh registered SuperMega evidence from its exact local sources.",
+                False, True,
+            )
+        if operation == "use":
+            if values:
+                raise ValueError("supermega_use_accepts_no_arguments")
+            return LaunchAction((SUPERMEGA_PROJECT_NAME,), "use", "Select SuperMega for bounded model-backed work.", False, True)
+        if operation in {"plan", "work", "later"}:
+            objective = _supermega_objective(f"supermega_{operation}", values)
+            prefix = {
+                "plan": ("preflight",), "work": ("run",),
+                "later": ("queue", "add"),
+            }[operation]
+            return LaunchAction(
+                (*prefix, *objective, "--project", SUPERMEGA_PROJECT_NAME), operation,
+                {
+                    "plan": "Preview a SuperMega team, evidence, and owner gates without starting work.",
+                    "work": "Run one bounded SuperMega team and write its auditable report.",
+                    "later": "Queue one bounded SuperMega mission without running it.",
+                }[operation],
+                operation == "work", operation in {"work", "later"},
+            )
+        if operation == "code":
+            if values not in ([], ["--check"]):
+                raise ValueError("supermega_code_accepts_only_optional_check")
+            return LaunchAction(
+                tuple(values), "supermega-code", "Open or check the exact local SuperMega coding workspace.",
+                not values, False,
+            )
+        if operation == "dashboard":
+            if values:
+                raise ValueError("supermega_dashboard_accepts_no_arguments")
+            return LaunchAction(("service", "start"), "dashboard", "Start the owner-controlled SuperMega loopback dashboard.", False, True)
+        raise ValueError("supermega_operation_unknown")
     if name == "plan":
         return LaunchAction(("preflight", *_require_tail(name, tail)), "plan", "Preview the team, evidence, and owner gates without starting work.", False, False)
     if name == "experiment":
@@ -1094,6 +1157,150 @@ def run_code(action: LaunchAction, root: Path | None = None) -> int:
     return completed.returncode
 
 
+def run_supermega_code(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    repository = project_root.parent / SUPERMEGA_REPOSITORY_DIRECTORY
+    forwarded = LaunchAction(
+        (*action.command, str(repository)), "code", action.description,
+        action.model_may_run, False,
+    )
+    return run_code(forwarded, project_root)
+
+
+def _supermega_repository_status(project_root: Path) -> dict[str, object]:
+    candidate = project_root.parent / SUPERMEGA_REPOSITORY_DIRECTORY
+    try:
+        if candidate.is_symlink() or not candidate.is_dir():
+            return {"status": "unavailable", "branch": None, "clean": None, "dirtyEntries": None}
+        repository = candidate.resolve(strict=True)
+        if repository.parent != project_root.parent.resolve(strict=True):
+            return {"status": "unsafe", "branch": None, "clean": None, "dirtyEntries": None}
+        environment = os.environ.copy()
+        environment["GIT_NO_LAZY_FETCH"] = "1"
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain=v1", "--branch"],
+            check=False, capture_output=True, text=True, timeout=15, env=environment,
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError):
+        return {"status": "unavailable", "branch": None, "clean": None, "dirtyEntries": None}
+    encoded = (completed.stdout + completed.stderr).encode("utf-8", errors="replace")
+    if completed.returncode != 0 or len(encoded) > MAX_GIT_STATUS_BYTES:
+        return {"status": "unavailable", "branch": None, "clean": None, "dirtyEntries": None}
+    lines = completed.stdout.splitlines()
+    branch = None
+    if lines and lines[0].startswith("## "):
+        branch = lines[0][3:].split("...", 1)[0].split(" ", 1)[0] or None
+    dirty = sum(1 for line in lines[1:] if line.strip())
+    return {"status": "ready", "branch": branch, "clean": dirty == 0, "dirtyEntries": dirty}
+
+
+def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    repository = _supermega_repository_status(project_root)
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.core import Company, MockModel
+    from local_company.focus import read_execution_focus
+
+    company_home = default_company_home()
+    project: dict[str, object]
+    knowledge: dict[str, object]
+    focus: dict[str, object]
+    try:
+        company = Company(company_home, MockModel())
+        detail = company.project_detail(SUPERMEGA_PROJECT_NAME)
+        project_row = detail["project"]
+        project = {
+            "status": "ready", "projectId": project_row[0], "name": project_row[1],
+            "knowledgeSourceCount": len(detail["sources"]), "missionCount": len(detail["jobs"]),
+        }
+        freshness = company.knowledge_freshness(SUPERMEGA_PROJECT_NAME)
+        knowledge = {
+            "readyForUse": freshness["ready_for_use"],
+            "sourceCount": freshness["source_count"],
+            "statusCounts": freshness["status_counts"],
+        }
+        observed_focus = read_execution_focus(company_home)
+        active = (
+            observed_focus["enabled"] is True
+            and observed_focus.get("projectId") == project_row[0]
+        )
+        focus = {
+            "supermegaActive": active,
+            "currentProject": observed_focus.get("projectName"),
+            "maxRoles": observed_focus.get("maxRoles"),
+        }
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        project = {"status": "unavailable", "projectId": None, "name": SUPERMEGA_PROJECT_NAME, "knowledgeSourceCount": None, "missionCount": None}
+        knowledge = {"readyForUse": False, "sourceCount": None, "statusCounts": None}
+        focus = {"supermegaActive": False, "currentProject": None, "maxRoles": None}
+
+    try:
+        available = available_memory_bytes()
+    except (OSError, RuntimeError, ValueError):
+        available = None
+    memory_ready = available is not None and available >= CYCLE_MINIMUM_AVAILABLE_BYTES
+    if repository["status"] != "ready":
+        next_action = "restore_or_inspect_supermega_checkout"
+        command = "local-ai.cmd supermega status"
+    elif project["status"] != "ready":
+        next_action = "restore_supermega_company_project"
+        command = 'local-ai.cmd new "SuperMega"'
+    elif knowledge["readyForUse"] is not True:
+        next_action = "refresh_changed_supermega_evidence"
+        command = "local-ai.cmd supermega refresh"
+    elif focus["supermegaActive"] is not True:
+        next_action = "activate_supermega_execution_focus"
+        command = "local-ai.cmd supermega use"
+    elif repository["clean"] is not True:
+        next_action = "review_existing_supermega_changes"
+        command = "git status --short"
+    elif not memory_ready:
+        next_action = "free_memory_or_plan_without_model"
+        command = 'local-ai.cmd supermega plan "OBJECTIVE"'
+    else:
+        next_action = "check_supermega_coding_agent"
+        command = "local-ai.cmd supermega code --check"
+    attention = (
+        repository["status"] != "ready" or project["status"] != "ready"
+        or knowledge["readyForUse"] is not True or focus["supermegaActive"] is not True
+        or repository["clean"] is not True or not memory_ready
+    )
+    print(json.dumps({
+        "schema": SUPERMEGA_WORKBENCH_SCHEMA,
+        "status": "attention" if attention else "ready",
+        "repository": repository, "project": project, "knowledge": knowledge,
+        "focus": focus,
+        "resources": {
+            "availableMemoryBytes": available,
+            "minimumModelMemoryBytes": CYCLE_MINIMUM_AVAILABLE_BYTES,
+            "modelMemoryReady": memory_ready,
+            "memoryShortfallBytes": (
+                None if available is None or memory_ready
+                else CYCLE_MINIMUM_AVAILABLE_BYTES - available
+            ),
+        },
+        "nextAction": next_action, "command": command,
+        "commands": {
+            "status": "local-ai.cmd supermega",
+            "refreshEvidence": "local-ai.cmd supermega refresh",
+            "activateFocus": "local-ai.cmd supermega use",
+            "plan": 'local-ai.cmd supermega plan "OBJECTIVE"',
+            "queue": 'local-ai.cmd supermega later "OBJECTIVE"',
+            "run": 'local-ai.cmd supermega work "OBJECTIVE"',
+            "checkCode": "local-ai.cmd supermega code --check",
+            "openCode": "local-ai.cmd supermega code",
+            "dashboard": "local-ai.cmd supermega dashboard",
+        },
+        "modelCalled": False, "stateMutated": False,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0 if repository["status"] == "ready" and project["status"] == "ready" else 1
+
+
 def run_autopilot(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     mode = action.command[0].title()
@@ -1558,6 +1765,10 @@ def main(argv: list[str] | None = None) -> int:
         if action is None:
             print(HELP)
             return 0
+        if action.mode == "supermega-status":
+            return run_supermega_status(action)
+        if action.mode == "supermega-code":
+            return run_supermega_code(action)
         if action.mode in {"code", "vision", "vision-lite"}:
             return run_code(action)
         if action.mode == "autopilot":

@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_validation_pack, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_supermega_code, run_supermega_status, run_validation_pack, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -67,6 +67,16 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
         self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
         self.assertEqual(translate(["brief"]).command, ())
+        self.assertEqual(translate(["supermega"]).mode, "supermega-status")
+        self.assertEqual(
+            translate(["supermega", "plan", "Review release proof"]).command,
+            ("preflight", "Review release proof", "--project", "SuperMega"),
+        )
+        self.assertEqual(
+            translate(["supermega", "later", "Review release proof"]).command,
+            ("queue", "add", "Review release proof", "--project", "SuperMega"),
+        )
+        self.assertEqual(translate(["supermega", "code", "--check"]).command, ("--check",))
 
     def test_effect_receipt_is_explicit_about_model_state_and_external_authority(self) -> None:
         planned = explain(translate(["plan", "Explore an idea"]))
@@ -90,7 +100,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["mode"], "work")
 
     def test_unknown_or_incomplete_commands_fail_closed(self) -> None:
-        cases = [(["unknown"], "launchpad_command_unknown"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required")]
+        cases = [(["unknown"], "launchpad_command_unknown"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required"), (["supermega", "plan"], "supermega_plan_objective_required"), (["supermega", "unknown"], "supermega_operation_unknown")]
         for args, reason in cases:
             error = io.StringIO()
             with self.subTest(args=args), redirect_stderr(error):
@@ -508,8 +518,61 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-company-agent.cmd" --check', source)
         self.assertIn('local-ai.cmd" cycle --recover-memory', source)
         self.assertIn('local-ai.cmd" dashboard', source)
+        self.assertIn('local-ai.cmd" supermega', source)
+        self.assertIn('if /I "%~1"=="--supermega" goto supermega_menu', source)
         self.assertNotIn("taskkill", source.lower())
         self.assertNotIn("powershell", source.lower())
+
+    def test_supermega_status_is_pathless_grounded_and_read_only(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "local-agent-company"
+            repository = base / "supermega-platform"
+            home = base / "company"
+            root.mkdir()
+            repository.mkdir()
+            company = Company(home, MockModel())
+            project_id = company.create_project("SuperMega")
+            evidence = base / "evidence.md"
+            evidence.write_text("Current local evidence.\n", encoding="utf-8")
+            company.add_knowledge(evidence, project_id)
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            git_status = subprocess.CompletedProcess([], 0, "## main...origin/main\n", "")
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai.subprocess.run", return_value=git_status),
+                patch("scripts.local_ai.available_memory_bytes", return_value=3 * 1024**3),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_supermega_status(translate(["supermega"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "ready")
+            self.assertEqual(receipt["repository"]["branch"], "main")
+            self.assertTrue(receipt["repository"]["clean"])
+            self.assertEqual(receipt["project"]["projectId"], project_id)
+            self.assertTrue(receipt["knowledge"]["readyForUse"])
+            self.assertTrue(receipt["focus"]["supermegaActive"])
+            self.assertEqual(receipt["nextAction"], "check_supermega_coding_agent")
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
+            self.assertNotIn(str(base), output.getvalue())
+
+    def test_supermega_code_targets_exact_sibling_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory) / "local-agent-company"
+            root.mkdir()
+            run.return_value = subprocess.CompletedProcess([], 0)
+            action = translate(["supermega", "code", "--check"])
+            self.assertEqual(run_supermega_code(action, root), 0)
+            self.assertEqual(
+                run.call_args.args[0],
+                [str(root / "local-code.cmd"), "--check", str(root.parent / "supermega-platform")],
+            )
 
     def test_code_mode_forwards_exact_arguments_without_a_shell(self) -> None:
         action = translate([
