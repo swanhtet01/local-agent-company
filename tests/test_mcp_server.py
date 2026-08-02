@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -290,6 +291,38 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 "params": {"protocolVersion": "2099-01-01", "capabilities": {}, "clientInfo": {"name": "future", "version": "1"}},
             })
             self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
+
+    def test_compact_profile_preserves_actions_with_one_small_router_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            full = self._session(Path(directory) / "full")
+            compact = McpSession(Path(directory) / "compact", profile="compact")
+            initialized = compact.handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "tiny", "version": "1"}},
+            })
+            self.assertEqual(initialized["result"]["serverInfo"]["name"], "local-agent-company")
+            compact.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            full_list = full.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+            compact_list = compact.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+            compact_tools = compact_list["result"]["tools"]
+            self.assertEqual([tool["name"] for tool in compact_tools], ["company"])
+            actions = compact_tools[0]["inputSchema"]["properties"]["action"]["enum"]
+            self.assertEqual(set(actions), {tool["name"] for tool in full_list["result"]["tools"]})
+            full_bytes = len(json.dumps(full_list["result"]["tools"], separators=(",", ":")).encode())
+            compact_bytes = len(json.dumps(compact_tools, separators=(",", ":")).encode())
+            self.assertLess(compact_bytes, 1_500)
+            self.assertLess(compact_bytes * 5, full_bytes)
+            status = self._call(compact, "company", {"action": "status", "input": {}}, 3)
+            receipt = status["result"]["structuredContent"]
+            self.assertEqual(receipt["profile"], "compact")
+            self.assertEqual(receipt["exposedTools"], 1)
+            self.assertFalse(receipt["modelCalled"])
+            refused = self._call(compact, "company", {
+                "action": "queue_run", "input": {
+                    "expectedQueueId": "a" * 12, "runConfirmation": "no",
+                },
+            }, 4)
+            self.assertEqual(refused["error"]["message"], "run_confirmation_required")
 
 
 if __name__ == "__main__":

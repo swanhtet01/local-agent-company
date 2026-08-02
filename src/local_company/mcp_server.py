@@ -22,6 +22,7 @@ PROTOCOL_VERSION = "2025-06-18"
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_TOOL_CALLS = 128
 SCHEMA = "local-company.mcp-capabilities.v1"
+MCP_PROFILES = {"full", "compact"}
 MINIMUM_EXECUTION_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 RUN_CONFIRMATION = "RUN ONE LOCAL COMPANY MISSION"
 SCHEDULE_CREATE_CONFIRMATION = "CREATE RECURRING LOCAL MISSION"
@@ -92,6 +93,8 @@ class CompanyTools:
     ) -> None:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
+        self.profile = "full"
+        self.exposed_tools = 17
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -102,7 +105,8 @@ class CompanyTools:
         work = self.company.work_state_snapshot()
         return {
             "schema": SCHEMA, "status": "ready", "transport": "stdio",
-            "localOnly": True, "networkListener": False, "exposedTools": 17,
+            "localOnly": True, "networkListener": False,
+            "profile": self.profile, "exposedTools": self.exposed_tools,
             "modelCalled": False, "externalActionPerformed": False,
             "focus": {
                 "enabled": focus["enabled"], "projectId": focus.get("projectId"),
@@ -792,10 +796,45 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
     )
 
 
+def _compact_tool(company_tools: CompanyTools, tools: tuple[Tool, ...]) -> Tool:
+    by_name = {tool.name: tool for tool in tools}
+
+    def dispatch(arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"action", "input"})
+        action = value.get("action")
+        payload = value.get("input", {})
+        if not isinstance(action, str) or action not in by_name:
+            raise ProtocolError(-32602, "unknown_company_action")
+        return by_name[action].handler(payload)
+
+    return Tool(
+        "company",
+        "Run one governed local-company action. Start with status; use exact confirmations for mutations.",
+        _schema(
+            ["action"],
+            {
+                "action": {"type": "string", "enum": list(by_name)},
+                "input": {"type": "object"},
+            },
+        ),
+        dispatch,
+        False,
+    )
+
+
 class McpSession:
-    def __init__(self, home: Path) -> None:
+    def __init__(self, home: Path, profile: str | None = None) -> None:
         self.company_tools = CompanyTools(home)
-        self.tools = _tools(self.company_tools)
+        selected_profile = profile or os.getenv("LOCAL_COMPANY_MCP_PROFILE", "full").strip().lower()
+        if selected_profile not in MCP_PROFILES:
+            raise ValueError("invalid_mcp_profile")
+        full_tools = _tools(self.company_tools)
+        self.tools = (
+            (_compact_tool(self.company_tools, full_tools),)
+            if selected_profile == "compact" else full_tools
+        )
+        self.company_tools.profile = selected_profile
+        self.company_tools.exposed_tools = len(self.tools)
         self.by_name = {tool.name: tool for tool in self.tools}
         self.initialized = False
         self.protocol_version: str | None = None
@@ -831,7 +870,12 @@ class McpSession:
                     "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "local-agent-company", "title": "Local Agent Company", "version": "1"},
-                    "instructions": "Local-only company coordination. Use playbooks and project_overview to plan scoped workspaces. Seed projects only with user-confirmed knowledge, then preview retrieval with knowledge_search. Project creation, knowledge addition, queue execution, and recurring missions require their exact owner confirmations. Review queue_list and preflight before mutations. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
+                    "instructions": (
+                        "Local-only company coordination. In compact mode call company with one action and input object. "
+                        "Start with status; use projects, playbooks, queue_list, and preflight as relevant. "
+                        "Project creation, knowledge addition, queue execution, and recurring missions require exact owner confirmations. "
+                        "Use jobs and job_result to inspect outcomes. External actions are never exposed."
+                    ),
                 })
             if not self.initialized:
                 raise ProtocolError(-32002, "server_not_initialized")
