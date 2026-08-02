@@ -20,6 +20,7 @@ from pathlib import Path
 MANIFEST_RELATIVE_PATH = Path("src/local_company/build_info.py")
 SOURCE_RELATIVE_PATH = Path("src/local_company")
 OPERATIONAL_SCRIPT_RELATIVE_PATHS = (
+    Path("scripts/check_company_mcp.py"),
     Path("scripts/check_live_build.py"),
     Path("scripts/check_readiness.py"),
     Path("scripts/check_runtime_supervisor.py"),

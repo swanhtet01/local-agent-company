@@ -20,8 +20,20 @@ It refuses remote Ollama endpoints, conflicting managed settings, unsafe state
 paths, and unmanaged launcher overwrites. It never downloads an application or
 model, calls a paid API, exposes a listener, sends externally, or grants deploy,
 payment, credential, or publication authority. If Python, Ollama, OpenCode, or a
-required local model is missing, its JSON `actions` list gives the exact next
-local setup command; rerun `--check` after completing those actions.
+required local model is missing, its JSON `actions` list gives the next local
+setup action; rerun `--check` after completing those actions.
+
+`--check` also starts the bundled `company-mcp.cmd` against an ephemeral home,
+after verifying both the exact launcher contract and stamped operational source.
+It negotiates the MCP protocol over stdio, pings it, and requires the compact
+profile to expose exactly one `company` router with the 25 governed actions.
+The child must exit cleanly without creating company state. This proof loads no
+model, opens no network listener, returns no credential values, and mutates no
+persistent state. Run the same bounded proof independently with:
+
+```powershell
+python .\scripts\check_company_mcp.py
+```
 
 ## One-command launchpad
 

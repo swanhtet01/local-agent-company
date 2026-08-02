@@ -3950,6 +3950,7 @@ class CompanyTests(unittest.TestCase):
             if path.relative_to(source_root).as_posix() != "build_info.py"
         ] + [
             project_root / relative for relative in (
+                "scripts/check_company_mcp.py",
                 "scripts/check_live_build.py",
                 "scripts/check_readiness.py",
                 "scripts/check_runtime_supervisor.py",
@@ -3968,7 +3969,8 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(
             {path.relative_to(project_root).as_posix() for path in release_files},
             {
-                "scripts/check_live_build.py", "scripts/check_readiness.py",
+                "scripts/check_company_mcp.py", "scripts/check_live_build.py",
+                "scripts/check_readiness.py",
                 "scripts/check_runtime_supervisor.py",
                 "scripts/local_ai.py", "scripts/manage_cycle_task.ps1",
                 "scripts/run_local_brief_assistant.py",

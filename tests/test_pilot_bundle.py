@@ -50,6 +50,7 @@ class PilotBundleTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as bundle:
                 names = bundle.namelist()
                 manifest = json.loads(bundle.read(MANIFEST_NAME))
+                bundle_readme = bundle.read("BUNDLE-README.txt")
                 bundled_payload = b"\n".join(
                     bundle.read(name).lower()
                     for name in names
@@ -61,7 +62,10 @@ class PilotBundleTests(unittest.TestCase):
             self.assertIn("local-ai.cmd", names)
             self.assertIn("setup-local-ai.cmd", names)
             self.assertIn("scripts/setup_local_ai.py", names)
+            self.assertIn("scripts/check_company_mcp.py", names)
+            self.assertIn("tests/test_company_mcp_check.py", names)
             self.assertIn("scripts/verify_pilot_bundle.py", names)
+            self.assertIn(b"model-free stdio handshake", bundle_readme)
             self.assertTrue(any(name.startswith("src/local_company/") for name in names))
             forbidden = (".git/", ".env", "company.db", "outputs/", "validation-packs/")
             self.assertFalse(any(any(token in name for token in forbidden) for name in names))

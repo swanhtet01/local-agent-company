@@ -16,6 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+if __package__:
+    from .check_company_mcp import (
+        EXPECTED_ACTIONS as MCP_EXPECTED_ACTIONS,
+        SCHEMA as MCP_SELF_TEST_SCHEMA,
+        run_company_mcp_self_test,
+    )
+else:
+    from check_company_mcp import (
+        EXPECTED_ACTIONS as MCP_EXPECTED_ACTIONS,
+        SCHEMA as MCP_SELF_TEST_SCHEMA,
+        run_company_mcp_self_test,
+    )
+
 
 SCHEMA = "local-ai.setup.v1"
 OPENCODE_SCHEMA = "https://opencode.ai/config.json"
@@ -567,9 +580,80 @@ def _dependency_status() -> dict[str, Any]:
     }
 
 
+def _mcp_self_test_summary(code: int, value: Any) -> dict[str, Any]:
+    if type(code) is not int or code not in {0, 1, 2} or not isinstance(value, dict):
+        raise SetupError("mcp_self_test_receipt_invalid")
+    if (
+        value.get("schema") != MCP_SELF_TEST_SCHEMA
+        or value.get("transport") != "stdio"
+        or value.get("profile") != "compact"
+        or any(value.get(field) is not False for field in (
+            "modelCalled", "networkListenerOpened", "persistentStateMutated",
+            "externalActionPerformed", "paidApiUsed", "credentialValuesReturned",
+        ))
+    ):
+        raise SetupError("mcp_self_test_receipt_invalid")
+    if code == 0:
+        digest = value.get("toolSchemaSha256")
+        source_digest = value.get("sourceSha256")
+        build_id = value.get("buildId")
+        duration = value.get("durationMs")
+        if (
+            value.get("status") != "ready" or value.get("ready") is not True
+            or value.get("roundTripCompleted") is not True
+            or value.get("pingReady") is not True
+            or value.get("processExited") is not True
+            or type(value.get("processExitCode")) is not int
+            or value.get("processExitCode") != 0
+            or value.get("serverName") != "local-agent-company"
+            or value.get("operationalSourceVerified") is not True
+            or value.get("protocolVersion") != "2025-06-18"
+            or type(value.get("toolCount")) is not int or value.get("toolCount") != 1
+            or type(value.get("actionCount")) is not int
+            or value.get("actionCount") != len(MCP_EXPECTED_ACTIONS)
+            or type(duration) is not int or duration < 0
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or not isinstance(source_digest, str) or len(source_digest) != 64
+            or any(character not in "0123456789abcdef" for character in source_digest)
+            or not isinstance(build_id, str) or not build_id.startswith("local-build-")
+            or len(build_id) > 32
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-." for character in build_id)
+        ):
+            raise SetupError("mcp_self_test_receipt_invalid")
+        return {
+            "schema": MCP_SELF_TEST_SCHEMA, "status": "ready", "ready": True,
+            "transport": "stdio", "profile": "compact",
+            "protocolVersion": "2025-06-18", "serverName": "local-agent-company",
+            "buildId": build_id, "sourceSha256": source_digest,
+            "operationalSourceVerified": True,
+            "roundTripCompleted": True, "pingReady": True,
+            "toolCount": 1, "actionCount": len(MCP_EXPECTED_ACTIONS),
+            "toolSchemaSha256": digest, "durationMs": duration,
+            "modelCalled": False, "networkListenerOpened": False,
+            "persistentStateMutated": False, "externalActionPerformed": False,
+            "paidApiUsed": False, "credentialValuesReturned": False,
+        }
+    reason = value.get("reason")
+    if (
+        value.get("status") != "blocked" or value.get("ready") is not False
+        or not isinstance(reason, str) or not 1 <= len(reason) <= 80
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in reason)
+    ):
+        raise SetupError("mcp_self_test_receipt_invalid")
+    return {
+        "schema": MCP_SELF_TEST_SCHEMA, "status": "blocked", "ready": False,
+        "reason": reason, "transport": "stdio", "profile": "compact",
+        "modelCalled": False, "networkListenerOpened": False,
+        "persistentStateMutated": False, "externalActionPerformed": False,
+        "paidApiUsed": False, "credentialValuesReturned": False,
+    }
+
+
 def _actions(
     mode: str, changes: list[str], state: dict[str, Any],
     launchers: dict[str, str], dependencies: dict[str, Any],
+    mcp_self_test: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     if mode != "apply" and changes:
@@ -590,6 +674,8 @@ def _actions(
         actions.append(f"ollama_pull_{AGENT_MODEL}")
     if dependencies["askModelInstalled"] is not True:
         actions.append(f"ollama_pull_{ASK_MODEL}")
+    if mcp_self_test["ready"] is not True:
+        actions.append("inspect_company_mcp")
     if state["initialized"] is True and state["projectCount"] > 0 and state["focusEnabled"] is not True:
         actions.append("select_active_project")
     return actions
@@ -597,7 +683,7 @@ def _actions(
 
 def _ready(
     changes: list[str], state: dict[str, Any], launchers: dict[str, str],
-    dependencies: dict[str, Any],
+    dependencies: dict[str, Any], mcp_self_test: dict[str, Any],
 ) -> bool:
     return (
         not changes
@@ -611,12 +697,14 @@ def _ready(
         and dependencies["openCodeInstalled"] is True
         and dependencies["agentModelInstalled"] is True
         and dependencies["askModelInstalled"] is True
+        and mcp_self_test["ready"] is True
     )
 
 
 def run_setup(
     mode: str, paths: SetupPaths,
     dependency_probe: Callable[[], dict[str, Any]] = _dependency_status,
+    mcp_probe: Callable[[Path], tuple[int, dict[str, Any]]] = run_company_mcp_self_test,
 ) -> tuple[int, dict[str, Any]]:
     existing, raw = _load_config(paths.config)
     merged, changes = _merge_config(existing, paths.root)
@@ -633,6 +721,8 @@ def run_setup(
     }
     if not isinstance(dependencies, dict) or set(dependencies) != required_dependency_keys:
         raise SetupError("dependency_probe_invalid")
+    mcp_code, mcp_value = mcp_probe(paths.root)
+    mcp_self_test = _mcp_self_test_summary(mcp_code, mcp_value)
 
     backup: Path | None = None
     backup_created = False
@@ -663,8 +753,10 @@ def run_setup(
             raise SetupError("desktop_launcher_verification_failed")
         state = _state_status(paths.company_home)
 
-    ready = _ready(changes, state, launcher_status, dependencies)
-    actions = _actions(mode, changes, state, launcher_status, dependencies)
+    ready = _ready(changes, state, launcher_status, dependencies, mcp_self_test)
+    actions = _actions(
+        mode, changes, state, launcher_status, dependencies, mcp_self_test,
+    )
     status = (
         "ready" if ready else
         "preview" if mode == "preview" else
@@ -692,6 +784,7 @@ def run_setup(
             "written": launchers_written,
         },
         "dependencies": dependencies,
+        "mcpSelfTest": mcp_self_test,
         "actions": actions,
         "effects": {
             "stateMutated": mode == "apply" and (

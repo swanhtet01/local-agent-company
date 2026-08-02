@@ -101,6 +101,7 @@ def _bundle_readme() -> bytes:
         "\r\n"
         "After extraction, run setup-local-ai.cmd --preview, then --apply.\r\n"
         "Run setup-local-ai.cmd --check after completing any reported actions.\r\n"
+        "The check includes a model-free stdio handshake with the bundled company MCP.\r\n"
         "Use local-ai.cmd ask \"QUESTION\" for a grounded private draft.\r\n"
         "Keep model servers loopback-only and review all consequential actions.\r\n"
         "Use scripts\\verify_pilot_bundle.py against the original ZIP before use.\r\n"
