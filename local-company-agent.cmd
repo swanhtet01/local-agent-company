@@ -23,5 +23,12 @@ if /I "%~1"=="--check" (
   exit /b 0
 )
 
+if /I "%~1"=="--run" (
+  python "%COMPANY_ROOT%scripts\run_local_company_prompt.py" %*
+  if errorlevel 2 exit /b 2
+  if errorlevel 1 exit /b 1
+  exit /b 0
+)
+
 call "%COMPANY_ROOT%local-code.cmd" --company "%COMPANY_ROOT%"
 exit /b %ERRORLEVEL%
