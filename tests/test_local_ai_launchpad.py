@@ -645,6 +645,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn('local-ai.cmd" supermega proof', source)
         self.assertIn('local-ai.cmd" supermega prove', source)
         self.assertIn('local-ai.cmd" supermega review', source)
+        self.assertIn('local-ai.cmd" supermega mission-review', source)
         self.assertIn('local-ai.cmd" supermega dossier', source)
         self.assertIn('if /I "%~1"=="--supermega" goto supermega_menu', source)
         self.assertNotIn("taskkill", source.lower())
@@ -687,6 +688,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["productProof"]["reviewedMissions"], 0)
             self.assertEqual(receipt["productProof"]["missionTarget"], 10)
             self.assertEqual(receipt["productProof"]["pendingReviewCount"], 0)
+            self.assertEqual(receipt["sealedMissionReview"]["status"], "no_candidate")
             self.assertEqual(receipt["nextAction"], "run_next_supermega_product_proof")
             self.assertEqual(receipt["command"], "local-ai.cmd supermega prove")
             self.assertFalse(receipt["modelCalled"])
@@ -786,6 +788,54 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             )
             self.assertEqual(receipt["command"], "local-ai.cmd supermega review")
             self.assertNotIn("private response", output.getvalue())
+            self.assertNotIn(str(base), output.getvalue())
+
+    def test_supermega_status_prioritizes_sealed_mission_review_without_model(self) -> None:
+        from local_company.core import Company, MockModel
+        from local_company.focus import set_execution_focus
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "local-agent-company"
+            repository = base / "supermega-platform"
+            home = base / "company"
+            root.mkdir()
+            repository.mkdir()
+            company = Company(home, MockModel())
+            project_id = company.create_project("SuperMega")
+            evidence = base / "evidence.md"
+            evidence.write_text("Current local evidence.\n", encoding="utf-8")
+            company.add_knowledge(evidence, project_id)
+            set_execution_focus(home, project_id, "SuperMega", 4)
+            job_id, _ = company.run("Review business workflow", project=project_id)
+            git_status = subprocess.CompletedProcess(
+                [], 0, "## main...origin/main\n", "",
+            )
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai.subprocess.run", return_value=git_status),
+                patch(
+                    "scripts.local_ai.available_memory_bytes",
+                    return_value=512 * 1024**2,
+                ),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_supermega_status(translate(["supermega"]), root), 0)
+            receipt = json.loads(output.getvalue())
+            review = receipt["sealedMissionReview"]
+            self.assertEqual(receipt["status"], "attention")
+            self.assertEqual(review["status"], "candidate_ready")
+            self.assertEqual(review["jobId"], job_id)
+            self.assertTrue(review["humanReviewRequired"])
+            self.assertRegex(review["reportSha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                receipt["nextAction"], "review_sealed_supermega_mission",
+            )
+            self.assertEqual(
+                receipt["command"], "local-ai.cmd supermega mission-review",
+            )
+            self.assertNotIn("Review business workflow", output.getvalue())
             self.assertNotIn(str(base), output.getvalue())
 
     def test_supermega_can_park_only_an_exact_incompatible_queue_head(self) -> None:

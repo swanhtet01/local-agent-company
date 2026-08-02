@@ -1619,6 +1619,12 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         "completeMeasurements": None, "pendingReviewCount": None,
         "milestoneReached": None, "nextCategory": None, "nextLabel": None,
     }
+    sealed_mission_review: dict[str, object] = {
+        "status": "unavailable", "jobId": None, "roles": [],
+        "qualityPassed": None, "qualityScore": None,
+        "reportSha256": None, "evidenceManifestSha256": None,
+        "humanReviewRequired": True,
+    }
     company = None
     try:
         company = Company(company_home, MockModel())
@@ -1725,6 +1731,64 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         ):
             pass
 
+        try:
+            review_next = CompanyTools(company_home).product_evidence_next({
+                "project": str(project["projectId"]),
+            })
+            candidate = review_next.get("candidate")
+            if (
+                review_next.get("schema")
+                != "local-company.mcp-product-evidence-next.v1"
+                or review_next.get("status") not in {"candidate_ready", "no_candidate"}
+                or review_next.get("modelCalled") is not False
+                or review_next.get("stateMutated") is not False
+                or review_next.get("externalActionPerformed") is not False
+            ):
+                raise ValueError("supermega_sealed_mission_review_invalid")
+            if review_next["status"] == "no_candidate":
+                if candidate is not None:
+                    raise ValueError("supermega_sealed_mission_review_invalid")
+                sealed_mission_review["status"] = "no_candidate"
+            else:
+                if not isinstance(candidate, dict):
+                    raise ValueError("supermega_sealed_mission_review_invalid")
+                job_id = candidate.get("jobId")
+                roles = candidate.get("roles")
+                quality_score = candidate.get("qualityScore")
+                report_sha256 = candidate.get("reportSha256")
+                evidence_sha256 = candidate.get("evidenceManifestSha256")
+                if (
+                    not isinstance(job_id, str)
+                    or PENDING_EXPERIMENT_ID.fullmatch(job_id) is None
+                    or candidate.get("status") != "complete"
+                    or candidate.get("project") != SUPERMEGA_PROJECT_NAME
+                    or not isinstance(roles, list) or not roles
+                    or any(
+                        not isinstance(role, str) or not role.strip()
+                        for role in roles
+                    )
+                    or type(candidate.get("qualityPassed")) is not bool
+                    or type(quality_score) is not int
+                    or not 0 <= quality_score <= 100
+                    or not isinstance(report_sha256, str)
+                    or SHA256_PATTERN.fullmatch(report_sha256) is None
+                    or not isinstance(evidence_sha256, str)
+                    or SHA256_PATTERN.fullmatch(evidence_sha256) is None
+                ):
+                    raise ValueError("supermega_sealed_mission_review_invalid")
+                sealed_mission_review = {
+                    "status": "candidate_ready", "jobId": job_id,
+                    "roles": roles, "qualityPassed": candidate["qualityPassed"],
+                    "qualityScore": quality_score,
+                    "reportSha256": report_sha256,
+                    "evidenceManifestSha256": evidence_sha256,
+                    "humanReviewRequired": True,
+                }
+        except (
+            KeyError, OSError, ProtocolError, RuntimeError, TypeError, ValueError,
+        ):
+            pass
+
     try:
         available = available_memory_bytes()
     except (OSError, RuntimeError, ValueError):
@@ -1762,6 +1826,9 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
     elif product_proof["pendingReviewCount"]:
         next_action = "review_pending_supermega_product_proof"
         command = "local-ai.cmd supermega review"
+    elif sealed_mission_review["status"] == "candidate_ready":
+        next_action = "review_sealed_supermega_mission"
+        command = "local-ai.cmd supermega mission-review"
     elif repository["clean"] is not True:
         next_action = "review_existing_supermega_changes"
         command = "git status --short"
@@ -1790,6 +1857,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         or queue["status"] in {"unavailable", "blocked", "owner_gate_required"}
         or product_proof["status"] != "ready"
         or bool(product_proof["pendingReviewCount"])
+        or sealed_mission_review["status"] in {"unavailable", "candidate_ready"}
         or repository["clean"] is not True or not memory_ready
     )
     print(json.dumps({
@@ -1797,6 +1865,7 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
         "status": "attention" if attention else "ready",
         "repository": repository, "project": project, "knowledge": knowledge,
         "focus": focus, "queue": queue, "productProof": product_proof,
+        "sealedMissionReview": sealed_mission_review,
         "resources": {
             "availableMemoryBytes": available,
             "minimumModelMemoryBytes": CYCLE_MINIMUM_AVAILABLE_BYTES,
@@ -1818,6 +1887,8 @@ def run_supermega_status(action: LaunchAction, root: Path | None = None) -> int:
             "runProductProof": "local-ai.cmd supermega prove",
             "inspectPendingProof": "local-ai.cmd supermega pending",
             "reviewProductProof": "local-ai.cmd supermega review",
+            "inspectSealedMission": "local-ai.cmd supermega mission-candidate",
+            "reviewSealedMission": "local-ai.cmd supermega mission-review",
             "validationDossier": "local-ai.cmd supermega dossier",
             "plan": 'local-ai.cmd supermega plan "OBJECTIVE"',
             "queue": 'local-ai.cmd supermega later "OBJECTIVE"',

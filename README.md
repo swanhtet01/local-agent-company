@@ -98,6 +98,9 @@ for the actual category, acceptance, corrections, paid-setup signal, and
 optional measured peak memory. It rechecks the exact job and both SHA-256 seals
 immediately before recording. Neither command calls a model or performs an
 external action, and automated quality never counts as human acceptance.
+When a sealed candidate exists and no newer experiment receipt is waiting,
+plain `supermega` surfaces `supermega mission-review` as the exact next action,
+even when the Ally does not have enough memory for inference.
 
 ### Low-memory grounded assistant
 
