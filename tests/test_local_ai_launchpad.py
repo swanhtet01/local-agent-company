@@ -19,6 +19,10 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["experiment"]).command, ())
         self.assertEqual(translate(["experiment", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["experiment-run", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(
+            translate(["experiment-run", "--recover-memory", "Future Lab"]).command,
+            ("Future Lab", "--recover-memory"),
+        )
         self.assertEqual(translate(["work", "Build a plan"]).command, ("run", "Build a plan"))
         self.assertEqual(translate(["later", "Research market"]).command, ("queue", "add", "Research market"))
         self.assertEqual(translate(["next"]).command, ("queue", "preflight"))
@@ -121,6 +125,47 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["missingActions"], ["playbooks"])
             self.assertFalse(receipt["humanReviewRecorded"])
             self.assertFalse(receipt["stateMutated"])
+
+    def test_experiment_runner_can_trim_safely_and_retry_exactly_once(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            Company(home, MockModel()).create_project("Future Lab")
+            blocked = subprocess.CompletedProcess([], 2, stdout="", stderr=json.dumps({
+                "schema": "local-ai.company-prompt-result.v1", "ok": False,
+                "status": "blocked", "reason": "installed_models_memory_blocked",
+                "modelCalled": False, "externalActionPerformed": False,
+            }))
+            accepted = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+                "schema": "local-ai.company-prompt-result.v1", "ok": True,
+                "status": "accepted", "reason": "accepted", "modelCalled": True,
+                "externalActionPerformed": False,
+                "toolActions": ["status", "project_overview", "playbooks"],
+            }), stderr="")
+            recovery = {
+                "attempted": True, "status": "completed", "targetCount": 2,
+                "trimSucceeded": 2, "trimFailed": 0,
+                "releasedWorkingSetMb": 512.0, "processTerminationCalls": 0,
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("scripts.local_ai.subprocess.run", side_effect=[blocked, accepted]) as run,
+                patch("scripts.local_ai._recover_memory", return_value=recovery) as recover,
+                patch("scripts.local_ai.time.sleep") as sleep,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(run_experiment_agent(translate([
+                    "experiment-run", "Future Lab", "--recover-memory",
+                ])), 0)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "accepted")
+            self.assertEqual(receipt["attemptCount"], 2)
+            self.assertEqual(receipt["memoryRecovery"], recovery)
+            self.assertEqual(run.call_count, 2)
+            recover.assert_called_once()
+            sleep.assert_called_once_with(3.0)
 
     def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")

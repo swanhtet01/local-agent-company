@@ -42,7 +42,7 @@ zero-model command (it uses the active project), or name a project explicitly:
 ```powershell
 .\local-ai.cmd experiment
 .\local-ai.cmd experiment "Local AI Product Lab"
-.\local-ai.cmd experiment-run "Local AI Product Lab"
+.\local-ai.cmd experiment-run "Local AI Product Lab" --recover-memory
 ```
 
 The same planner is accessible conversationally by asking the company agent:
@@ -62,6 +62,12 @@ plan, invokes the receipt-bound local-company agent, and verifies that every
 planned tool action actually occurred. It never records the human review. Low
 memory, runner failure, or a skipped action returns a fail-closed receipt for a
 later retry.
+
+Add `--recover-memory` when Codex or another desktop app has filled RAM. Only
+after an initial zero-model memory block, the command invokes the existing
+verified Ally working-set trim, requires evidence of zero process termination,
+zero file changes, and zero network requests, waits three seconds, and retries
+the exact prompt once. Invalid recovery evidence prevents the retry.
 
 Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `cycle` is the bounded autonomy entrypoint: it materializes due schedules, performs an exact ID-bound preflight, and runs at most one mission only when focus, evidence, resources, and owner gates pass. With no due work or an owner gate, it exits without calling a model. It never loops, sends externally, spends money, deploys, or retries a failed result. A Windows scheduled task may invoke one cycle periodically, but registering that task remains an explicit owner action. `explain` reports whether a command can call a model or change local state without running it:
 

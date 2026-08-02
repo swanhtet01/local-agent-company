@@ -5,13 +5,16 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 try:
     from .select_local_code_model import GIB, available_memory_bytes
+    from .run_scheduled_cycle import _recover_memory
 except ImportError:
     from select_local_code_model import GIB, available_memory_bytes
+    from run_scheduled_cycle import _recover_memory
 
 
 SCHEMA = "local-ai.launchpad.v1"
@@ -47,7 +50,8 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
   local-ai.cmd plan "OBJECTIVE" [options]     Preview the team and gates; no model
   local-ai.cmd experiment [PROJECT]            Show the next measured product test; no model
-  local-ai.cmd experiment-run [PROJECT]        Run that test locally and return its receipt
+  local-ai.cmd experiment-run [PROJECT] [--recover-memory]
+                                              Run that test locally and return its receipt
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
   local-ai.cmd next [--queue-id ID]           Preview the exact next queued mission
@@ -76,7 +80,7 @@ Examples:
   local-ai.cmd vision-lite
   local-ai.cmd plan "Design a product customers can buy" --project "New Product"
   local-ai.cmd experiment "New Product"
-  local-ai.cmd experiment-run "New Product"
+  local-ai.cmd experiment-run "New Product" --recover-memory
   local-ai.cmd work "Create a 30-day launch plan" --project "New Product"
   local-ai.cmd later "Review pricing and customer risks" --project "New Product"
   local-ai.cmd new "New Product" --description "Private product R&D"
@@ -108,9 +112,15 @@ def translate(argv: list[str]) -> LaunchAction | None:
             raise ValueError("experiment_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "experiment", "Plan the next category-balanced measured product test without loading a model.", False, False)
     if name == "experiment-run":
-        if len(tail) > 1 or (tail and not tail[0].strip()):
+        recover_count = tail.count("--recover-memory")
+        project_values = [item for item in tail if item != "--recover-memory"]
+        if (
+            recover_count > 1 or len(project_values) > 1
+            or any(not item.strip() or item.startswith("--") for item in project_values)
+        ):
             raise ValueError("experiment_run_accepts_at_most_one_project")
-        return LaunchAction(tuple(tail), "experiment-run", "Run the next planned product test locally and return a receipt without recording human evidence.", True, False)
+        command = tuple(project_values + (["--recover-memory"] if recover_count else []))
+        return LaunchAction(command, "experiment-run", "Run the next planned product test locally and return a receipt without recording human evidence.", True, False)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -211,7 +221,7 @@ def _product_experiment_plan(action: LaunchAction, root: Path) -> dict[str, obje
     from local_company.mcp_server import CompanyTools, ProtocolError
 
     home = default_company_home()
-    project = action.command[0] if action.command else None
+    project = next((item for item in action.command if item != "--recover-memory"), None)
     if project is None:
         focus = read_execution_focus(home)
         if focus.get("enabled") is not True:
@@ -233,6 +243,25 @@ def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
     return 0
 
 
+def _invoke_experiment_runner(
+    project_root: Path, prompt: str,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    completed = subprocess.run(
+        [sys.executable, str(project_root / "scripts" / "run_local_company_prompt.py"), prompt],
+        cwd=project_root, capture_output=True, text=True, check=False,
+    )
+    candidate = completed.stdout.strip() or completed.stderr.strip()
+    if len(candidate) > 65_536:
+        raise ValueError("experiment_runner_receipt_too_large")
+    try:
+        runner_receipt = json.loads(candidate)
+    except json.JSONDecodeError as error:
+        raise ValueError("experiment_runner_receipt_invalid") from error
+    if not isinstance(runner_receipt, dict) or runner_receipt.get("schema") != "local-ai.company-prompt-result.v1":
+        raise ValueError("experiment_runner_receipt_invalid")
+    return completed, runner_receipt
+
+
 def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     plan = _product_experiment_plan(action, project_root)
@@ -249,19 +278,33 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     required_actions = experiment.get("requiredActions")
     if not isinstance(prompt, str) or not isinstance(required_actions, list):
         raise ValueError("experiment_plan_invalid")
-    completed = subprocess.run(
-        [sys.executable, str(project_root / "scripts" / "run_local_company_prompt.py"), prompt],
-        cwd=project_root, capture_output=True, text=True, check=False,
-    )
-    candidate = completed.stdout.strip() or completed.stderr.strip()
-    if len(candidate) > 65_536:
-        raise ValueError("experiment_runner_receipt_too_large")
-    try:
-        runner_receipt = json.loads(candidate)
-    except json.JSONDecodeError as error:
-        raise ValueError("experiment_runner_receipt_invalid") from error
-    if not isinstance(runner_receipt, dict) or runner_receipt.get("schema") != "local-ai.company-prompt-result.v1":
-        raise ValueError("experiment_runner_receipt_invalid")
+    completed, runner_receipt = _invoke_experiment_runner(project_root, prompt)
+    recovery = None
+    attempts = 1
+    if (
+        "--recover-memory" in action.command
+        and completed.returncode != 0
+        and runner_receipt.get("status") == "blocked"
+        and runner_receipt.get("reason") == "installed_models_memory_blocked"
+        and runner_receipt.get("modelCalled") is False
+    ):
+        recovery = _recover_memory(project_root)
+        if recovery is None:
+            output = {
+                "schema": EXPERIMENT_RUN_SCHEMA, "ok": False, "status": "error",
+                "reason": "memory_recovery_invalid", "project": plan["project"],
+                "selectedCategory": plan["selectedCategory"], "label": experiment.get("label"),
+                "requiredActions": required_actions, "missingActions": required_actions,
+                "runnerReceipt": runner_receipt, "attemptCount": attempts,
+                "humanReviewRecorded": False, "modelCalled": False,
+                "stateMutated": False, "externalActionPerformed": False,
+                "nextAction": "inspect_verified_optimizer_before_retry",
+            }
+            print(json.dumps(output, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+            return 2
+        time.sleep(3.0)
+        attempts += 1
+        completed, runner_receipt = _invoke_experiment_runner(project_root, prompt)
     observed_actions = runner_receipt.get("toolActions", [])
     if not isinstance(observed_actions, list):
         observed_actions = []
@@ -282,7 +325,7 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
         "reason": reason, "project": plan["project"],
         "selectedCategory": plan["selectedCategory"], "label": experiment.get("label"),
         "requiredActions": required_actions, "missingActions": missing_actions,
-        "runnerReceipt": runner_receipt,
+        "runnerReceipt": runner_receipt, "attemptCount": attempts,
         "humanReviewRecorded": False,
         "nextAction": (
             "perform_actual_human_review_then_call_product_experiment_review"
@@ -292,6 +335,8 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
         "stateMutated": False,
         "externalActionPerformed": runner_receipt.get("externalActionPerformed") is True,
     }
+    if recovery is not None:
+        output["memoryRecovery"] = recovery
     print(json.dumps(output, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0 if accepted else 1
 

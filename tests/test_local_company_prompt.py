@@ -5,7 +5,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -110,6 +110,27 @@ class LocalCompanyPromptTests(unittest.TestCase):
                     code = main(["--opencode", str(opencode), "Inspect status"])
                 self.assertEqual(code, 1)
                 self.assertEqual(json.loads(output.getvalue())["reason"], reason)
+
+    def test_memory_block_reports_admission_and_exact_shortfall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            opencode = Path(directory) / "opencode.cmd"
+            opencode.write_text("@exit /b 0\n", encoding="utf-8")
+            error = io.StringIO()
+            with patch(
+                "scripts.run_local_company_prompt.installed_ollama_models",
+                return_value={"qwen3.5:0.8b"},
+            ), patch(
+                "scripts.run_local_company_prompt.available_memory_bytes",
+                return_value=GIB,
+            ), redirect_stderr(error):
+                code = main(["--opencode", str(opencode), "Inspect status"])
+            self.assertEqual(code, 2)
+            receipt = json.loads(error.getvalue())
+            self.assertEqual(receipt["reason"], "installed_models_memory_blocked")
+            self.assertEqual(receipt["admissionAvailableBytes"], GIB)
+            self.assertEqual(receipt["minimumAvailableBytes"], 2 * GIB)
+            self.assertEqual(receipt["memoryShortfallBytes"], GIB)
+            self.assertFalse(receipt["modelCalled"])
 
 
 if __name__ == "__main__":

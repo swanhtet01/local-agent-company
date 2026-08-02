@@ -13,12 +13,14 @@ from typing import Any
 
 try:
     from scripts.select_local_code_model import (
+        MINIMUM_AVAILABLE_BYTES,
         available_memory_bytes,
         installed_ollama_models,
         select_model,
     )
 except ModuleNotFoundError:  # Direct execution from the scripts directory.
     from select_local_code_model import (  # type: ignore[no-redef]
+        MINIMUM_AVAILABLE_BYTES,
         available_memory_bytes,
         installed_ollama_models,
         select_model,
@@ -175,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     started = time.perf_counter()
     model: str | None = None
+    admission_memory: int | None = None
+    required_memory: int | None = None
     cleanup_done = False
     ollama = shutil.which("ollama")
     try:
@@ -186,9 +190,16 @@ def main(argv: list[str] | None = None) -> int:
         opencode = args.opencode.resolve(strict=True)
         if not opencode.is_file() or opencode.suffix.lower() not in {".cmd", ".exe"}:
             raise ValueError("opencode_invalid")
-        selection = select_model(
-            installed_ollama_models(), available_memory_bytes(), args.requested_model,
-        )
+        installed = installed_ollama_models()
+        admission_memory = available_memory_bytes()
+        supported_installed = [
+            name for name in installed if name in MINIMUM_AVAILABLE_BYTES
+        ]
+        if args.requested_model in supported_installed:
+            required_memory = MINIMUM_AVAILABLE_BYTES[args.requested_model]
+        elif supported_installed:
+            required_memory = min(MINIMUM_AVAILABLE_BYTES[name] for name in supported_installed)
+        selection = select_model(installed, admission_memory, args.requested_model)
         model = selection.model
         completed, minimum_memory = _invoke_agent(
             opencode, model, prompt, Path(__file__).resolve(strict=True).parents[1],
@@ -244,9 +255,19 @@ def main(argv: list[str] | None = None) -> int:
         ), separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 2
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        memory_fields: dict[str, object] = {}
+        if admission_memory is not None:
+            memory_fields["admissionAvailableBytes"] = admission_memory
+        if required_memory is not None:
+            memory_fields["minimumAvailableBytes"] = required_memory
+            if admission_memory is not None:
+                memory_fields["memoryShortfallBytes"] = max(
+                    0, required_memory - admission_memory,
+                )
         print(json.dumps(_receipt(
             ok=False, status="blocked", reason=str(error), modelCalled=model is not None,
             wallSeconds=round(time.perf_counter() - started, 3),
+            **memory_fields,
         ), separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 2
     finally:
