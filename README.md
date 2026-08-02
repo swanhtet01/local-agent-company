@@ -11,6 +11,8 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd plan "Design a useful product I can validate and sell"
 .\local-ai.cmd experiment
 .\local-ai.cmd experiment-run
+.\local-ai.cmd experiment-pending
+.\local-ai.cmd experiment-review-interactive
 .\local-ai.cmd offer
 .\local-ai.cmd new "Future Product" --description "General product R&D"
 .\local-ai.cmd use "Future Product"
@@ -34,11 +36,11 @@ Local Company** on the Windows desktop or run:
 ```
 
 For the complete one-click control panel, double-click **SuperMega Local AI
-Lab** on the desktop. Its eight fixed choices open company chat, plan or run a
-measured product experiment, check whether evidence supports a sellable offer,
-launch a coding agent for a chosen folder, check readiness, start the loopback
-dashboard, or exit. The menu itself loads no model and grants no external
-authority.
+Lab** on the desktop. Its nine fixed choices open company chat, plan or run a
+measured product experiment, inspect and explicitly review a saved result,
+check whether evidence supports a sellable offer, launch a coding agent for a
+chosen folder, check readiness, start the loopback dashboard, or exit. The menu
+itself loads no model and grants no external authority.
 
 The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
@@ -67,9 +69,13 @@ record only measurements and judgments that actually occurred.
 
 `experiment-run` removes the copy/paste step: it obtains the current balanced
 plan, invokes the receipt-bound local-company agent, and verifies that every
-planned tool action actually occurred. It never records the human review. Low
-memory, runner failure, or a skipped action returns a fail-closed receipt for a
-later retry.
+planned tool action actually occurred. A fully reviewable accepted receipt is
+saved locally under a content-derived pending ID, but no human judgment is
+invented. Use `experiment-pending` to inspect the model response and measured
+runtime or memory, then `experiment-review-interactive` to enter the actual
+accept/reject decision, correction count, and paid-setup signal. Low memory,
+runner failure, or a skipped action returns a fail-closed receipt for a later
+retry and creates no pending evidence.
 
 Add `--recover-memory` when Codex or another desktop app has filled RAM. Only
 after an initial zero-model memory block, the command invokes the existing

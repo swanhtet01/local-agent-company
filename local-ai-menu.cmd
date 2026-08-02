@@ -9,18 +9,20 @@ echo ======================
 echo 1. Open local company chat
 echo 2. Plan next product experiment ^(no model^)
 echo 3. Run next product experiment ^(safe memory recovery^)
-echo 4. Check whether a workflow is ready to package and sell ^(no model^)
-echo 5. Open local coding agent for a project
-echo 6. Check local AI readiness
-echo 7. Start local dashboard
-echo 8. Exit
+echo 4. Inspect and review a completed product experiment ^(no model^)
+echo 5. Check whether a workflow is ready to package and sell ^(no model^)
+echo 6. Open local coding agent for a project
+echo 7. Check local AI readiness
+echo 8. Start local dashboard
+echo 9. Exit
 echo.
-choice /c 12345678 /n /m "Choose 1-8: "
-if errorlevel 8 exit /b 0
-if errorlevel 7 goto dashboard
-if errorlevel 6 goto check
-if errorlevel 5 goto code
-if errorlevel 4 goto offer
+choice /c 123456789 /n /m "Choose 1-9: "
+if errorlevel 9 exit /b 0
+if errorlevel 8 goto dashboard
+if errorlevel 7 goto check
+if errorlevel 6 goto code
+if errorlevel 5 goto offer
+if errorlevel 4 goto review
 if errorlevel 3 goto experiment_run
 if errorlevel 2 goto experiment
 if errorlevel 1 goto company
@@ -43,6 +45,12 @@ goto menu
 
 :offer
 call "%LOCAL_AI_ROOT%local-ai.cmd" offer
+echo.
+pause
+goto menu
+
+:review
+call "%LOCAL_AI_ROOT%local-ai.cmd" experiment-review-interactive
 echo.
 pause
 goto menu

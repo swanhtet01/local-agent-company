@@ -59,6 +59,7 @@ Use one command for local coding, business teams, research, planning, and queued
                                               Run that test locally and return its receipt
   local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
   local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
+  local-ai.cmd experiment-review-interactive   Review one pending receipt with local prompts
   local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
       --paid-setup yes|no|unknown --confirm-human-review
                                               Record one actual human review
@@ -144,6 +145,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if not tail:
             raise ValueError("experiment_review_arguments_required")
         return LaunchAction(tuple(tail), "experiment-review", "Record one explicitly confirmed human review of a pending measured experiment.", False, True)
+    if name == "experiment-review-interactive":
+        if tail:
+            raise ValueError("experiment_review_interactive_accepts_no_arguments")
+        return LaunchAction((), "experiment-review-interactive", "Inspect and explicitly review one pending measured experiment through local prompts.", False, True)
     if name == "work":
         return LaunchAction(("run", *_require_tail(name, tail)), "work", "Run one bounded local team and write its auditable report.", True, True)
     if name == "later":
@@ -423,17 +428,9 @@ def _load_pending_experiment(home: Path, experiment_id: str) -> tuple[Path, dict
     return path, validated
 
 
-def run_pending_experiments(action: LaunchAction, root: Path | None = None) -> int:
-    del action
-    project_root = root or Path(__file__).resolve(strict=True).parents[1]
-    source = str(project_root / "src")
-    if source not in sys.path:
-        sys.path.insert(0, source)
-    from local_company.config import default_company_home
-
-    home = default_company_home()
+def _pending_experiment_items(home: Path) -> list[dict[str, object]]:
     directory = _pending_experiment_directory(home)
-    items = []
+    items: list[dict[str, object]] = []
     if directory.exists():
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError("pending_experiment_directory_unsafe")
@@ -453,6 +450,18 @@ def run_pending_experiments(action: LaunchAction, root: Path | None = None) -> i
                 "wallSeconds": receipt.get("wallSeconds"),
                 "peakIncrementalMemoryMb": receipt.get("peakIncrementalMemoryMb"),
             })
+    return items
+
+
+def run_pending_experiments(action: LaunchAction, root: Path | None = None) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+
+    items = _pending_experiment_items(default_company_home())
     print(json.dumps({
         "schema": "local-ai.pending-product-experiments.v1", "status": "ready",
         "items": items, "count": len(items), "modelCalled": False,
@@ -536,6 +545,43 @@ def run_experiment_review(action: LaunchAction, root: Path | None = None) -> int
         "stateMutated": True, "externalActionPerformed": False,
     }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
+
+
+def run_interactive_experiment_review(
+    action: LaunchAction, root: Path | None = None,
+) -> int:
+    del action
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+
+    items = _pending_experiment_items(default_company_home())
+    if not items:
+        print(json.dumps({
+            "schema": "local-ai.product-experiment-interactive-review.v1",
+            "status": "no_pending_experiment", "recorded": False,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }, separators=(",", ":"), sort_keys=True))
+        return 1
+    print("\nPending measured product experiments:\n")
+    for item in items:
+        print(f"ID: {item['experimentId']}  Category: {item['category']}  Label: {item['label']}")
+        print(f"Response: {item['response']}\n")
+    experiment_id = input("Experiment ID to review: ").strip().lower()
+    decision = input("Decision (accepted/rejected): ").strip().lower()
+    corrections = input("Actual correction count (0-100): ").strip()
+    paid_signal = input("Would this justify a paid setup? (yes/no/unknown): ").strip().lower()
+    confirmation = input("Type REVIEW to record this human judgment: ").strip()
+    if confirmation != "REVIEW":
+        raise ValueError("experiment_review_confirmation_required")
+    review_action = LaunchAction((
+        experiment_id, "--decision", decision, "--corrections", corrections,
+        "--paid-setup", paid_signal, "--confirm-human-review",
+    ), "experiment-review", "Record one interactive human product review.", False, True)
+    return run_experiment_review(review_action, project_root)
 
 
 def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
@@ -979,6 +1025,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_pending_experiments(action)
         if action.mode == "experiment-review":
             return run_experiment_review(action)
+        if action.mode == "experiment-review-interactive":
+            return run_interactive_experiment_review(action)
         if action.mode == "offer":
             return run_offer(action)
         if action.mode == "work":

@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
+from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_pending_experiments, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -41,6 +41,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         )
         self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["experiment-pending"]).command, ())
+        self.assertEqual(translate(["experiment-review-interactive"]).command, ())
         self.assertEqual(translate([
             "experiment-review", "a" * 12, "--decision", "accepted",
             "--corrections", "0", "--paid-setup", "unknown",
@@ -105,7 +106,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "company"
-            Company(home, MockModel()).create_project("Future Lab")
+            project_id = Company(home, MockModel()).create_project("Future Lab")
             output = io.StringIO()
             with patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}), redirect_stdout(output):
                 self.assertEqual(
@@ -233,6 +234,37 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             status = Company(home, MockModel()).product_evidence_status(project_id)
             self.assertEqual(status["reviewed_missions"], 1)
             self.assertEqual(status["reviews"][0]["experiment_id"], pending_id)
+
+    def test_interactive_review_requires_human_values_and_records_locally(self) -> None:
+        from local_company.core import Company, MockModel
+        from scripts.local_ai import _pending_experiment_payload, _store_pending_experiment
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            project_id = Company(home, MockModel()).create_project("Future Lab")
+            payload = _pending_experiment_payload(
+                {
+                    "project": {"id": project_id, "name": "Future Lab"},
+                    "selectedCategory": "coding",
+                },
+                {"label": "Coding operability review", "requiredActions": ["status"]},
+                accepted_prompt_receipt(["status"]),
+            )
+            pending_id, _ = _store_pending_experiment(home, payload)
+            output = io.StringIO()
+            answers = iter([pending_id, "accepted", "1", "unknown", "REVIEW"])
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    run_interactive_experiment_review(
+                        translate(["experiment-review-interactive"]),
+                    ), 0,
+                )
+            self.assertIn("Pending measured product experiments", output.getvalue())
+            self.assertIn('"status":"recorded"', output.getvalue())
 
     def test_offer_command_reports_missing_proof_without_model_or_mutation(self) -> None:
         from local_company.core import Company, MockModel
