@@ -9,10 +9,11 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'SuperMega Local Product Cycle'
 $root = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $python = Join-Path $root '.venv\Scripts\python.exe'
-$launcher = Join-Path $root 'scripts\local_ai.py'
-$arguments = '"' + $launcher + '" cycle'
+$runner = Join-Path $root 'scripts\run_scheduled_cycle.py'
+$arguments = '"' + $runner + '"'
 $interval = 'PT6H'
 $mutationCommitted = $false
+$resultPath = Join-Path (Split-Path -Parent $root) 'supermega-local-company-state\autopilot-cycle-result.json'
 
 function Get-CycleTask {
     return Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -45,6 +46,27 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
     }
     $hasRun = $null -ne $info -and $info.LastTaskResult -ne 267011
+    $lastCycle = $null
+    if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        $resultFile = Get-Item -LiteralPath $resultPath
+        if ($resultFile.Length -gt 0 -and $resultFile.Length -le 65536) {
+            try {
+                $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+                if ($result.schema -eq 'local-ai.scheduled-cycle-result.v1') {
+                    $lastCycle = [ordered]@{
+                        observedAt = [string]$result.observedAt
+                        status = [string]$result.status
+                        processExitCode = $result.processExitCode
+                        cycleStatus = [string]$result.cycle.status
+                        reason = [string]$result.cycle.reason
+                        missionsRun = $result.cycle.missionsRun
+                        modelCalled = $result.cycle.modelCalled
+                    }
+                }
+            }
+            catch { $lastCycle = $null }
+        }
+    }
     [ordered]@{
         schema = 'local-ai.autonomy-task.v1'
         status = $Status
@@ -57,6 +79,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
         lastRunTime = if ($hasRun) { $info.LastRunTime.ToString('o') } else { $null }
         lastTaskResult = if ($hasRun) { $info.LastTaskResult } else { $null }
         nextRunTime = if ($null -ne $info -and $info.NextRunTime -gt [datetime]::MinValue) { $info.NextRunTime.ToString('o') } else { $null }
+        lastCycle = $lastCycle
         controls = [ordered]@{
             localOnly = $true
             interactiveUser = $true
@@ -70,7 +93,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
 
 try {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'task_python_missing' }
-    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'task_launcher_missing' }
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw 'task_runner_missing' }
     $existing = Get-CycleTask
     if ($Mode -eq 'Status') {
         Write-Receipt -Status $(if ($null -eq $existing) { 'not_installed' } elseif (Test-CycleTask $existing) { 'ready' } else { 'mismatch' }) -Task $existing -Changed $false

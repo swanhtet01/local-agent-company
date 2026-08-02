@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.local_ai import explain, main, run_autopilot, run_code, run_company, run_cycle, run_work, switch_project, translate
+from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
@@ -107,7 +108,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "scripts" / "manage_cycle_task.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn("$taskName = 'SuperMega Local Product Cycle'", source)
-        self.assertIn("$arguments = '\"' + $launcher + '\" cycle'", source)
+        self.assertIn("$arguments = '\"' + $runner + '\"'", source)
         self.assertIn("$interval = 'PT6H'", source)
         self.assertIn("-LogonType Interactive -RunLevel Limited", source)
         self.assertIn("-MultipleInstances IgnoreNew", source)
@@ -115,6 +116,46 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertIn("$Task.Settings.Enabled", source)
         self.assertIn("$info.LastTaskResult -ne 267011", source)
         self.assertIn("task_remove_refused_unverified_definition", source)
+
+    def test_scheduled_cycle_journal_is_atomic_allowlisted_and_discards_raw_output(self) -> None:
+        cycle = {
+            "schema": "local-ai.cycle-result.v1", "status": "blocked",
+            "reason": "insufficient_available_memory", "missionsRun": 0,
+            "modelCalled": False, "memoryShortfallBytes": 123,
+            "report": "C:\\private\\report.md", "secret": "SENTINEL",
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "raw SENTINEL\n" + json.dumps(cycle) + "\n", ""),
+        ):
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state)
+            self.assertEqual(code, 0)
+            self.assertEqual(journal["schema"], SCHEDULED_CYCLE_SCHEMA)
+            self.assertEqual(journal["cycle"]["reason"], "insufficient_available_memory")
+            stored = (state / "autopilot-cycle-result.json").read_text(encoding="utf-8")
+            self.assertNotIn("SENTINEL", stored)
+            self.assertNotIn("report.md", stored)
+            self.assertFalse(json.loads(stored)["controls"]["rawOutputStored"])
+
+    def test_scheduled_cycle_records_invalid_receipt_without_raw_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "scripts.run_scheduled_cycle.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "SENTINEL invalid", ""),
+        ):
+            root = Path(directory) / "local-agent-company"
+            state = Path(directory) / "state"
+            (root / "scripts").mkdir(parents=True)
+            (root / "scripts" / "local_ai.py").write_text("# fixture\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                code, journal = run_scheduled_cycle(root, state)
+            self.assertEqual(code, 2)
+            self.assertEqual(journal["reason"], "cycle_receipt_missing_or_oversized")
+            self.assertNotIn("SENTINEL", (state / "autopilot-cycle-result.json").read_text(encoding="utf-8"))
 
     def test_vision_modes_default_to_installed_vision_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:

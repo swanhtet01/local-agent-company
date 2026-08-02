@@ -36,6 +36,11 @@ evidence, owner-gate, one-mission, and 2 GiB memory checks. `autopilot status`
 verifies the exact action, working directory, cadence, account mode, privilege,
 overlap policy, and execution limit without changing the task. `autopilot
 remove` deletes only a definition that still matches that complete contract.
+Each scheduled run atomically replaces a bounded
+`autopilot-cycle-result.json` journal in the local company state directory.
+`autopilot status` exposes only its last status, reason, exit code, mission
+count, and model-call flag. Raw process output, prompts, reports, secrets, and
+local paths are never written to this journal.
 
 ```powershell
 .\local-ai.cmd explain work "Research a new product"
