@@ -30,6 +30,8 @@ SCHEDULE_CHANGE_CONFIRMATION = "CHANGE LOCAL MISSION SCHEDULE"
 PROJECT_CREATE_CONFIRMATION = "CREATE LOCAL COMPANY PROJECT"
 KNOWLEDGE_ADD_CONFIRMATION = "ADD LOCAL PROJECT KNOWLEDGE"
 PRODUCT_REVIEW_CONFIRMATION = "RECORD HUMAN PRODUCT EVIDENCE REVIEW"
+PRODUCT_EXPERIMENT_CONFIRMATION = "RECORD HUMAN PRODUCT EXPERIMENT REVIEW"
+COMPANY_PROMPT_RECEIPT_SCHEMA = "local-ai.company-prompt-result.v1"
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -95,7 +97,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 20
+        self.exposed_tools = 21
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -485,6 +487,146 @@ class CompanyTools:
             "jobsInspected": inspected,
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
+        }
+
+    @staticmethod
+    def _validated_company_prompt_receipt(receipt: Any) -> dict[str, Any]:
+        allowed = {
+            "schema", "autoPermissionsEnabled", "externalActionPerformed", "modelCalled",
+            "ok", "paidApiUsed", "reason", "status", "wallSeconds", "model",
+            "toolActions", "toolCallCount", "response", "observedCost",
+            "modelUnloadedAfterRun", "agentExitCode", "admissionAvailableBytes",
+            "minimumAvailableBytesObserved", "peakIncrementalMemoryBytes",
+            "peakIncrementalMemoryMb",
+        }
+        required = allowed
+        if not isinstance(receipt, dict) or set(receipt) != required:
+            raise ProtocolError(-32602, "invalid_company_prompt_receipt")
+        actions = receipt["toolActions"]
+        valid_actions = (
+            isinstance(actions, list) and 1 <= len(actions) <= MAX_TOOL_CALLS
+            and all(
+                isinstance(action, str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", action) is not None
+                for action in actions
+            )
+        )
+        admission = receipt["admissionAvailableBytes"]
+        minimum = receipt["minimumAvailableBytesObserved"]
+        peak = receipt["peakIncrementalMemoryBytes"]
+        wall = receipt["wallSeconds"]
+        cost = receipt["observedCost"]
+        accepted = (
+            receipt["ok"] is True
+            and receipt["status"] == "accepted"
+            and receipt["reason"] == "accepted"
+            and receipt["agentExitCode"] == 0
+        )
+        rejected = (
+            receipt["ok"] is False
+            and receipt["status"] == "rejected"
+            and isinstance(receipt["reason"], str)
+            and 1 <= len(receipt["reason"]) <= 80
+        )
+        valid = (
+            receipt["schema"] == COMPANY_PROMPT_RECEIPT_SCHEMA
+            and receipt["autoPermissionsEnabled"] is False
+            and receipt["externalActionPerformed"] is False
+            and receipt["modelCalled"] is True
+            and receipt["paidApiUsed"] is False
+            and (accepted or rejected)
+            and isinstance(receipt["model"], str) and 1 <= len(receipt["model"]) <= 80
+            and valid_actions
+            and type(receipt["toolCallCount"]) is int
+            and receipt["toolCallCount"] == len(actions)
+            and isinstance(receipt["response"], str) and 1 <= len(receipt["response"]) <= 8_000
+            and type(cost) in {int, float} and float(cost) == 0
+            and receipt["modelUnloadedAfterRun"] is True
+            and type(receipt["agentExitCode"]) is int
+            and type(wall) in {int, float} and 0 < float(wall) <= 1_800
+            and type(admission) is int and admission > 0
+            and type(minimum) is int and 0 < minimum <= admission
+            and type(peak) is int and peak == admission - minimum and peak > 0
+            and type(receipt["peakIncrementalMemoryMb"]) in {int, float}
+            and abs(float(receipt["peakIncrementalMemoryMb"]) - round(peak / (1024 * 1024), 1)) < 0.01
+        )
+        if not valid:
+            raise ProtocolError(-32602, "invalid_company_prompt_receipt")
+        return dict(receipt)
+
+    def product_experiment_review(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {
+            "project", "label", "category", "decision", "corrections",
+            "paidSetupSignal", "receipt", "reviewConfirmation",
+        })
+        if value.get("reviewConfirmation") != PRODUCT_EXPERIMENT_CONFIRMATION:
+            raise ProtocolError(-32602, "product_experiment_confirmation_required")
+        project = value.get("project")
+        label = value.get("label")
+        category = value.get("category")
+        decision = value.get("decision")
+        corrections = value.get("corrections")
+        paid_signal = value.get("paidSetupSignal")
+        if not isinstance(project, str) or not project.strip() or len(project) > 80:
+            raise ProtocolError(-32602, "invalid_project")
+        if not isinstance(label, str) or not label.strip() or len(label) > 80:
+            raise ProtocolError(-32602, "invalid_experiment_label")
+        if category not in {"coding", "business", "data-research"}:
+            raise ProtocolError(-32602, "invalid_product_category")
+        if decision not in {"accepted", "rejected"}:
+            raise ProtocolError(-32602, "invalid_product_decision")
+        if type(corrections) is not int or not 0 <= corrections <= 100:
+            raise ProtocolError(-32602, "invalid_corrections")
+        if paid_signal not in {"yes", "no", "unknown"}:
+            raise ProtocolError(-32602, "invalid_paid_setup_signal")
+        receipt = self._validated_company_prompt_receipt(value.get("receipt"))
+        canonical = json.dumps(
+            receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        if len(canonical) > 32_768:
+            raise ProtocolError(-32602, "company_prompt_receipt_too_large")
+        digest = hashlib.sha256(canonical).hexdigest()
+        directory = (self.company.home / "product-experiment-receipts").resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        source = directory / f"receipt-{digest}.json"
+        created_file = False
+        temporary: Path | None = None
+        if source.exists():
+            if source.read_bytes() != canonical:
+                raise ProtocolError(-32603, "product_receipt_collision")
+        else:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=directory, prefix=".receipt-", suffix=".tmp", delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(canonical)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, source)
+                temporary = None
+                created_file = True
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        peak_memory_mb = (receipt["peakIncrementalMemoryBytes"] + 1024 * 1024 - 1) // (1024 * 1024)
+        checks_passed = receipt["ok"] is True and receipt["status"] == "accepted"
+        try:
+            review = self.company.record_product_experiment_review(
+                project, label, category, decision, corrections, paid_signal,
+                float(receipt["wallSeconds"]), peak_memory_mb,
+                receipt["agentExitCode"], checks_passed,
+                f"local-company/{receipt['model']}", digest,
+            )
+        except ValueError as error:
+            if created_file:
+                source.unlink(missing_ok=True)
+            raise ProtocolError(-32602, "invalid_product_experiment_review") from error
+        return {
+            "schema": "local-company.mcp-product-experiment-review.v1",
+            "status": "recorded", "recorded": True,
+            "receiptSha256": digest, "receiptStored": True, "review": review,
+            "modelCalled": False, "externalActionPerformed": False,
         }
 
     def preflight(self, arguments: Any) -> dict[str, Any]:
@@ -901,6 +1043,26 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             company_tools.product_evidence_next, True,
         ),
         Tool(
+            "product_experiment_review", "Preserve one measured runner receipt and append a confirmed human product review.",
+            _schema(
+                [
+                    "project", "label", "category", "decision", "corrections",
+                    "paidSetupSignal", "receipt", "reviewConfirmation",
+                ],
+                {
+                    "project": project,
+                    "label": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "category": {"type": "string", "enum": ["coding", "business", "data-research"]},
+                    "decision": {"type": "string", "enum": ["accepted", "rejected"]},
+                    "corrections": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "paidSetupSignal": {"type": "string", "enum": ["yes", "no", "unknown"]},
+                    "receipt": {"type": "object"},
+                    "reviewConfirmation": {"const": PRODUCT_EXPERIMENT_CONFIRMATION},
+                },
+            ),
+            company_tools.product_experiment_review, False,
+        ),
+        Tool(
             "queue_list", "List bounded local mission queue records without changing state.",
             _schema([], {
                 "status": {"type": "string", "enum": sorted(QUEUE_STATUSES)},
@@ -1063,7 +1225,7 @@ class McpSession:
                     "instructions": (
                         "Local-only company coordination. In compact mode call company with one action and input object. "
                         "Start with status; use projects, playbooks, queue_list, and preflight as relevant. "
-                        "Project creation, knowledge addition, queue execution, recurring missions, and human product reviews require exact owner confirmations. "
+                        "Project creation, knowledge addition, queue execution, recurring missions, and human product or experiment reviews require exact owner confirmations. "
                         "Use jobs and job_result to inspect outcomes. External actions are never exposed."
                     ),
                 })

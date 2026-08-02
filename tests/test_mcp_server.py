@@ -11,6 +11,7 @@ from local_company.mcp_server import (
     KNOWLEDGE_ADD_CONFIRMATION,
     PROJECT_CREATE_CONFIRMATION,
     PRODUCT_REVIEW_CONFIRMATION,
+    PRODUCT_EXPERIMENT_CONFIRMATION,
     RUN_CONFIRMATION,
     SCHEDULE_CHANGE_CONFIRMATION,
     SCHEDULE_CREATE_CONFIRMATION,
@@ -50,9 +51,10 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "knowledge_list", "knowledge_add", "knowledge_search",
                     "product_evidence_status", "product_evidence_review",
                     "product_evidence_next",
+                    "product_experiment_review",
                 },
             )
-            self.assertEqual(len(tools), 20)
+            self.assertEqual(len(tools), 21)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -333,6 +335,52 @@ class LocalCompanyMcpTests(unittest.TestCase):
             )
             self.assertNotIn(str(root), str(result))
             self.assertFalse(result["stateMutated"])
+
+    def test_measured_prompt_receipt_requires_human_confirmation_and_is_sealed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            project_id = session.company_tools.company.create_project("Experiment Lab")
+            receipt = {
+                "schema": "local-ai.company-prompt-result.v1",
+                "autoPermissionsEnabled": False, "externalActionPerformed": False,
+                "modelCalled": True, "ok": True, "paidApiUsed": False,
+                "reason": "accepted", "status": "accepted", "wallSeconds": 42.5,
+                "model": "qwen3.5:0.8b", "toolActions": ["status"],
+                "toolCallCount": 1, "response": "Company ready.", "observedCost": 0.0,
+                "modelUnloadedAfterRun": True, "agentExitCode": 0,
+                "admissionAvailableBytes": 3 * 1024**3,
+                "minimumAvailableBytesObserved": 2 * 1024**3,
+                "peakIncrementalMemoryBytes": 1024**3,
+                "peakIncrementalMemoryMb": 1024.0,
+            }
+            request = {
+                "project": project_id, "label": "Compact status workflow",
+                "category": "business", "decision": "accepted", "corrections": 0,
+                "paidSetupSignal": "unknown", "receipt": receipt,
+            }
+            refused = self._call(session, "product_experiment_review", request, 3)
+            self.assertEqual(
+                refused["error"]["message"], "product_experiment_confirmation_required",
+            )
+            self.assertFalse((root / "product-experiment-receipts").exists())
+            recorded = self._call(session, "product_experiment_review", {
+                **request, "reviewConfirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
+            }, 4)["result"]["structuredContent"]
+            self.assertTrue(recorded["recorded"])
+            self.assertTrue(recorded["receiptStored"])
+            self.assertRegex(recorded["receiptSha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn(str(root), str(recorded))
+            status = session.company_tools.company.product_evidence_status(project_id)
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["complete_measurements"], 1)
+            self.assertEqual(status["reviews"][0]["peak_memory_mb"], 1024)
+            tampered = {**receipt, "externalActionPerformed": True}
+            rejected = self._call(session, "product_experiment_review", {
+                **request, "receipt": tampered,
+                "reviewConfirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
+            }, 5)
+            self.assertEqual(rejected["error"]["message"], "invalid_company_prompt_receipt")
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
