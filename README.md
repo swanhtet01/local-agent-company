@@ -100,8 +100,11 @@ remove` deletes only a definition that still matches that complete contract.
 Each scheduled run atomically replaces a bounded
 `autopilot-cycle-result.json` journal in the local company state directory.
 `autopilot status` exposes only its last status, reason, exit code, mission
-count, and model-call flag. Raw process output, prompts, reports, secrets, and
-local paths are never written to this journal.
+count, and model-call flag. It also distinguishes Windows idle-wait or active
+execution from an idle task and reports whether the bounded journal belongs to
+the latest trigger, so a stale prior result is never presented as the current
+run. Raw process output, prompts, reports, secrets, and local paths are never
+written to this journal.
 The scheduled-task action also stores SHA-256 pins for both
 `run_scheduled_cycle.py` and `local_ai.py`. A task-resident PowerShell preflight
 rehashes both files before Python starts; runner drift returns task result `90`

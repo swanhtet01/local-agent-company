@@ -97,12 +97,14 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
     }
     $hasRun = $null -ne $info -and $info.LastTaskResult -ne 267011
     $lastCycle = $null
+    $journalObservedAt = $null
     if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
         $resultFile = Get-Item -LiteralPath $resultPath
         if ($resultFile.Length -gt 0 -and $resultFile.Length -le 65536) {
             try {
                 $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
                 if ($result.schema -eq 'local-ai.scheduled-cycle-result.v1') {
+                    $journalObservedAt = [DateTimeOffset]::Parse([string]$result.observedAt)
                     $lastCycle = [ordered]@{
                         observedAt = [string]$result.observedAt
                         status = [string]$result.status
@@ -120,6 +122,31 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
             catch { $lastCycle = $null }
         }
     }
+    $taskState = if ($null -ne $Task) { [string]$Task.State } else { 'NotInstalled' }
+    $journalCurrentForLastRun = $null
+    if ($hasRun -and $null -ne $journalObservedAt) {
+        $journalCurrentForLastRun = (
+            $journalObservedAt.UtcDateTime -ge $info.LastRunTime.ToUniversalTime().AddSeconds(-5)
+        )
+    }
+    $currentActivity = if ($taskState -eq 'Running') {
+        'waiting_for_idle_or_cycle_running'
+    } elseif ($taskState -eq 'Queued') {
+        'queued_by_windows'
+    } else {
+        'idle'
+    }
+    $recommendedAction = if ($null -eq $Task) {
+        'install_autopilot'
+    } elseif (-not $verified) {
+        'repair_autopilot'
+    } elseif ($taskState -in @('Running', 'Queued') -and $journalCurrentForLastRun -ne $true) {
+        'wait_for_idle_or_cycle_completion'
+    } elseif ($hasRun -and $journalCurrentForLastRun -eq $false) {
+        'inspect_trigger_without_current_cycle_journal'
+    } else {
+        'none'
+    }
     [ordered]@{
         schema = 'local-ai.autonomy-task.v1'
         status = $Status
@@ -129,10 +156,14 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
         changed = $Changed
         cadenceHours = 6
         action = if ($verified) { 'pinned local-ai cycle' } else { $null }
+        taskExecutionState = $taskState
+        currentActivity = $currentActivity
+        recommendedAction = $recommendedAction
         lastRunTime = if ($hasRun) { $info.LastRunTime.ToString('o') } else { $null }
         lastTaskResult = if ($hasRun) { $info.LastTaskResult } else { $null }
         nextRunTime = if ($null -ne $info -and $info.NextRunTime -gt [datetime]::MinValue) { $info.NextRunTime.ToString('o') } else { $null }
         lastCycle = $lastCycle
+        lastCycleCurrentForLastRun = $journalCurrentForLastRun
         controls = [ordered]@{
             localOnly = $true
             interactiveUser = $true
@@ -145,6 +176,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
             idleWaitHours = 6
             stopsWhenUserReturns = $false
             externalActionsAllowed = $false
+            lastCycleFreshnessChecked = $true
         }
     } | ConvertTo-Json -Depth 6 -Compress
 }
