@@ -10,7 +10,24 @@ $taskName = 'SuperMega Local Product Cycle'
 $root = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $runner = Join-Path $root 'scripts\run_scheduled_cycle.py'
-$arguments = '"' + $runner + '"'
+$launcher = Join-Path $root 'scripts\local_ai.py'
+$powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+$runnerDigest = (Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash.ToLowerInvariant()
+$launcherDigest = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+$runnerLiteral = "'" + $runner.Replace("'", "''") + "'"
+$launcherLiteral = "'" + $launcher.Replace("'", "''") + "'"
+$pythonLiteral = "'" + $python.Replace("'", "''") + "'"
+$guardCommand = @"
+`$ErrorActionPreference = 'Stop'
+`$runner = $runnerLiteral
+`$launcher = $launcherLiteral
+if ((Get-FileHash -LiteralPath `$runner -Algorithm SHA256).Hash.ToLowerInvariant() -ne '$runnerDigest') { exit 90 }
+if ((Get-FileHash -LiteralPath `$launcher -Algorithm SHA256).Hash.ToLowerInvariant() -ne '$launcherDigest') { exit 91 }
+& $pythonLiteral `$runner
+exit `$LASTEXITCODE
+"@
+$encodedGuard = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guardCommand))
+$arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encodedGuard
 $interval = 'PT6H'
 $mutationCommitted = $false
 $resultPath = Join-Path (Split-Path -Parent $root) 'supermega-local-company-state\autopilot-cycle-result.json'
@@ -27,7 +44,7 @@ function Test-CycleTask([object]$Task) {
     $action = $actions[0]
     $trigger = $triggers[0]
     return (
-        [string]::Equals([string]$action.Execute, $python, [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$action.Execute, $powerShell, [System.StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$action.Arguments, $arguments, [System.StringComparison]::Ordinal) -and
         [string]::Equals([string]$action.WorkingDirectory, $root, [System.StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$trigger.Repetition.Interval, $interval, [System.StringComparison]::Ordinal) -and
@@ -75,7 +92,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
         verified = $verified
         changed = $Changed
         cadenceHours = 6
-        action = if ($verified) { 'local-ai cycle' } else { $null }
+        action = if ($verified) { 'pinned local-ai cycle' } else { $null }
         lastRunTime = if ($hasRun) { $info.LastRunTime.ToString('o') } else { $null }
         lastTaskResult = if ($hasRun) { $info.LastTaskResult } else { $null }
         nextRunTime = if ($null -ne $info -and $info.NextRunTime -gt [datetime]::MinValue) { $info.NextRunTime.ToString('o') } else { $null }
@@ -86,6 +103,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
             limitedPrivilege = $true
             overlappingRunsAllowed = $false
             modelMemoryGateBytes = 2147483648
+            sourceDigestsPinned = $true
             externalActionsAllowed = $false
         }
     } | ConvertTo-Json -Depth 6 -Compress
@@ -94,6 +112,7 @@ function Write-Receipt([string]$Status, [object]$Task, [bool]$Changed) {
 try {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'task_python_missing' }
     if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw 'task_runner_missing' }
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'task_launcher_missing' }
     $existing = Get-CycleTask
     if ($Mode -eq 'Status') {
         Write-Receipt -Status $(if ($null -eq $existing) { 'not_installed' } elseif (Test-CycleTask $existing) { 'ready' } else { 'mismatch' }) -Task $existing -Changed $false
@@ -115,11 +134,11 @@ try {
         Write-Receipt -Status 'ready' -Task $existing -Changed $false
         exit 0
     }
-    $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $root
+    $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments -WorkingDirectory $root
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration (New-TimeSpan -Days 3650)
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Runs one bounded, memory-gated local product-company cycle every six hours.' -ErrorAction Stop | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Runs one source-pinned, bounded, memory-gated local product-company cycle every six hours.' -ErrorAction Stop | Out-Null
     $mutationCommitted = $true
     $installed = Get-CycleTask
     if (-not (Test-CycleTask $installed)) { throw 'task_install_verification_failed' }

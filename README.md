@@ -41,6 +41,12 @@ Each scheduled run atomically replaces a bounded
 `autopilot status` exposes only its last status, reason, exit code, mission
 count, and model-call flag. Raw process output, prompts, reports, secrets, and
 local paths are never written to this journal.
+The scheduled-task action also stores SHA-256 pins for both
+`run_scheduled_cycle.py` and `local_ai.py`. A task-resident PowerShell preflight
+rehashes both files before Python starts; runner drift returns task result `90`
+and launcher drift returns `91`, with no queue claim or model call. Deliberate
+source updates therefore require removing the verified task before editing and
+reinstalling it after tests pass.
 
 ```powershell
 .\local-ai.cmd explain work "Research a new product"
