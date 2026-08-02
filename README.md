@@ -47,6 +47,27 @@ ready company mission with safe memory recovery, start the loopback dashboard,
 or exit. The menu itself loads no model and grants no
 external authority.
 
+## Build a private pilot bundle
+
+Create a deterministic transfer ZIP without company databases, reports,
+knowledge, credentials, model weights, Git history, or generated product
+evidence:
+
+```powershell
+python .\scripts\build_pilot_bundle.py --output-dir "C:\path\to\private-export"
+python .\scripts\verify_pilot_bundle.py "C:\path\to\private-export\supermega-local-ai-pilot-BUILD-ID-BUNDLE-ID.zip"
+```
+
+The archive contains the dependency-free application source, Windows
+launchers, operator/product documentation, tests, a machine-readable file
+manifest, and its own non-extracting verifier. File order, timestamps,
+permissions, compression settings, and manifest framing are fixed so rebuilding
+the same inputs reuses identical bytes. A companion SHA-256 file is emitted.
+The builder reads only a code-owned allowlist and explicitly reports that
+private state, credentials, model weights, and external publication authority
+are absent. Until the owner chooses licensing and signs/releases a distribution,
+the bundle is a private evaluation artifact and grants no redistribution rights.
+
 `local-ai.cmd brief` is the zero-model operating view. It combines the verified
 Windows task state and journal freshness with queue priority, the active
 project, pending experiment reviews, current memory admission, and the

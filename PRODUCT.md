@@ -42,6 +42,8 @@ Treat this as product engineering and trade-secret know-how today. Before publis
 
 ### Stage 2: sellable pilot
 
+- Build and verify the deterministic private pilot bundle; keep it owner-only
+  until licensing, signing, customer scope, and acceptance terms are chosen.
 - Choose one customer type and one expensive repeated workflow.
 - Install on one isolated customer machine or approved private server.
 - Establish a human-reviewed baseline and a fixed acceptance test.
