@@ -48,6 +48,8 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd experiment-run
 .\local-ai.cmd experiment-pending
 .\local-ai.cmd experiment-review-interactive
+.\local-ai.cmd mission-candidate
+.\local-ai.cmd mission-review
 .\local-ai.cmd offer
 .\local-ai.cmd offer-pack
 .\local-ai.cmd validation-pack
@@ -77,6 +79,8 @@ human-review contracts as the general product workflow:
 .\local-ai.cmd supermega prove
 .\local-ai.cmd supermega pending
 .\local-ai.cmd supermega review
+.\local-ai.cmd supermega mission-candidate
+.\local-ai.cmd supermega mission-review
 .\local-ai.cmd supermega dossier
 ```
 
@@ -87,7 +91,13 @@ unload before saving a pending receipt. `supermega review` can show only
 SuperMega receipts and records nothing until a human supplies the decision,
 correction count, paid-setup observation, and exact `REVIEW` confirmation.
 The workbench exposes counts and the next category but never prints a pending
-response in its status receipt.
+response in its status receipt. Workbench option **G** handles existing team
+missions: `supermega mission-candidate` shows one unreviewed sealed result
+read-only, while `supermega mission-review` displays that full result and asks
+for the actual category, acceptance, corrections, paid-setup signal, and
+optional measured peak memory. It rechecks the exact job and both SHA-256 seals
+immediately before recording. Neither command calls a model or performs an
+external action, and automated quality never counts as human acceptance.
 
 ### Low-memory grounded assistant
 
@@ -124,11 +134,11 @@ Local Company** on the Windows desktop or run:
 For the complete one-click control panel, double-click **SuperMega Local AI
 Lab** on the desktop. Its fixed choices open company chat, show one bounded
 company brief, plan or run a measured product experiment, inspect and
-explicitly review a saved result, check whether evidence supports a sellable
-offer, launch a coding agent for a chosen folder, check readiness, run one
-ready company mission with safe memory recovery, start the loopback dashboard,
-or exit. The menu itself loads no model and grants no
-external authority.
+explicitly review a saved result, inspect and human-review an existing sealed
+mission, check whether evidence supports a sellable offer, launch a coding
+agent for a chosen folder, check readiness, run one ready company mission with
+safe memory recovery, start the loopback dashboard, or exit. The menu itself
+loads no model and grants no external authority.
 
 ## Build a private pilot bundle
 
@@ -198,6 +208,17 @@ outcomes can be repaired without rerunning the model. Validation dossiers show
 these diagnostic counts and each reviewed run's reason. Low memory,
 runner failure, or a skipped action returns a fail-closed receipt for a later
 retry and creates no pending evidence.
+
+Completed ordinary team missions can also become measured product evidence
+without rerunning inference. Use `mission-candidate [PROJECT]` for a pathless,
+read-only preview and `mission-review [PROJECT]` for the local human-review
+prompts. The workflow accepts only a current completed job whose full synthesis,
+project, roles, quality result, report seal, evidence-manifest seal, and clean
+model unload all agree. It then requires the literal confirmation `RECORD HUMAN
+PRODUCT EVIDENCE REVIEW` and rechecks the candidate identity before writing.
+Cancellation or changed evidence writes nothing. Enter only observations that
+actually happened; the tool does not infer customer acceptance or willingness
+to pay.
 
 `offer-pack` uses the conservative product-offer gate and writes nothing while
 proof is incomplete. Once the gate passes, it atomically creates a deterministic

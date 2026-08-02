@@ -29,8 +29,11 @@ SUPERMEGA_WORKBENCH_SCHEMA = "local-ai.supermega-workbench.v1"
 SUPERMEGA_QUEUE_PARK_SCHEMA = "local-ai.supermega-queue-park.v1"
 OFFER_PACK_SCHEMA = "local-ai.offer-pack.v1"
 VALIDATION_PACK_SCHEMA = "local-ai.validation-pack.v2"
+MISSION_REVIEW_NEXT_SCHEMA = "local-ai.product-mission-review-next.v1"
+MISSION_HUMAN_REVIEW_SCHEMA = "local-ai.product-mission-human-review.v1"
 PENDING_EXPERIMENT_SCHEMA = "local-ai.pending-product-experiment.v1"
 PENDING_EXPERIMENT_ID = re.compile(r"^[0-9a-f]{12}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 JOB_ID_PATTERN = re.compile(r"^Completed job ([0-9a-f]{12})$", re.MULTILINE)
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -74,6 +77,8 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd offer [PROJECT]                 Check whether evidence supports a sellable kit
   local-ai.cmd offer-pack [PROJECT]            Write an owner-review offer pack when proven
   local-ai.cmd validation-pack [PROJECT]       Write the current private validation dossier
+  local-ai.cmd mission-candidate [PROJECT]     Show one sealed mission ready for human review
+  local-ai.cmd mission-review [PROJECT]        Inspect and review that exact sealed mission
   local-ai.cmd experiment-pending              Inspect locally saved experiment receipts
   local-ai.cmd experiment-review-interactive   Review one pending receipt with local prompts
   local-ai.cmd experiment-review ID --decision accepted|rejected --corrections N
@@ -111,6 +116,8 @@ Examples:
   local-ai.cmd supermega refresh
   local-ai.cmd supermega next
   local-ai.cmd supermega park-next
+  local-ai.cmd supermega mission-candidate
+  local-ai.cmd supermega mission-review
   local-ai.cmd supermega plan "Choose one verified internal next action"
   local-ai.cmd supermega later "Draft one evidence-grounded release gap brief"
   local-ai.cmd supermega code --check
@@ -237,6 +244,22 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 "Write the current private SuperMega product-proof dossier.",
                 False, True,
             )
+        if operation == "mission-candidate":
+            if values:
+                raise ValueError("supermega_mission_candidate_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "mission-candidate",
+                "Inspect one sealed unreviewed SuperMega mission without changing state.",
+                False, False,
+            )
+        if operation == "mission-review":
+            if values:
+                raise ValueError("supermega_mission_review_accepts_no_arguments")
+            return LaunchAction(
+                (SUPERMEGA_PROJECT_NAME,), "mission-review",
+                "Inspect and explicitly record one actual human review of a sealed SuperMega mission.",
+                False, True,
+            )
         if operation == "ask":
             return LaunchAction(
                 _ask_command("supermega_ask", "supermega", values), "ask",
@@ -304,6 +327,18 @@ def translate(argv: list[str]) -> LaunchAction | None:
         if len(tail) > 1 or (tail and not tail[0].strip()):
             raise ValueError("validation_pack_accepts_at_most_one_project")
         return LaunchAction(tuple(tail), "validation-pack", "Write a private evidence scoreboard and exact next product experiment.", False, True)
+    if name in {"mission-candidate", "mission-review"}:
+        if len(tail) > 1 or (tail and not tail[0].strip()):
+            raise ValueError(f"{name.replace('-', '_')}_accepts_at_most_one_project")
+        return LaunchAction(
+            tuple(tail), name,
+            (
+                "Show one integrity-checked sealed mission and its result without changing state."
+                if name == "mission-candidate" else
+                "Inspect and explicitly record one actual human review of a sealed mission."
+            ),
+            False, name == "mission-review",
+        )
     if name == "experiment-pending":
         if tail:
             raise ValueError("experiment_pending_accepts_no_arguments")
@@ -456,6 +491,250 @@ def run_experiment(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     result = _product_experiment_plan(action, project_root)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def _mission_review_source(
+    action: LaunchAction, project_root: Path,
+) -> tuple[Path, object, dict[str, object]]:
+    source = str(project_root / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from local_company.config import default_company_home
+    from local_company.mcp_server import CompanyTools, ProtocolError
+
+    home = default_company_home()
+    project = _resolved_product_project(action, home)
+    tools = CompanyTools(home)
+    try:
+        candidate_result = tools.product_evidence_next({"project": project})
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    if not isinstance(candidate_result, dict):
+        raise ValueError("mission_review_candidate_invalid")
+    if (
+        candidate_result.get("schema") != "local-company.mcp-product-evidence-next.v1"
+        or candidate_result.get("modelCalled") is not False
+        or candidate_result.get("stateMutated") is not False
+        or candidate_result.get("externalActionPerformed") is not False
+        or candidate_result.get("status") not in {"candidate_ready", "no_candidate"}
+    ):
+        raise ValueError("mission_review_candidate_invalid")
+    candidate = candidate_result.get("candidate")
+    if candidate is None:
+        if candidate_result["status"] != "no_candidate":
+            raise ValueError("mission_review_candidate_invalid")
+        return home, tools, {
+            "schema": MISSION_REVIEW_NEXT_SCHEMA, "status": "no_candidate",
+            "candidate": None, "jobResult": None,
+            "evidenceProgress": candidate_result.get("evidenceProgress"),
+            "humanReviewFields": candidate_result.get("humanReviewFields"),
+            "nextAction": "run_and_review_another_bounded_product_mission",
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+    if not isinstance(candidate, dict) or candidate_result["status"] != "candidate_ready":
+        raise ValueError("mission_review_candidate_invalid")
+    job_id = candidate.get("jobId")
+    candidate_project = candidate.get("project")
+    candidate_roles = candidate.get("roles")
+    report_sha256 = candidate.get("reportSha256")
+    evidence_sha256 = candidate.get("evidenceManifestSha256")
+    if (
+        not isinstance(job_id, str) or PENDING_EXPERIMENT_ID.fullmatch(job_id) is None
+        or candidate.get("status") != "complete"
+        or not isinstance(candidate.get("objective"), str)
+        or not candidate["objective"].strip()
+        or not isinstance(candidate_project, str) or not candidate_project.strip()
+        or not isinstance(candidate_roles, list)
+        or not candidate_roles
+        or any(not isinstance(role, str) or not role.strip() for role in candidate_roles)
+        or not isinstance(report_sha256, str)
+        or SHA256_PATTERN.fullmatch(report_sha256) is None
+        or not isinstance(evidence_sha256, str)
+        or SHA256_PATTERN.fullmatch(evidence_sha256) is None
+        or type(candidate.get("qualityPassed")) is not bool
+    ):
+        raise ValueError("mission_review_candidate_invalid")
+    try:
+        job_result = tools.job_result({"jobId": job_id})
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    if not isinstance(job_result, dict):
+        raise ValueError("mission_review_job_result_invalid")
+    job = job_result.get("job")
+    quality = job_result.get("quality")
+    checks = quality.get("checks") if isinstance(quality, dict) else None
+    if (
+        job_result.get("schema") != "local-company.mcp-job-result.v1"
+        or job_result.get("status") != "ready"
+        or job_result.get("modelCalled") is not False
+        or job_result.get("stateMutated") is not False
+        or job_result.get("externalActionPerformed") is not False
+        or not isinstance(job, dict) or job.get("jobId") != job_id
+        or job.get("status") != "complete" or job.get("reportAvailable") is not True
+        or job.get("objective") != candidate.get("objective")
+        or job.get("project") != candidate_project
+        or job.get("roles") != candidate_roles
+        or not isinstance(job.get("synthesis"), str) or not job["synthesis"].strip()
+        or job.get("synthesisTruncated") is not False
+        or job.get("reportSha256") != report_sha256
+        or job.get("evidenceManifestSha256") != evidence_sha256
+        or not isinstance(quality, dict) or not isinstance(checks, dict)
+        or quality.get("passed") is not candidate.get("qualityPassed")
+        or quality.get("score") != candidate.get("qualityScore")
+        or checks.get("report_integrity_valid") is not True
+        or checks.get("evidence_manifest_valid") is not True
+        or checks.get("model_stopped_cleanly") is not True
+    ):
+        raise ValueError("mission_review_job_result_invalid")
+    return home, tools, {
+        "schema": MISSION_REVIEW_NEXT_SCHEMA, "status": "candidate_ready",
+        "candidate": candidate, "jobResult": job_result,
+        "evidenceProgress": candidate_result.get("evidenceProgress"),
+        "humanReviewFields": candidate_result.get("humanReviewFields"),
+        "nextAction": "inspect_result_then_run_mission_review",
+        "modelCalled": False, "stateMutated": False,
+        "externalActionPerformed": False,
+    }
+
+
+def run_mission_candidate(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    _, _, result = _mission_review_source(action, project_root)
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0 if result["status"] == "candidate_ready" else 1
+
+
+def _review_integer(value: str, *, minimum: int, maximum: int, reason: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(reason) from error
+    if not minimum <= parsed <= maximum:
+        raise ValueError(reason)
+    return parsed
+
+
+def run_mission_review(action: LaunchAction, root: Path | None = None) -> int:
+    project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    _, tools, source = _mission_review_source(action, project_root)
+    if source["status"] != "candidate_ready":
+        print(json.dumps(source, separators=(",", ":"), sort_keys=True))
+        return 1
+    candidate = source["candidate"]
+    job_result = source["jobResult"]
+    if not isinstance(candidate, dict) or not isinstance(job_result, dict):
+        raise ValueError("mission_review_source_invalid")
+    job = job_result.get("job")
+    quality = job_result.get("quality")
+    if not isinstance(job, dict) or not isinstance(quality, dict):
+        raise ValueError("mission_review_source_invalid")
+    roles = candidate.get("roles")
+    if not isinstance(roles, list) or any(not isinstance(role, str) for role in roles):
+        raise ValueError("mission_review_source_invalid")
+
+    print("\nSealed local mission ready for your actual human review:\n")
+    print(f"Job ID: {candidate['jobId']}")
+    print(f"Project: {candidate.get('project')}")
+    print(f"Roles: {', '.join(roles)}")
+    print(f"Automated quality: {'passed' if quality.get('passed') is True else 'failed'} ({quality.get('score')})")
+    print(f"Report SHA-256: {candidate.get('reportSha256')}")
+    print(f"Evidence SHA-256: {candidate.get('evidenceManifestSha256')}")
+    print(f"\nObjective:\n{job.get('objective')}\n")
+    print(f"Result:\n{job.get('synthesis')}\n")
+    print("Automated quality is not human acceptance. Record only what you actually observed.\n")
+
+    category = input("Workflow category (coding/business/data-research): ").strip().lower()
+    if category not in {"coding", "business", "data-research"}:
+        raise ValueError("mission_review_category_invalid")
+    decision = input("Decision (accepted/rejected): ").strip().lower()
+    if decision not in {"accepted", "rejected"}:
+        raise ValueError("mission_review_decision_invalid")
+    if decision == "accepted":
+        outcome_reason = "none"
+    else:
+        print("Rejection reasons: " + ", ".join(PRODUCT_OUTCOME_REASONS[1:]))
+        outcome_reason = input("Primary rejection reason: ").strip().lower()
+        if outcome_reason not in PRODUCT_OUTCOME_REASONS[1:]:
+            raise ValueError("mission_review_outcome_reason_invalid")
+    corrections = _review_integer(
+        input("Actual correction count (0-100): ").strip(),
+        minimum=0, maximum=100, reason="mission_review_corrections_invalid",
+    )
+    paid_signal = input(
+        "Did a real person indicate willingness to pay for setup? (yes/no/unknown): "
+    ).strip().lower()
+    if paid_signal not in {"yes", "no", "unknown"}:
+        raise ValueError("mission_review_paid_signal_invalid")
+    peak_raw = input("Measured peak memory MiB (blank if unavailable): ").strip()
+    peak_memory = (
+        None if not peak_raw else _review_integer(
+            peak_raw, minimum=1, maximum=1_000_000,
+            reason="mission_review_peak_memory_invalid",
+        )
+    )
+    confirmation = input(
+        "Type RECORD HUMAN PRODUCT EVIDENCE REVIEW to save this judgment: "
+    ).strip()
+    if confirmation != "RECORD HUMAN PRODUCT EVIDENCE REVIEW":
+        raise ValueError("mission_review_confirmation_required")
+
+    from local_company.mcp_server import PRODUCT_REVIEW_CONFIRMATION, ProtocolError
+    try:
+        refreshed = tools.product_evidence_next({"project": candidate.get("project")})
+    except ProtocolError as error:
+        raise ValueError("mission_review_candidate_recheck_failed") from error
+    if not isinstance(refreshed, dict):
+        raise ValueError("mission_review_candidate_changed")
+    refreshed_candidate = refreshed.get("candidate")
+    identity_fields = ("jobId", "reportSha256", "evidenceManifestSha256")
+    if (
+        refreshed.get("schema") != "local-company.mcp-product-evidence-next.v1"
+        or refreshed.get("status") != "candidate_ready"
+        or not isinstance(refreshed_candidate, dict)
+        or any(refreshed_candidate.get(field) != candidate.get(field) for field in identity_fields)
+        or refreshed.get("stateMutated") is not False
+        or refreshed.get("modelCalled") is not False
+        or refreshed.get("externalActionPerformed") is not False
+    ):
+        raise ValueError("mission_review_candidate_changed")
+    try:
+        recorded = tools.product_evidence_review({
+            "jobId": candidate["jobId"], "category": category,
+            "decision": decision, "outcomeReason": outcome_reason,
+            "corrections": corrections, "paidSetupSignal": paid_signal,
+            "peakMemoryMb": peak_memory,
+            "reviewConfirmation": PRODUCT_REVIEW_CONFIRMATION,
+        })
+        progress = tools.product_evidence_status({
+            "project": candidate.get("project"), "includeReviews": False,
+        })
+    except ProtocolError as error:
+        raise ValueError(error.message) from error
+    if (
+        recorded.get("schema") != "local-company.mcp-product-evidence-review.v1"
+        or recorded.get("status") != "recorded" or recorded.get("recorded") is not True
+        or recorded.get("modelCalled") is not False
+        or recorded.get("externalActionPerformed") is not False
+        or progress.get("modelCalled") is not False
+        or progress.get("stateMutated") is not False
+        or progress.get("externalActionPerformed") is not False
+    ):
+        raise ValueError("mission_review_record_verification_failed")
+    print(json.dumps({
+        "schema": MISSION_HUMAN_REVIEW_SCHEMA, "status": "recorded",
+        "recorded": True, "jobId": candidate["jobId"],
+        "review": recorded.get("review"),
+        "evidenceProgress": {
+            "reviewedMissions": progress.get("reviewed_missions"),
+            "remainingMissions": progress.get("remaining_missions"),
+            "completeMeasurements": progress.get("complete_measurements"),
+            "missingProof": progress.get("missing_proof"),
+        },
+        "modelCalled": False, "stateMutated": True,
+        "externalActionPerformed": False,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
 
 
@@ -2137,6 +2416,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_experiment_review(action)
         if action.mode == "experiment-review-interactive":
             return run_interactive_experiment_review(action)
+        if action.mode == "mission-candidate":
+            return run_mission_candidate(action)
+        if action.mode == "mission-review":
+            return run_mission_review(action)
         if action.mode == "offer":
             return run_offer(action)
         if action.mode == "offer-pack":

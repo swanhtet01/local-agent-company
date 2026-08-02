@@ -123,10 +123,12 @@ echo C. Run one measured product proof ^(safe memory recovery^)
 echo D. Review a pending product proof ^(human decision^)
 echo E. Generate the private validation dossier ^(no model^)
 echo F. Ask the grounded SuperMega assistant ^(read-only, low memory^)
+echo G. Inspect and review a sealed SuperMega mission ^(human decision, no model^)
 echo 0. Back to main menu
 echo.
-choice /c 123456789ABCDEF0 /n /m "Choose 1-9, A-F, or 0: "
-if errorlevel 16 goto menu
+choice /c 123456789ABCDEFG0 /n /m "Choose 1-9, A-G, or 0: "
+if errorlevel 17 goto menu
+if errorlevel 16 goto supermega_mission_review
 if errorlevel 15 goto supermega_ask
 if errorlevel 14 goto supermega_dossier
 if errorlevel 13 goto supermega_review
@@ -196,6 +198,12 @@ goto supermega_menu
 
 :supermega_review
 call "%LOCAL_AI_ROOT%local-ai.cmd" supermega review
+echo.
+pause
+goto supermega_menu
+
+:supermega_mission_review
+call "%LOCAL_AI_ROOT%local-ai.cmd" supermega mission-review
 echo.
 pause
 goto supermega_menu

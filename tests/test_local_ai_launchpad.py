@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_offer, run_offer_pack, run_pending_experiments, run_supermega_code, run_supermega_park_next, run_supermega_status, run_validation_pack, run_work, switch_project, translate
+from scripts.local_ai import _brief_next_action, explain, main, run_autopilot, run_code, run_company, run_company_brief, run_cycle, run_experiment, run_experiment_agent, run_experiment_review, run_interactive_experiment_review, run_mission_candidate, run_mission_review, run_offer, run_offer_pack, run_pending_experiments, run_supermega_code, run_supermega_park_next, run_supermega_status, run_validation_pack, run_work, switch_project, translate
 from scripts.run_scheduled_cycle import SCHEMA as SCHEDULED_CYCLE_SCHEMA, run_scheduled_cycle
 
 
@@ -42,6 +42,8 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["offer", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["offer-pack", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["validation-pack", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["mission-candidate", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["mission-review", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["experiment-pending"]).command, ())
         self.assertEqual(translate(["experiment-review-interactive"]).command, ())
         self.assertEqual(translate([
@@ -90,6 +92,12 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["supermega", "pending"]).command, ("SuperMega",))
         self.assertEqual(translate(["supermega", "review"]).command, ("SuperMega",))
         self.assertEqual(translate(["supermega", "dossier"]).command, ("SuperMega",))
+        self.assertEqual(
+            translate(["supermega", "mission-candidate"]).mode, "mission-candidate",
+        )
+        self.assertEqual(
+            translate(["supermega", "mission-review"]).mode, "mission-review",
+        )
         self.assertEqual(
             translate(["supermega", "plan", "Review release proof"]).command,
             ("preflight", "Review release proof", "--project", "SuperMega"),
@@ -339,6 +347,93 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertIn("Archived measured product experiments", history_output.getvalue())
             status = Company(home, MockModel()).product_evidence_status(project_id)
             self.assertEqual(status["reviews"][0]["outcome_reason"], "incomplete")
+
+    def test_sealed_mission_candidate_is_pathless_read_only_and_integrity_checked(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            company = Company(home, MockModel())
+            project_id = company.create_project("Future Lab")
+            job_id, _ = company.run("Review business workflow", project=project_id)
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    run_mission_candidate(
+                        translate(["mission-candidate", "Future Lab"]),
+                    ), 0,
+                )
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["status"], "candidate_ready")
+            self.assertEqual(receipt["candidate"]["jobId"], job_id)
+            self.assertEqual(receipt["jobResult"]["job"]["jobId"], job_id)
+            self.assertRegex(receipt["candidate"]["reportSha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(
+                receipt["candidate"]["evidenceManifestSha256"], r"^[0-9a-f]{64}$",
+            )
+            self.assertNotIn(str(home), output.getvalue())
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
+            self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 0)
+
+    def test_sealed_mission_review_records_only_confirmed_human_values(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            company = Company(home, MockModel())
+            project_id = company.create_project("Future Lab")
+            job_id, _ = company.run("Review business workflow", project=project_id)
+            answers = iter([
+                "business", "accepted", "0", "unknown", "512",
+                "RECORD HUMAN PRODUCT EVIDENCE REVIEW",
+            ])
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    run_mission_review(translate(["mission-review", "Future Lab"])), 0,
+                )
+            receipt = json.loads(output.getvalue().strip().splitlines()[-1])
+            self.assertEqual(receipt["status"], "recorded")
+            self.assertEqual(receipt["jobId"], job_id)
+            self.assertTrue(receipt["recorded"])
+            self.assertFalse(receipt["modelCalled"])
+            self.assertTrue(receipt["stateMutated"])
+            self.assertFalse(receipt["externalActionPerformed"])
+            status = company.product_evidence_status(project_id)
+            self.assertEqual(status["reviewed_missions"], 1)
+            self.assertEqual(status["complete_measurements"], 1)
+            self.assertEqual(status["reviews"][0]["peak_memory_mb"], 512)
+
+    def test_sealed_mission_review_cancellation_records_nothing(self) -> None:
+        from local_company.core import Company, MockModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "company"
+            company = Company(home, MockModel())
+            project_id = company.create_project("Future Lab")
+            company.run("Review coding workflow", project=project_id)
+            answers = iter([
+                "coding", "rejected", "incomplete", "1", "no", "", "CANCEL",
+            ])
+            with (
+                patch.dict("os.environ", {"LOCAL_COMPANY_HOME": str(home)}),
+                patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+                redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(
+                    ValueError, "mission_review_confirmation_required",
+                ),
+            ):
+                run_mission_review(translate(["mission-review", "Future Lab"]))
+            self.assertEqual(company.product_evidence_status(project_id)["reviewed_missions"], 0)
 
     def test_offer_command_reports_missing_proof_without_model_or_mutation(self) -> None:
         from local_company.core import Company, MockModel
