@@ -115,9 +115,12 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    installed: set[str] | None = None
+    available: int | None = None
     try:
         installed = installed_ollama_models()
-        selection = select_model(installed, available_memory_bytes(), args.requested_model)
+        available = available_memory_bytes()
+        selection = select_model(installed, available, args.requested_model)
         if args.model_only:
             print(selection.model)
         else:
@@ -139,7 +142,34 @@ def main(argv: list[str] | None = None) -> int:
             }, separators=(",", ":"), sort_keys=True))
         return 0
     except (RuntimeError, ValueError) as error:
-        print(json.dumps({"schema": SCHEMA, "status": "blocked", "reason": str(error)}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
+        receipt: dict[str, object] = {
+            "schema": SCHEMA, "status": "blocked", "reason": str(error),
+            "controls": {
+                "paidApiRequired": False, "modelLoaded": False,
+                "externalRequestPerformed": False, "memoryBypassAllowed": False,
+            },
+        }
+        if installed is not None:
+            supported = sorted(installed.intersection(SUPPORTED_MODELS))
+            receipt["installedSupportedModels"] = supported
+            required = None
+            requested = (args.requested_model or "").strip().lower()
+            if requested in MINIMUM_AVAILABLE_BYTES and requested in installed:
+                required = MINIMUM_AVAILABLE_BYTES[requested]
+            elif supported:
+                required = min(MINIMUM_AVAILABLE_BYTES[model] for model in supported)
+            if required is not None:
+                receipt["minimumAvailableBytes"] = required
+                if available is not None:
+                    receipt["memoryShortfallBytes"] = max(0, required - available)
+        if available is not None:
+            receipt["availableMemoryBytes"] = available
+        receipt["recommendedAction"] = (
+            "close_large_apps_then_rerun_check"
+            if str(error) in {"installed_models_memory_blocked", "requested_model_memory_blocked"}
+            else "inspect_local_model_installation"
+        )
+        print(json.dumps(receipt, separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 1
 
 

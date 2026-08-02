@@ -36,6 +36,8 @@ Use one command for local coding, business teams, research, planning, and queued
 
   local-ai.cmd check [model options]          Check Ollama and the configured model
   local-ai.cmd code [PROJECT_PATH]            Open a local coding agent in a project
+  local-ai.cmd vision [--check] [PROJECT]     Use the full local Vision product agent
+  local-ai.cmd vision-lite [--check] [PROJECT] Use the tiny Vision campaign agent
   local-ai.cmd plan "OBJECTIVE" [options]     Preview the team and gates; no model
   local-ai.cmd work "OBJECTIVE" [options]     Run one bounded local AI team
   local-ai.cmd later "OBJECTIVE" [options]    Add work to the durable local queue
@@ -60,6 +62,8 @@ Use one command for local coding, business teams, research, planning, and queued
 
 Examples:
   local-ai.cmd code C:\path\to\a-project
+  local-ai.cmd vision-lite --check
+  local-ai.cmd vision-lite
   local-ai.cmd plan "Design a product customers can buy" --project "New Product"
   local-ai.cmd work "Create a 30-day launch plan" --project "New Product"
   local-ai.cmd later "Review pricing and customer risks" --project "New Product"
@@ -131,6 +135,10 @@ def translate(argv: list[str]) -> LaunchAction | None:
         return LaunchAction(tuple(tail), "advanced", "Use the complete Local Agent Company CLI.", model_may_run, True)
     if name == "code":
         return LaunchAction(tuple(tail), "code", "Open OpenCode in one local project through Ollama.", True, False)
+    if name == "vision":
+        return LaunchAction(("--vision", *tail), "vision", "Open the governed Vision product agent through the bounded local 4B runtime.", True, False)
+    if name == "vision-lite":
+        return LaunchAction(("--vision-lite", *tail), "vision-lite", "Open the three-tool Vision campaign agent through Ollama.", True, False)
     raise ValueError("launchpad_command_unknown")
 
 
@@ -166,8 +174,13 @@ def run_company(action: LaunchAction, root: Path | None = None) -> int:
 
 def run_code(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
+    command = list(action.command)
+    if action.mode in {"vision", "vision-lite"}:
+        default_project = str(project_root.parent / "supermega-vision")
+        if len(command) == 1 or command[1:] == ["--check"]:
+            command.append(default_project)
     completed = subprocess.run(
-        [str(project_root / "local-code.cmd"), *action.command],
+        [str(project_root / "local-code.cmd"), *command],
         cwd=project_root, check=False,
     )
     return completed.returncode
@@ -437,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         if action is None:
             print(HELP)
             return 0
-        if action.mode == "code":
+        if action.mode in {"code", "vision", "vision-lite"}:
             return run_code(action)
         if action.mode == "use":
             return switch_project(action)

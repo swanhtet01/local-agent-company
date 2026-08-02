@@ -61,7 +61,13 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
             error = io.StringIO()
             with redirect_stderr(error):
                 self.assertEqual(main(["--requested-model", "qwen3.5:4b"]), 1)
-            self.assertEqual(json.loads(error.getvalue())["reason"], "requested_model_memory_blocked")
+            receipt = json.loads(error.getvalue())
+            self.assertEqual(receipt["reason"], "requested_model_memory_blocked")
+            self.assertEqual(receipt["availableMemoryBytes"], 2 * GIB)
+            self.assertEqual(receipt["minimumAvailableBytes"], 5 * GIB)
+            self.assertEqual(receipt["memoryShortfallBytes"], 3 * GIB)
+            self.assertEqual(receipt["recommendedAction"], "close_large_apps_then_rerun_check")
+            self.assertFalse(receipt["controls"]["modelLoaded"])
 
     def test_windows_launcher_routes_headless_mode_without_stale_errorlevel(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-code.cmd").read_text(

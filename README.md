@@ -14,6 +14,9 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd work "Create a 30-day validation plan for that product"
 .\local-ai.cmd cycle
 .\local-ai.cmd code C:\path\to\any-project
+.\local-ai.cmd vision-lite --check
+.\local-ai.cmd vision-lite
+.\local-ai.cmd vision
 .\local-ai.cmd dashboard
 ```
 
@@ -24,6 +27,11 @@ Use `new` to create a project and `use` to select its one bounded execution slot
 ```
 
 The dashboard is available on `http://127.0.0.1:8765` after a successful start. The advanced `local-company.cmd` interface remains available, and `local-ai.cmd company ...` forwards to it for capabilities not yet given a friendly alias.
+
+`vision-lite` defaults to the installed `supermega-vision` project and exposes
+only the campaign navigator and one-step phase advance to the tiny Ollama model.
+`vision` defaults to the same project but uses the bounded LM Studio 4B product
+agent. Add `--check` to either command to test admission without loading a model.
 
 `work` does not equate model completion with useful output. It reads the sealed job evaluation after every run, prints a `local-ai.work-result.v1` receipt, and exits nonzero when quality fails or the evaluation cannot be verified. Review the report, tighten the task or knowledge, or use a measured stronger local model before retrying.
 

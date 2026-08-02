@@ -24,6 +24,8 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["data", "list"]).command, ("datasets", "list"))
         self.assertEqual(translate(["new", "Future Lab"]).command, ("projects", "create", "Future Lab"))
         self.assertEqual(translate(["use", "Future Lab"]).command, ("Future Lab",))
+        self.assertEqual(translate(["vision"]).command, ("--vision",))
+        self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
 
     def test_effect_receipt_is_explicit_about_model_state_and_external_authority(self) -> None:
         planned = explain(translate(["plan", "Explore an idea"]))
@@ -85,6 +87,23 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(command[1:], list(action.command))
             self.assertEqual(command[2], "C:\\Project With Spaces")
             self.assertFalse(run.call_args.kwargs["check"])
+
+    def test_vision_modes_default_to_installed_vision_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory) / "local-agent-company"
+            root.mkdir()
+            (root / "local-code.cmd").write_text("@exit /b 0\n", encoding="utf-8")
+            run.return_value = subprocess.CompletedProcess([], 0)
+            self.assertEqual(run_code(translate(["vision-lite", "--check"]), root), 0)
+            self.assertEqual(
+                run.call_args.args[0],
+                [str(root / "local-code.cmd"), "--vision-lite", "--check", str(root.parent / "supermega-vision")],
+            )
+            self.assertEqual(run_code(translate(["vision", "C:\\Custom Vision"]), root), 0)
+            self.assertEqual(
+                run.call_args.args[0],
+                [str(root / "local-code.cmd"), "--vision", "C:\\Custom Vision"],
+            )
 
     def test_use_project_performs_digest_bound_handoff_through_existing_cli(self) -> None:
         observed = {
