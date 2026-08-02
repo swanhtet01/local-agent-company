@@ -71,3 +71,9 @@ The product now exposes `local-ai.cmd cycle` as its safe autonomous unit: materi
 ## Next measurable milestone
 
 Use the launchpad for ten real missions across at least three categories—coding, business planning, and data or research. Record whether each result was accepted, how many corrections it required, runtime, peak memory, and whether the task would have justified a paid setup. Promote only the workflows with repeatable acceptance evidence into sellable kits.
+
+The local-company MCP action `product_experiment_next` turns this milestone
+into the next runnable experiment. It balances category coverage, provides the
+exact local runner prompt and objective checks, and leaves acceptance,
+corrections, and paid-setup demand as explicit human observations. This keeps
+autonomous iteration useful without manufacturing product-market evidence.

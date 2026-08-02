@@ -32,6 +32,7 @@ KNOWLEDGE_ADD_CONFIRMATION = "ADD LOCAL PROJECT KNOWLEDGE"
 PRODUCT_REVIEW_CONFIRMATION = "RECORD HUMAN PRODUCT EVIDENCE REVIEW"
 PRODUCT_EXPERIMENT_CONFIRMATION = "RECORD HUMAN PRODUCT EXPERIMENT REVIEW"
 COMPANY_PROMPT_RECEIPT_SCHEMA = "local-ai.company-prompt-result.v1"
+PRODUCT_EXPERIMENT_CATEGORIES = ("coding", "business", "data-research")
 QUEUE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 QUEUE_COMPLETION_PATTERN = re.compile(
     r"^Queue item ([0-9a-f]{12}) completed as job ([0-9a-f]{12}); quality=(passed|failed)$",
@@ -97,7 +98,7 @@ class CompanyTools:
         self.company = Company(home.resolve(), MockModel())
         self.executor = executor or self._execute_next
         self.profile = "full"
-        self.exposed_tools = 21
+        self.exposed_tools = 22
 
     def status(self, arguments: Any) -> dict[str, Any]:
         _arguments(arguments, set())
@@ -485,6 +486,104 @@ class CompanyTools:
                 if candidate else "run_and_review_another_bounded_product_mission"
             ),
             "jobsInspected": inspected,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+
+    def product_experiment_next(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"project"})
+        project = value.get("project")
+        if not isinstance(project, str) or not project.strip() or len(project) > 80:
+            raise ProtocolError(-32602, "invalid_project")
+        try:
+            evidence = self.company.product_evidence_status(project)
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_project") from error
+        project_item = evidence.get("project")
+        if not isinstance(project_item, dict):
+            raise ProtocolError(-32603, "missing_project_identity")
+        project_name = project_item["name"]
+        category_counts = evidence["category_counts"]
+        category = min(
+            PRODUCT_EXPERIMENT_CATEGORIES,
+            key=lambda item: (category_counts.get(item, 0), PRODUCT_EXPERIMENT_CATEGORIES.index(item)),
+        )
+        sequence = category_counts.get(category, 0) + 1
+        plans = {
+            "coding": {
+                "label": f"Coding operability review {sequence:02d}",
+                "requiredActions": ["status", "project_overview", "playbooks"],
+                "prompt": (
+                    f"Use the local company tools only. Call status, project_overview for "
+                    f"project {project_name!r}, and playbooks. Produce a concise internal "
+                    "technical-operability review grounded only in returned fields. State "
+                    "what is working, one limitation, and one bounded testable improvement. "
+                    "Do not mutate state or perform external actions."
+                ),
+            },
+            "business": {
+                "label": f"Business evidence decision {sequence:02d}",
+                "requiredActions": ["product_evidence_status", "product_evidence_next"],
+                "prompt": (
+                    f"Use the local company tools only. Call product_evidence_status and "
+                    f"product_evidence_next for project {project_name!r}. Produce a concise "
+                    "internal product-validation decision brief grounded only in returned "
+                    "fields. State the evidence gap, the next bounded test, and what must "
+                    "remain a human decision. Do not mutate state or perform external actions."
+                ),
+            },
+            "data-research": {
+                "label": f"Evidence retrieval audit {sequence:02d}",
+                "requiredActions": ["knowledge_list", "knowledge_search"],
+                "prompt": (
+                    f"Use the local company tools only. Call knowledge_list for project "
+                    f"{project_name!r}, then knowledge_search for that project with query "
+                    "'product validation workflow evidence'. Produce a concise evidence audit "
+                    "using only returned excerpts and explicitly identify missing evidence. "
+                    "Do not mutate state or perform external actions."
+                ),
+            },
+        }
+        plan = plans[category]
+        if evidence["milestone_reached"]:
+            status = "milestone_reached"
+            plan = None
+        else:
+            status = "experiment_ready"
+        return {
+            "schema": "local-company.mcp-product-experiment-next.v1",
+            "status": status,
+            "project": project_item,
+            "selectedCategory": category if plan else None,
+            "selectionRule": "least_reviewed_category_then_coding_business_data_research",
+            "categoryCounts": category_counts,
+            "experiment": plan,
+            "runnerInvocation": (
+                {"launcher": "local-company-agent.cmd", "mode": "--run", "prompt": plan["prompt"]}
+                if plan else None
+            ),
+            "machineAcceptanceChecks": [
+                "receipt schema is local-ai.company-prompt-result.v1",
+                "receipt status and reason are accepted with exit code zero",
+                "all requiredActions appear in toolActions",
+                "observedCost is zero and paidApiUsed is false",
+                "externalActionPerformed and autoPermissionsEnabled are false",
+                "modelCalled and modelUnloadedAfterRun are true",
+                "wallSeconds is positive and at most 1800",
+                "peakIncrementalMemoryBytes is measured and positive",
+                "response is nonempty",
+            ] if plan else [],
+            "humanReviewFields": {
+                "decision": ["accepted", "rejected"],
+                "corrections": "actual integer from 0 to 100",
+                "paidSetupSignal": ["yes", "no", "unknown"],
+                "confirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
+                "warning": "Record only actual human observations; do not infer sales demand.",
+            } if plan else None,
+            "nextAction": (
+                "run_runner_invocation_then_human_review_then_product_experiment_review"
+                if plan else "inspect_evidence_and_decide_whether_to_design_a_new_milestone"
+            ),
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }
@@ -1041,6 +1140,11 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             "product_evidence_next", "Select the next sealed unreviewed job and required human evidence fields.",
             _schema([], {"project": project}),
             company_tools.product_evidence_next, True,
+        ),
+        Tool(
+            "product_experiment_next", "Plan the next category-balanced measured local product experiment.",
+            _schema(["project"], {"project": project}),
+            company_tools.product_experiment_next, True,
         ),
         Tool(
             "product_experiment_review", "Preserve one measured runner receipt and append a confirmed human product review.",

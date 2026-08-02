@@ -51,10 +51,11 @@ class LocalCompanyMcpTests(unittest.TestCase):
                     "knowledge_list", "knowledge_add", "knowledge_search",
                     "product_evidence_status", "product_evidence_review",
                     "product_evidence_next",
+                    "product_experiment_next",
                     "product_experiment_review",
                 },
             )
-            self.assertEqual(len(tools), 21)
+            self.assertEqual(len(tools), 22)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -381,6 +382,41 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 "reviewConfirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
             }, 5)
             self.assertEqual(rejected["error"]["message"], "invalid_company_prompt_receipt")
+
+    def test_next_product_experiment_is_balanced_runnable_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            project_id = session.company_tools.company.create_project("Future Product Lab")
+            first = self._call(session, "product_experiment_next", {
+                "project": project_id,
+            }, 3)["result"]["structuredContent"]
+            self.assertEqual(first["status"], "experiment_ready")
+            self.assertEqual(first["selectedCategory"], "coding")
+            self.assertEqual(
+                first["experiment"]["requiredActions"],
+                ["status", "project_overview", "playbooks"],
+            )
+            self.assertEqual(first["runnerInvocation"]["mode"], "--run")
+            self.assertEqual(first["runnerInvocation"]["prompt"], first["experiment"]["prompt"])
+            self.assertIn("actual human observations", first["humanReviewFields"]["warning"])
+            self.assertFalse(first["modelCalled"])
+            self.assertFalse(first["stateMutated"])
+            self.assertFalse(first["externalActionPerformed"])
+            self.assertNotIn(str(root), str(first))
+
+            session.company_tools.company.record_product_experiment_review(
+                project_id, "Existing coding review", "coding", "rejected", 2,
+                "unknown", 10.0, 256, 1, False, "fixture", "a" * 64,
+            )
+            second = self._call(session, "product_experiment_next", {
+                "project": project_id,
+            }, 4)["result"]["structuredContent"]
+            self.assertEqual(second["selectedCategory"], "business")
+            self.assertEqual(
+                second["experiment"]["requiredActions"],
+                ["product_evidence_status", "product_evidence_next"],
+            )
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

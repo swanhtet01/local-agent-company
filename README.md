@@ -34,6 +34,19 @@ The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
 only the dedicated OpenCode agent backed by the locally selected Qwen model.
 
+To get a concrete product experiment instead of an open-ended chat, ask the
+company agent:
+
+```text
+Call product_experiment_next for Local AI Product Lab and show me the runner invocation.
+```
+
+It deterministically selects the least-tested validation category, returns a
+bounded prompt for `local-company-agent.cmd --run`, and lists the machine and
+human acceptance checks. Planning is read-only: it does not load a model,
+change company state, claim customer demand, or record a review. After the run,
+record only measurements and judgments that actually occurred.
+
 Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `cycle` is the bounded autonomy entrypoint: it materializes due schedules, performs an exact ID-bound preflight, and runs at most one mission only when focus, evidence, resources, and owner gates pass. With no due work or an owner gate, it exits without calling a model. It never loops, sends externally, spends money, deploys, or retries a failed result. A Windows scheduled task may invoke one cycle periodically, but registering that task remains an explicit owner action. `explain` reports whether a command can call a model or change local state without running it:
 
 Immediately before queue execution, `cycle` rechecks current physical memory
