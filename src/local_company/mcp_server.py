@@ -31,6 +31,8 @@ QUEUE_STATUSES = {
     "queued", "running", "complete", "failed", "quality_failed", "needs_approval",
     "cancelled", "superseded",
 }
+JOB_STATUSES = {"running", "complete", "failed", "interrupted"}
+MAX_SYNTHESIS_CHARS = 32_768
 
 
 class ProtocolError(Exception):
@@ -92,7 +94,7 @@ class CompanyTools:
         work = self.company.work_state_snapshot()
         return {
             "schema": SCHEMA, "status": "ready", "transport": "stdio",
-            "localOnly": True, "networkListener": False, "exposedTools": 6,
+            "localOnly": True, "networkListener": False, "exposedTools": 8,
             "modelCalled": False, "externalActionPerformed": False,
             "focus": {
                 "enabled": focus["enabled"], "projectId": focus.get("projectId"),
@@ -162,6 +164,63 @@ class CompanyTools:
             "count": len(rows), "limit": limit, "modelCalled": False,
             "stateMutated": False, "externalActionPerformed": False,
         }
+
+    def jobs(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"status", "limit"})
+        status = value.get("status")
+        limit = value.get("limit", 20)
+        if status is not None and status not in JOB_STATUSES:
+            raise ProtocolError(-32602, "invalid_job_status")
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ProtocolError(-32602, "invalid_limit")
+        rows = [row for row in self.company.jobs() if status is None or row[1] == status][:limit]
+        return {
+            "schema": "local-company.mcp-jobs.v1", "status": "ready",
+            "jobs": [
+                {"jobId": row[0], "status": row[1], "createdAt": row[2], "objective": row[3]}
+                for row in rows
+            ],
+            "count": len(rows), "limit": limit, "modelCalled": False,
+            "stateMutated": False, "externalActionPerformed": False,
+        }
+
+    def job_result(self, arguments: Any) -> dict[str, Any]:
+        value = _arguments(arguments, {"jobId"})
+        job_id = value.get("jobId")
+        if not isinstance(job_id, str) or QUEUE_ID_PATTERN.fullmatch(job_id) is None:
+            raise ProtocolError(-32602, "invalid_job_id")
+        try:
+            detail = self.company.job_detail(job_id)
+        except ValueError as error:
+            raise ProtocolError(-32602, "unknown_job") from error
+        job = detail["job"]
+        evaluation = detail.get("evaluation")
+        synthesis = job[7] if isinstance(job[7], str) else ""
+        truncated = len(synthesis) > MAX_SYNTHESIS_CHARS
+        result = {
+            "schema": "local-company.mcp-job-result.v1", "status": "ready",
+            "job": {
+                "jobId": job[0], "objective": job[1], "status": job[2],
+                "createdAt": job[3], "parentJobId": job[5], "project": job[6],
+                "roles": [row[1] for row in detail["assignments"]],
+                "synthesis": synthesis[:MAX_SYNTHESIS_CHARS], "synthesisTruncated": truncated,
+                "reportSha256": job[8], "evidenceManifestSha256": job[9],
+                "reportAvailable": bool(detail.get("report")),
+            },
+            "quality": None,
+            "modelCalled": False, "stateMutated": False,
+            "externalActionPerformed": False,
+        }
+        if isinstance(evaluation, dict):
+            checks = evaluation.get("checks")
+            result["quality"] = {
+                "passed": evaluation.get("passed") is True,
+                "score": evaluation.get("score"),
+                "evaluatedAt": evaluation.get("evaluated_at"),
+                "evaluatorVersion": evaluation.get("evaluator_version"),
+                "checks": checks if isinstance(checks, dict) else {},
+            }
+        return result
 
     def queue_add(self, arguments: Any) -> dict[str, Any]:
         value = _arguments(
@@ -299,6 +358,21 @@ def _tools(company_tools: CompanyTools) -> tuple[Tool, ...]:
             company_tools.queue_list, True,
         ),
         Tool(
+            "jobs", "List bounded local mission history without reading report files into the client.",
+            _schema([], {
+                "status": {"type": "string", "enum": sorted(JOB_STATUSES)},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            }),
+            company_tools.jobs, True,
+        ),
+        Tool(
+            "job_result", "Read one pathless synthesis and quality receipt by exact job ID.",
+            _schema(["jobId"], {
+                "jobId": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+            }),
+            company_tools.job_result, True,
+        ),
+        Tool(
             "preflight", "Preview one team, knowledge state, and owner gates without queuing or calling a model.",
             _schema(["objective"], {"objective": objective, "project": project, "playbook": playbook}),
             company_tools.preflight, True,
@@ -368,7 +442,7 @@ class McpSession:
                     "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "local-agent-company", "title": "Local Agent Company", "version": "1"},
-                    "instructions": "Local-only company coordination. Review queue_list and preflight before mutations. queue_run requires the exact reviewed queue ID and owner confirmation. External actions are never exposed.",
+                    "instructions": "Local-only company coordination. Review queue_list and preflight before mutations. queue_run requires the exact reviewed queue ID and owner confirmation. Use jobs and job_result to inspect outcomes. External actions are never exposed.",
                 })
             if not self.initialized:
                 raise ProtocolError(-32002, "server_not_initialized")

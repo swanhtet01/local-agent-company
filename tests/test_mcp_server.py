@@ -33,9 +33,12 @@ class LocalCompanyMcpTests(unittest.TestCase):
             tools = listed["result"]["tools"]
             self.assertEqual(
                 {tool["name"] for tool in tools},
-                {"status", "projects", "preflight", "queue_list", "queue_add", "queue_run"},
+                {
+                    "status", "projects", "preflight", "queue_list", "queue_add", "queue_run",
+                    "jobs", "job_result",
+                },
             )
-            self.assertEqual(len(tools), 6)
+            self.assertEqual(len(tools), 8)
             self.assertFalse(next(tool for tool in tools if tool["name"] == "queue_add")["annotations"]["readOnlyHint"])
             status = self._call(session, "status")["result"]["structuredContent"]
             self.assertTrue(status["localOnly"])
@@ -130,6 +133,26 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(result["reason"], "insufficient_available_memory")
             self.assertFalse(result["modelCalled"])
             run.assert_not_called()
+
+    def test_jobs_and_job_result_return_pathless_bounded_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            job_id, _ = session.company_tools.company.run("Prepare one internal product decision")
+            jobs = self._call(session, "jobs", {"status": "complete", "limit": 1}, 3)
+            history = jobs["result"]["structuredContent"]
+            self.assertEqual(history["jobs"][0]["jobId"], job_id)
+            result = self._call(session, "job_result", {"jobId": job_id}, 4)
+            receipt = result["result"]["structuredContent"]
+            self.assertEqual(receipt["job"]["jobId"], job_id)
+            self.assertTrue(receipt["quality"]["passed"])
+            self.assertTrue(receipt["job"]["reportAvailable"])
+            self.assertFalse(receipt["job"]["synthesisTruncated"])
+            self.assertNotIn(str(root), str(receipt))
+            self.assertFalse(receipt["modelCalled"])
+            self.assertFalse(receipt["stateMutated"])
+            unknown = self._call(session, "job_result", {"jobId": "f" * 12}, 5)
+            self.assertEqual(unknown["error"]["message"], "unknown_job")
 
     def test_protocol_fails_closed_before_initialization_and_on_unknown_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
