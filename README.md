@@ -138,6 +138,21 @@ runs OpenCode, and unloads the model and stops the server after OpenCode closes.
 Closing other large applications may be necessary before the memory gate admits
 4B. A blocked check does not start a listener or load a model.
 
+For an already-created Vision evaluation campaign, the tiny Ollama model has a
+separate three-tool route:
+
+```powershell
+local-code.cmd --vision-lite --check C:\Users\thesw\Projects\supermega-vision
+local-code.cmd --vision-lite C:\Users\thesw\Projects\supermega-vision
+```
+
+This selects the `vision-campaign` agent and the campaign MCP profile. It can
+only inspect campaign status, choose the verified next phase, and advance one
+phase-locked local evidence step. It cannot build products, use the general
+filesystem or shell, capture screens, control devices, or bypass rights and
+human-review boundaries. The normal Ollama model selector still requires at
+least 2 GiB available memory for the 0.8B model and starts nothing when blocked.
+
 Inspect the read-only selection without opening a model:
 
 ```powershell

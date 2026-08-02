@@ -71,6 +71,14 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
         self.assertIn(':RUN_HEADLESS', source)
         self.assertIn('exit /b %ERRORLEVEL%', source)
 
+    def test_windows_launcher_routes_low_memory_vision_campaign_agent(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "local-code.cmd").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('if /I "%~1"=="--vision-lite" (', source)
+        self.assertIn('set "OPENCODE_AGENT=vision-campaign"', source)
+        self.assertIn('call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL% --agent "%OPENCODE_AGENT%"', source)
+
     @staticmethod
     def _fixture(directory: str) -> tuple[Path, Path]:
         root = Path(directory) / "repo"

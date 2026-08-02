@@ -1,6 +1,12 @@
 @echo off
 setlocal
 
+set "OPENCODE_AGENT="
+if /I "%~1"=="--vision-lite" (
+  set "OPENCODE_AGENT=vision-campaign"
+  shift
+)
+
 set "OPENCODE_EXE=C:\Users\thesw\tools\node-v24.18.0-win-x64\opencode.cmd"
 if not exist "%OPENCODE_EXE%" (
   echo ERROR: OpenCode is not installed at the expected local path.
@@ -42,13 +48,18 @@ if not defined LOCAL_MODEL (
 if "%CHECK_ONLY%"=="1" (
   echo READY: Local AI Code Agent can open %TARGET_DIR%
   echo Model: %LOCAL_MODEL% via local Ollama. No paid API required.
+  if defined OPENCODE_AGENT echo Agent: %OPENCODE_AGENT%
   exit /b 0
 )
 
 pushd "%TARGET_DIR%" || exit /b 5
 echo Starting Local AI Code Agent in %CD%
 echo Model: %LOCAL_MODEL% via local Ollama. No paid API required.
-call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
+if defined OPENCODE_AGENT (
+  call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL% --agent "%OPENCODE_AGENT%"
+) else (
+  call "%OPENCODE_EXE%" . --model ollama/%LOCAL_MODEL%
+)
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 exit /b %EXIT_CODE%
