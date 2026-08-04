@@ -18,10 +18,16 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 RECEIPT_SCHEMA = "supermega.browser-proof.v1"
 DOCTOR_SCHEMA = "supermega.browser-doctor.v1"
 SUITE_SCHEMA = "supermega.browser-suite.v1"
+SUITE_MANIFEST_SCHEMA = "supermega.browser-suite-manifest.v1"
+SUITE_SUMMARY_SCHEMA = "supermega.browser-suite-summary.v1"
+SUITE_SEAL_SCHEMA = "supermega.browser-suite-seal.v1"
 PINNED_AGENT_BROWSER_VERSION = "0.33.2"
 NAMESPACE = "supermega-local-workcell"
 MAX_URL_LENGTH = 4096
 MAX_PAGE_TEXT_BYTES = 512 * 1024
+MAX_SUITE_MANIFEST_BYTES = 64 * 1024
+MAX_SUITE_PAGES = 20
+SUITE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 SUPERMEGA_RELEASE_PAGES = (
@@ -127,6 +133,219 @@ def _sha256(path: Path) -> str:
 
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_json_exclusive(path: Path, value: object) -> None:
+    if not path.parent.is_dir():
+        raise ValueError("browser_suite_output_parent_missing")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _manifest_digest(definition: dict[str, object]) -> str:
+    encoded = json.dumps(
+        definition, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"supermega.browser-suite-manifest.v1\0" + encoded).hexdigest()
+
+
+def _validated_manifest_definition(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("browser_suite_manifest_must_be_object")
+    allowed = {"schema", "name", "requiredRuns", "pages"}
+    if set(value) - allowed:
+        raise ValueError("browser_suite_manifest_unknown_field")
+    if value.get("schema") != SUITE_MANIFEST_SCHEMA:
+        raise ValueError("browser_suite_manifest_schema_invalid")
+    name = value.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name) > 120:
+        raise ValueError("browser_suite_manifest_name_invalid")
+    required_runs = value.get("requiredRuns", 1)
+    if type(required_runs) is not int or not 1 <= required_runs <= 10:
+        raise ValueError("browser_suite_manifest_required_runs_invalid")
+    pages = value.get("pages")
+    if not isinstance(pages, list) or not 1 <= len(pages) <= MAX_SUITE_PAGES:
+        raise ValueError("browser_suite_manifest_page_count_invalid")
+
+    normalized_pages: list[dict[str, object]] = []
+    identifiers: set[str] = set()
+    for page in pages:
+        if not isinstance(page, dict):
+            raise ValueError("browser_suite_manifest_page_invalid")
+        page_allowed = {
+            "id", "url", "expectTitle", "expectText",
+            "failOnConsoleErrors", "maxA11yViolations",
+        }
+        if set(page) - page_allowed:
+            raise ValueError("browser_suite_manifest_page_unknown_field")
+        identifier = page.get("id")
+        if (
+            not isinstance(identifier, str)
+            or SUITE_ID_PATTERN.fullmatch(identifier) is None
+            or identifier in identifiers
+        ):
+            raise ValueError("browser_suite_manifest_page_id_invalid")
+        identifiers.add(identifier)
+        url = page.get("url")
+        if not isinstance(url, str):
+            raise ValueError("browser_suite_manifest_page_url_invalid")
+        url = _validate_target_url(url)
+        expect_title = page.get("expectTitle")
+        if expect_title is not None and (
+            not isinstance(expect_title, str)
+            or not expect_title.strip()
+            or len(expect_title) > 500
+        ):
+            raise ValueError("browser_suite_manifest_expect_title_invalid")
+        expect_text = page.get("expectText", [])
+        if (
+            not isinstance(expect_text, list)
+            or len(expect_text) > 10
+            or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 500
+                for item in expect_text
+            )
+        ):
+            raise ValueError("browser_suite_manifest_expect_text_invalid")
+        if expect_title is None and not expect_text:
+            raise ValueError("browser_suite_manifest_assertion_required")
+        fail_console = page.get("failOnConsoleErrors", True)
+        if type(fail_console) is not bool:
+            raise ValueError("browser_suite_manifest_console_gate_invalid")
+        max_a11y = page.get("maxA11yViolations", 0)
+        if type(max_a11y) is not int or not 0 <= max_a11y <= 100:
+            raise ValueError("browser_suite_manifest_a11y_gate_invalid")
+        normalized_pages.append({
+            "id": identifier,
+            "url": url,
+            "expectTitle": expect_title,
+            "expectText": list(expect_text),
+            "failOnConsoleErrors": fail_console,
+            "maxA11yViolations": max_a11y,
+        })
+    return {
+        "schema": SUITE_MANIFEST_SCHEMA,
+        "name": name.strip(),
+        "requiredRuns": required_runs,
+        "pages": normalized_pages,
+    }
+
+
+def _sealed_manifest(definition: dict[str, object]) -> dict[str, object]:
+    digest = _manifest_digest(definition)
+    return {
+        **definition,
+        "seal": {
+            "schema": SUITE_SEAL_SCHEMA,
+            "algorithm": "sha256",
+            "manifestSha256": digest,
+        },
+    }
+
+
+def _read_manifest_json(path: Path) -> dict[str, object]:
+    candidate = path.expanduser()
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("browser_suite_manifest_file_invalid")
+    raw = candidate.read_bytes()
+    if not raw or len(raw) > MAX_SUITE_MANIFEST_BYTES:
+        raise ValueError("browser_suite_manifest_size_invalid")
+    try:
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("browser_suite_manifest_json_invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError("browser_suite_manifest_must_be_object")
+    return value
+
+
+def load_sealed_suite_manifest(path: Path) -> tuple[dict[str, object], str]:
+    value = _read_manifest_json(path)
+    seal = value.get("seal")
+    if not isinstance(seal, dict) or set(seal) != {
+        "schema", "algorithm", "manifestSha256",
+    }:
+        raise ValueError("browser_suite_manifest_seal_missing")
+    if (
+        seal.get("schema") != SUITE_SEAL_SCHEMA
+        or seal.get("algorithm") != "sha256"
+        or not isinstance(seal.get("manifestSha256"), str)
+    ):
+        raise ValueError("browser_suite_manifest_seal_invalid")
+    definition = _validated_manifest_definition({
+        key: item for key, item in value.items() if key != "seal"
+    })
+    digest = _manifest_digest(definition)
+    if seal["manifestSha256"] != digest:
+        raise ValueError("browser_suite_manifest_seal_mismatch")
+    return definition, digest
+
+
+def create_suite_template(
+    output: Path,
+    *,
+    name: str = "Example Domain release proof",
+    page_id: str = "home",
+    url: str = "https://example.com/",
+    expected_title: str | None = "Example Domain",
+    expected_text: list[str] | None = None,
+    required_runs: int = 1,
+) -> dict[str, object]:
+    definition = _validated_manifest_definition({
+        "schema": SUITE_MANIFEST_SCHEMA,
+        "name": name,
+        "requiredRuns": required_runs,
+        "pages": [{
+            "id": page_id,
+            "url": url,
+            "expectTitle": expected_title,
+            "expectText": list(expected_text or ["Example Domain"]),
+            "failOnConsoleErrors": True,
+            "maxA11yViolations": 2,
+        }],
+    })
+    destination = output.expanduser().resolve()
+    _write_json_exclusive(destination, _sealed_manifest(definition))
+    return {
+        "schema": "supermega.browser-suite-template-result.v1",
+        "status": "created",
+        "path": str(destination),
+        "manifestSha256": _manifest_digest(definition),
+        "pageCount": 1,
+        "stateMutated": True,
+        "externalActionPerformed": False,
+    }
+
+
+def seal_suite_manifest(input_path: Path, output: Path | None = None) -> dict[str, object]:
+    value = _read_manifest_json(input_path)
+    definition = _validated_manifest_definition({
+        key: item for key, item in value.items() if key != "seal"
+    })
+    destination = (
+        output.expanduser().resolve() if output is not None
+        else input_path.expanduser().resolve().with_name(
+            input_path.stem + ".sealed.json"
+        )
+    )
+    _write_json_exclusive(destination, _sealed_manifest(definition))
+    return {
+        "schema": "supermega.browser-suite-seal-result.v1",
+        "status": "sealed",
+        "path": str(destination),
+        "manifestSha256": _manifest_digest(definition),
+        "pageCount": len(definition["pages"]),
+        "stateMutated": True,
+        "externalActionPerformed": False,
+    }
 
 
 def _evidence(path: Path) -> dict[str, object]:
@@ -341,6 +560,75 @@ def browser_doctor(
         if not result["liveLaunchPassed"]:
             client.close()
         client.dispose()
+    return result
+
+
+def install_browser_operator(
+    *,
+    repository_root: Path | None = None,
+    runner: Runner = subprocess.run,
+) -> dict[str, object]:
+    root = (repository_root or _repository_root()).resolve()
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("browser_operator_repository_invalid")
+    before = browser_doctor(repository_root=root, runner=runner)
+    result: dict[str, object] = {
+        "schema": "supermega.browser-install.v1",
+        "status": before["status"],
+        "agentBrowserVersionPin": PINNED_AGENT_BROWSER_VERSION,
+        "installAttempted": False,
+        "networkAccessAttempted": False,
+        "browserDownloadAttempted": False,
+        "stateMutated": False,
+        "modelCalled": False,
+        "paidApiUsed": False,
+        "externalWritePerformed": False,
+        "doctor": before,
+    }
+    if before["status"] == "ready":
+        result["reason"] = "already_ready"
+        return result
+    if before.get("reason") == "compatible_browser_missing":
+        result["reason"] = "compatible_browser_missing"
+        return result
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm is None:
+        result["reason"] = "npm_missing"
+        result["status"] = "blocked"
+        return result
+
+    target = root / ".local-company-tools"
+    result["installAttempted"] = True
+    result["networkAccessAttempted"] = True
+    try:
+        completed = runner(
+            [
+                npm, "install", "--prefix", str(target),
+                f"agent-browser@{PINNED_AGENT_BROWSER_VERSION}",
+                "--ignore-scripts", "--no-audit", "--no-fund",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError) as error:
+        result["reason"] = "npm_install_failed"
+        result["detail"] = _short_error(error)
+        result["status"] = "blocked"
+        return result
+    result["stateMutated"] = completed.returncode == 0
+    if completed.returncode != 0:
+        result["reason"] = "npm_install_failed"
+        result["detail"] = _short_error(completed.stderr or completed.stdout or "no_output")
+        result["status"] = "blocked"
+        return result
+    after = browser_doctor(repository_root=root, runner=runner)
+    result["doctor"] = after
+    result["status"] = after["status"]
+    result["reason"] = "installed_and_ready" if after["status"] == "ready" else "post_install_check_failed"
     return result
 
 
@@ -641,11 +929,16 @@ def run_browser_check(
     return receipt
 
 
-def run_supermega_release_suite(
+def _run_browser_suite_definition(
     company_home: Path,
+    definition: dict[str, object],
+    manifest_sha256: str,
     *,
     runs: int = 1,
     timeout_seconds: int = 45,
+    manifest_source: str,
+    manifest_file_name: str | None,
+    promotion_command: str,
     checker: Callable[..., dict[str, object]] = run_browser_check,
 ) -> dict[str, object]:
     if runs < 1 or runs > 10:
@@ -653,9 +946,11 @@ def run_supermega_release_suite(
     if timeout_seconds < 5 or timeout_seconds > 120:
         raise ValueError("browser_timeout_must_be_between_5_and_120")
 
+    suite_name = str(definition["name"])
+    required_runs = int(definition["requiredRuns"])
     suite_id = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-supermega-release-" + uuid.uuid4().hex[:8]
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-"
+        + _safe_name(suite_name) + "-" + uuid.uuid4().hex[:8]
     )
     output = company_home.resolve() / "browser-suites" / suite_id
     output.mkdir(parents=True, exist_ok=False)
@@ -667,24 +962,35 @@ def run_supermega_release_suite(
 
     for run_number in range(1, runs + 1):
         page_summaries: list[dict[str, object]] = []
-        for page in SUPERMEGA_RELEASE_PAGES:
-            product = str(page["product"])
+        for page in definition["pages"]:
+            if not isinstance(page, dict):
+                raise ValueError("browser_suite_manifest_page_invalid")
             result = checker(
                 company_home,
-                f"https://app.supermega.dev/settings/?product={page['id']}",
-                expected_title="Setup | SuperMega",
-                expected_text=[f"Set up {product}", "Open working sample"],
-                fail_on_console_errors=True,
-                max_a11y_violations=0,
+                str(page["url"]),
+                expected_title=page.get("expectTitle"),
+                expected_text=list(page["expectText"]),
+                fail_on_console_errors=bool(page["failOnConsoleErrors"]),
+                max_a11y_violations=int(page["maxA11yViolations"]),
                 timeout_seconds=timeout_seconds,
             )
             page_check_count += 1
-            passed = result.get("status") == "passed"
-            passed_page_checks += int(passed)
             child_receipt = Path(str(result.get("receiptPath", "")))
+            child_receipt_ready = child_receipt.is_file()
+            passed = result.get("status") == "passed" and child_receipt_ready
+            passed_page_checks += int(passed)
+            failed_check_names = [
+                str(item.get("name"))
+                for item in result.get("checks", [])
+                if isinstance(item, dict) and item.get("passed") is False
+            ]
+            screenshot_sha256 = next((
+                item.get("sha256")
+                for item in result.get("evidence", [])
+                if isinstance(item, dict) and item.get("file") == "page.png"
+            ), None)
             page_summaries.append({
                 "id": page["id"],
-                "product": product,
                 "status": result.get("status"),
                 "passed": passed,
                 "documentStatus": result.get("documentStatus"),
@@ -693,8 +999,10 @@ def run_supermega_release_suite(
                 "consoleErrorCount": result.get("consoleErrorCount"),
                 "accessibilityViolationCount": result.get("accessibilityViolationCount"),
                 "wallSeconds": result.get("wallSeconds"),
-                "receiptPath": str(child_receipt) if child_receipt.is_file() else None,
-                "receiptSha256": _sha256(child_receipt) if child_receipt.is_file() else None,
+                "failedCheckNames": failed_check_names,
+                "screenshotSha256": screenshot_sha256,
+                "receiptPath": str(child_receipt) if child_receipt_ready else None,
+                "receiptSha256": _sha256(child_receipt) if child_receipt_ready else None,
             })
         run_passed = all(bool(item["passed"]) for item in page_summaries)
         run_summaries.append({
@@ -703,38 +1011,152 @@ def run_supermega_release_suite(
             "pages": page_summaries,
         })
 
-    passed = passed_page_checks == page_check_count
-    release_gate_passed = passed and runs == 10
+    passed = page_check_count > 0 and passed_page_checks == page_check_count
+    release_gate_passed = passed and runs >= required_runs
+    finished_at = datetime.now(timezone.utc).isoformat()
+    wall_seconds = round(time.perf_counter() - started, 3)
+    portable_runs = [{
+        "run": item["run"],
+        "status": item["status"],
+        "pages": [{key: value for key, value in page.items() if key != "receiptPath"}
+                  for page in item["pages"]],
+    } for item in run_summaries]
+    portable_summary: dict[str, object] = {
+        "schema": SUITE_SUMMARY_SCHEMA,
+        "suiteId": suite_id,
+        "suite": suite_name,
+        "manifestSha256": manifest_sha256,
+        "status": "passed" if passed else "failed",
+        "promotionStatus": "release_check_ready" if release_gate_passed else "baseline_only",
+        "releaseGatePassed": release_gate_passed,
+        "requestedRuns": runs,
+        "requiredConsecutiveRuns": required_runs,
+        "pageChecks": page_check_count,
+        "passedPageChecks": passed_page_checks,
+        "failedPageChecks": page_check_count - passed_page_checks,
+        "startedAt": started_at,
+        "finishedAt": finished_at,
+        "wallSeconds": wall_seconds,
+        "modelCalled": False,
+        "paidApiUsed": False,
+        "externalReadPerformed": page_check_count > 0,
+        "externalWritePerformed": False,
+        "authenticatedProfileUsed": False,
+        "runs": portable_runs,
+    }
+    portable_path = output / "portable-summary.json"
+    _write_json(portable_path, portable_summary)
+    portable_digest = _sha256(portable_path)
+    portable_sidecar = output / "portable-summary.sha256"
+    portable_sidecar.write_text(
+        f"{portable_digest} *{portable_path.name}\n", encoding="ascii",
+    )
     receipt: dict[str, object] = {
         "schema": SUITE_SCHEMA,
         "suiteId": suite_id,
-        "suite": "supermega-four-product-release",
+        "suite": suite_name,
+        "manifest": {
+            "schema": SUITE_MANIFEST_SCHEMA,
+            "sha256": manifest_sha256,
+            "source": manifest_source,
+            "fileName": manifest_file_name,
+            "integrityVerifiedBeforeExecution": True,
+        },
         "status": "passed" if passed else "failed",
         "promotionStatus": "release_check_ready" if release_gate_passed else "baseline_only",
         "releaseGatePassed": release_gate_passed,
         "requestedRuns": runs,
         "consecutivePassingRuns": runs if passed else 0,
-        "requiredConsecutiveRuns": 10,
+        "requiredConsecutiveRuns": required_runs,
         "pageChecks": page_check_count,
         "passedPageChecks": passed_page_checks,
         "failedPageChecks": page_check_count - passed_page_checks,
         "startedAt": started_at,
-        "finishedAt": datetime.now(timezone.utc).isoformat(),
-        "wallSeconds": round(time.perf_counter() - started, 3),
+        "finishedAt": finished_at,
+        "wallSeconds": wall_seconds,
         "modelCalled": False,
         "paidApiUsed": False,
         "externalReadPerformed": page_check_count > 0,
         "externalWritePerformed": False,
         "authenticatedProfileUsed": False,
         "runs": run_summaries,
+        "portableSummary": {
+            "file": portable_path.name,
+            "bytes": portable_path.stat().st_size,
+            "sha256": portable_digest,
+            "sha256Sidecar": portable_sidecar.name,
+        },
         "nextAction": (
             "none" if release_gate_passed
-            else "Run `local-ai.cmd web supermega --runs 10` for the promotion gate."
+            else f"Run `{promotion_command}` for the promotion gate."
             if passed else "Inspect the failed child receipt before changing the site or checks."
         ),
+        "receiptSha256Sidecar": "suite-receipt.sha256",
     }
     receipt_path = output / "suite-receipt.json"
     receipt["receiptPath"] = str(receipt_path)
     receipt["suiteDirectory"] = str(output)
     _write_json(receipt_path, receipt)
+    receipt_digest = _sha256(receipt_path)
+    (output / "suite-receipt.sha256").write_text(
+        f"{receipt_digest} *{receipt_path.name}\n", encoding="ascii",
+    )
     return receipt
+
+
+def run_browser_suite(
+    company_home: Path,
+    manifest_path: Path,
+    *,
+    runs: int = 1,
+    timeout_seconds: int = 45,
+    checker: Callable[..., dict[str, object]] = run_browser_check,
+) -> dict[str, object]:
+    definition, digest = load_sealed_suite_manifest(manifest_path)
+    return _run_browser_suite_definition(
+        company_home,
+        definition,
+        digest,
+        runs=runs,
+        timeout_seconds=timeout_seconds,
+        manifest_source="sealed_file",
+        manifest_file_name=manifest_path.name,
+        promotion_command=(
+            f"local-ai.cmd web suite {manifest_path.name} "
+            f"--runs {definition['requiredRuns']}"
+        ),
+        checker=checker,
+    )
+
+
+def run_supermega_release_suite(
+    company_home: Path,
+    *,
+    runs: int = 1,
+    timeout_seconds: int = 45,
+    checker: Callable[..., dict[str, object]] = run_browser_check,
+) -> dict[str, object]:
+    definition = _validated_manifest_definition({
+        "schema": SUITE_MANIFEST_SCHEMA,
+        "name": "supermega-four-product-release",
+        "requiredRuns": 10,
+        "pages": [{
+            "id": page["id"],
+            "url": f"https://app.supermega.dev/settings/?product={page['id']}",
+            "expectTitle": "Setup | SuperMega",
+            "expectText": [f"Set up {page['product']}", "Open working sample"],
+            "failOnConsoleErrors": True,
+            "maxA11yViolations": 0,
+        } for page in SUPERMEGA_RELEASE_PAGES],
+    })
+    return _run_browser_suite_definition(
+        company_home,
+        definition,
+        _manifest_digest(definition),
+        runs=runs,
+        timeout_seconds=timeout_seconds,
+        manifest_source="built_in",
+        manifest_file_name=None,
+        promotion_command="local-ai.cmd web supermega --runs 10",
+        checker=checker,
+    )

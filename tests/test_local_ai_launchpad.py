@@ -67,6 +67,19 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["vision"]).command, ("--vision",))
         self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
         self.assertEqual(translate(["web", "doctor"]).command, ("browser", "doctor"))
+        self.assertEqual(translate(["web", "install"]).command, ("browser", "install"))
+        self.assertEqual(
+            translate(["web", "template", "customer.json"]).command,
+            ("browser", "suite-template", "customer.json"),
+        )
+        self.assertEqual(
+            translate(["web", "seal", "customer.json", "--output", "approved.json"]).command,
+            ("browser", "suite-seal", "customer.json", "--output", "approved.json"),
+        )
+        self.assertEqual(
+            translate(["web", "suite", "approved.json", "--runs", "3"]).command,
+            ("browser", "suite", "approved.json", "--runs", "3"),
+        )
         self.assertEqual(
             translate(["web", "https://supermega.dev", "--expect-text", "SuperMega"]).command,
             ("browser", "check", "https://supermega.dev", "--expect-text", "SuperMega"),

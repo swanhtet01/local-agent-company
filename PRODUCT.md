@@ -49,8 +49,11 @@ Run this from the repository:
 ```powershell
 .\local-ai.cmd automate doctor
 .\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+.\local-ai.cmd web install
 .\local-ai.cmd web doctor
 .\local-ai.cmd web https://supermega.dev --expect-text SuperMega
+.\local-ai.cmd web template .\customer-suite.json
+.\local-ai.cmd web suite .\customer-suite.json
 ```
 
 The proof launches a built-in no-file/no-network Windows app, resolves its
@@ -59,12 +62,22 @@ clicks **Apply locally**, checks the resulting window title, captures only the
 app client area, writes hashes and a receipt, then closes the owned process. It
 does not call a model or a paid API.
 
-The web command is a real external read, not a sample app. In the 2026-08-05
-local proof it checked `https://supermega.dev` in 6.43 seconds, observed HTTP
+The web commands perform real external reads, not simulated pages. In the
+2026-08-05 local proof, the one-page command checked
+`https://supermega.dev` in 6.43 seconds, observed HTTP
 200 and the expected content, found no uncaught page or console errors, ran an
 automated accessibility audit and performance capture, saved a full-page
 screenshot, and bound eight evidence files by SHA-256. It used no model,
 account, paid API, or authenticated profile and performed no external write.
+
+The reusable pack also passed a sealed second-project manifest against
+`https://example.com/`: 1/1 checks passed in 6.264 seconds, HTTP was 200, the
+expected title and text were present, and the screenshot and child receipt were
+hash-bound into a portable summary. A second sealed manifest containing an
+impossible text assertion loaded the same page but correctly failed
+`expected_text_1`, refused promotion, and returned exit code 1. An isolated
+fresh-install rehearsal installed pinned `agent-browser` 0.33.2, downloaded no
+browser, reused Edge, and passed its live launch check.
 
 These prove the two execution substrates. They do not prove that an arbitrary
 third-party workflow is reliable; every real workflow still needs its own
@@ -99,6 +112,23 @@ outcome checks and repeated acceptance runs.
 | Adapter next | OpenAdapt, FlaUI, Maestro, Promptfoo | Each replaces a difficult subsystem after a real task proves the need. |
 | Interoperate only | Activepieces/n8n, Robot Framework, Appium, Cua/OpenHands sandboxes | Valuable ecosystems, but embedding their full runtime now would add more operations than customer value. |
 | Defer | UI-TARS/OmniParser/local VLMs, multi-machine schedulers, more role agents | The Ally does not need a heavy vision loop for structured pages, and agent count is not an outcome. |
+
+### Technology adoption gates
+
+The review is a dependency map, not an installation list. Add a framework only
+when a measured workflow reaches its trigger:
+
+| Candidate | Adopt only when | Required proof before packaging |
+| --- | --- | --- |
+| FlaUI | A real Windows app exposes useful UI Automation data but the current bridge cannot resolve it reliably. | Same outcome oracle, 20 supervised runs, zero wrong-window actions, and lower repair time than the current adapter. |
+| OpenAdapt | A customer needs demonstration repair, effect checks, or visual fallback that the sealed replay format cannot express. | Private test set, halt-on-drift cases, resource measurement on the Ally, and commercial-license review. |
+| Maestro | A named Android workflow has a resettable emulator state and business value. | Human-readable flow, deterministic reset, task-state verifier, and 20 emulator runs before real-device control. |
+| Promptfoo | A local model makes a material decision rather than merely generating optional prose. | Fixed eval dataset, quality threshold, latency and memory budget, and a deterministic non-model fallback. |
+| Activepieces, Prefect, or n8n | A workflow spans durable API/connector steps that the SQLite queue cannot safely coordinate. | Idempotency, retries, cancellation, secrets boundary, recovery test, and license review for the intended distribution. |
+| Cua or OpenHands runtime | A customer task needs stronger process or filesystem isolation. | Threat model, offline/local feasibility, resource budget, and evidence that isolation outweighs setup cost. |
+
+Until a trigger is observed, installing these systems would increase maintenance
+without increasing verified useful workflows.
 
 ## What is actually differentiated
 
@@ -172,8 +202,8 @@ or repeating verification:
 - **Product and release evidence pack (usable baseline):** inspect a public or
   local URL in a fresh browser; verify HTTP status, title, expected text,
   accessibility state, page errors, and screenshot; return a hashed receipt.
-  The homepage proof and four-product SuperMega suite work now;
-  customer-configurable manifests are next. Deployment stays gated.
+  The homepage proof, four-product SuperMega suite, and sealed customer-defined
+  1-20 page suite work now. Deployment stays gated.
 - **Shop operations pack:** transfer reviewed local invoice/order fields into a
   desktop system and verify the resulting status. Payable approval, sending,
   and production persistence stay gated.
@@ -206,8 +236,9 @@ the **Private Web Release Proof**:
 The SuperMega reference pack passed 40/40 product-page checks in 275.44 seconds
 on the Ally. That supports selling setup and supervised QA engineering; it does
 not prove every customer site, authenticated journey, or business outcome. A
-customer-configurable suite manifest and portable report are the next product
-gate before calling this self-serve.
+second-site pass, deliberate assertion failure, and isolated fresh install now
+close the reusable-pack engineering gate. This is ready for supervised setup
+and QA delivery; it does not yet prove paid demand or customer-specific ROI.
 
 For desktop work, sell an outcome-specific private workcell:
 
@@ -265,7 +296,7 @@ reusable pack requires all of these:
   275.44 seconds with zero page, console, or axe violations.
 - No session signed in, submitted a form, deployed, or mutated hosted data.
 
-### P2 - customer-configurable web proof pack (current goal)
+### P2 - customer-configurable web proof pack (completed)
 
 - Replace the built-in route list with a validated, integrity-sealed manifest
   for 1-20 customer URLs and exact assertions, without requiring code edits.
@@ -275,7 +306,12 @@ reusable pack requires all of these:
   demonstrated, not inferred from passing pages.
 - Package a one-command install/doctor path and a supervised pilot runbook.
 
-### P3 - first paid desktop-workflow candidate
+Verified on 2026-08-05: second-site pass 1/1 in 6.264 seconds, deliberate
+assertion failure with exit code 1, seal-tamper rejection before browser start,
+portable path-free report with receipt hashes and checksum sidecars, and an
+isolated fresh install/live-launch rehearsal.
+
+### P3 - first paid desktop-workflow candidate (current goal)
 
 - Measure one repeated operator task: runs per week, minutes, error cost,
   application, and machine-checkable final state.
@@ -337,11 +373,13 @@ The north-star metric is **verified useful workflows completed per operator
 hour**, not models, roles, commands, or autonomous runtime.
 
 The SuperMega release journey milestone is complete at 40/40 passing page
-checks. The current goal is a customer-configurable, integrity-sealed web suite
-and portable report that can be delivered without changing code. It is complete
-only when a second manifest passes, an intentionally broken assertion fails,
-and a fresh operator can install and run it from the documented commands.
+checks. The reusable web milestone is also complete: a second sealed manifest
+passed, an intentionally broken assertion failed closed, the portable report is
+hash-bound and path-free, and a fresh isolated install passed its live check.
 
-After that, the commercial desktop goal is one measured customer workflow that
-passes 20 supervised runs and has evidence of minutes saved. No new framework,
-model, role, dashboard, or paper work outranks those outcome gates.
+The active commercial goal is now one measured customer or internal SuperMega
+desktop workflow that passes 20 supervised runs and records actual operator
+minutes, correction time, and a machine-checkable outcome. Select it from an
+observed task log; do not invent it from a feature list. No new framework,
+model, role, dashboard, mobile adapter, or paper work outranks that outcome
+gate.

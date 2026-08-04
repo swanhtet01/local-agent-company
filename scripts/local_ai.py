@@ -74,7 +74,12 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd automate run NAME --confirm "RUN LOCAL COMPUTER WORKFLOW"
                                               Replay it locally with evidence
   local-ai.cmd web doctor                     Check the local browser runtime
+  local-ai.cmd web install                    Install the pinned local browser CLI
   local-ai.cmd web URL [--expect-text TEXT]   Audit a website and save evidence
+  local-ai.cmd web template OUTPUT            Create a sealed example suite manifest
+  local-ai.cmd web seal MANIFEST [--output PATH]
+                                              Seal an edited manifest to a new file
+  local-ai.cmd web suite MANIFEST [--runs N]  Run a sealed reusable website suite
   local-ai.cmd web supermega [--runs 10]      Check all four product setup pages
   local-ai.cmd supermega [ACTION] ...         Operate SuperMega without retyping paths
   local-ai.cmd ask "QUESTION"                 Ask the grounded read-only local assistant
@@ -151,6 +156,8 @@ Examples:
   local-ai.cmd automate learn invoice-entry --seconds 60
   local-ai.cmd automate preview invoice-entry
   local-ai.cmd web https://supermega.dev --expect-text SuperMega
+  local-ai.cmd web template .\example-suite.json
+  local-ai.cmd web suite .\example-suite.json
   local-ai.cmd web supermega
 
 Everything runs locally by default. Sensitive objectives stop at an owner gate.
@@ -209,6 +216,32 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 ("browser", "doctor"), "web",
                 "Live-check the free local browser automation runtime.",
                 False, False,
+            )
+        if tail[0].lower() == "install":
+            if len(tail) != 1:
+                raise ValueError("web_install_accepts_no_arguments")
+            return LaunchAction(
+                ("browser", "install"), "web",
+                "Install the pinned free browser CLI locally and live-check it.",
+                False, True,
+            )
+        if tail[0].lower() in {"template", "seal", "suite"}:
+            operation = tail[0].lower()
+            if len(tail) < 2:
+                raise ValueError(f"web_{operation}_path_required")
+            mapped = {
+                "template": "suite-template",
+                "seal": "suite-seal",
+                "suite": "suite",
+            }[operation]
+            descriptions = {
+                "template": "Create one sealed local browser-suite manifest.",
+                "seal": "Validate and seal an edited manifest to a new local file.",
+                "suite": "Run a verified customer-configurable read-only browser suite.",
+            }
+            return LaunchAction(
+                ("browser", mapped, *tail[1:]), "web",
+                descriptions[operation], False, True,
             )
         if tail[0].lower() == "supermega":
             return LaunchAction(

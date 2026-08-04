@@ -41,6 +41,9 @@ Do not start with the forty-command coordinator. Start with an outcome:
 
 ```powershell
 cd C:\Users\thesw\Projects\local-agent-company
+.\local-ai.cmd web install
+.\local-ai.cmd web template .\customer-suite.json
+.\local-ai.cmd web suite .\customer-suite.json
 .\local-ai.cmd web supermega
 .\local-ai.cmd web https://your-site.example --expect-text "Expected heading"
 .\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
@@ -59,13 +62,14 @@ This is the first useful browser product path. It does not ask a model to guess
 what happened: it drives the installed Edge runtime through pinned
 `agent-browser` 0.33.2 and checks observable page state.
 
-For a fresh checkout, install the pinned local CLI into the already-ignored
-tool directory. `--ignore-scripts` prevents the package from downloading its
-own Chrome because the workcell reuses system Edge:
+For a fresh checkout, one command installs the pinned local CLI into the
+already-ignored tool directory and performs a live `about:blank` launch. The
+installer disables package scripts so `agent-browser` cannot download its own
+Chrome; the workcell reuses system Edge. It requires npm network access for the
+free package, but no model, browser download, account, or paid API:
 
 ```powershell
-npm.cmd install --prefix .local-company-tools agent-browser@0.33.2 `
-  --ignore-scripts --no-audit --no-fund
+.\local-ai.cmd web install
 .\local-ai.cmd web doctor
 ```
 
@@ -106,6 +110,78 @@ receipt includes SHA-256 and byte length for every evidence file. URL query and
 fragment values and request headers are not stored. The current verified
 SuperMega homepage proof completed in 6.43 seconds with HTTP 200, zero page or
 console errors, zero axe violations, and no model or paid API.
+
+### Reusable 1-20 page release suites
+
+Create and immediately run a sealed example suite:
+
+```powershell
+.\local-ai.cmd web template .\customer-suite.json
+.\local-ai.cmd web suite .\customer-suite.json
+```
+
+To adapt it, edit the manifest's `name`, `requiredRuns`, and `pages`, then write
+a new approved file and run it. The seal command never overwrites either input
+or an existing output:
+
+```powershell
+.\local-ai.cmd web seal .\customer-suite.json `
+  --output .\customer-suite.approved.json
+.\local-ai.cmd web suite .\customer-suite.approved.json
+.\local-ai.cmd web suite .\customer-suite.approved.json --runs 10
+```
+
+Each manifest accepts 1-20 unique pages and 1-10 required passing runs. Every
+page must have an HTTP(S) URL and at least one title or visible-text assertion;
+console-error and accessibility limits are explicit gates:
+
+```json
+{
+  "schema": "supermega.browser-suite-manifest.v1",
+  "name": "Customer public release",
+  "requiredRuns": 10,
+  "pages": [
+    {
+      "id": "home",
+      "url": "https://customer.example/",
+      "expectTitle": "Customer",
+      "expectText": ["Expected heading", "Contact"],
+      "failOnConsoleErrors": true,
+      "maxA11yViolations": 0
+    }
+  ]
+}
+```
+
+The runner validates the seal before creating suite output or opening a
+browser. An edited, unsealed, oversized, unknown-field, duplicate-ID, or
+credential-bearing manifest fails closed. The SHA-256 seal detects accidental
+or unreviewed changes; it is not a digital signature and does not identify who
+approved the file. Never put passwords, tokens, or signed query strings in a
+manifest URL.
+
+Every suite writes a local `suite-receipt.json` with child receipt paths and
+hashes, plus a path-free `portable-summary.json` and `.sha256` sidecars. The
+portable file is the shareable customer report; keep the full receipt and
+screenshots private unless their visible contents have been reviewed.
+
+#### Supervised pilot runbook
+
+1. Run `web install`, then require `web doctor` to report `ready`.
+2. Create a template, define only public or staging pages, and seal the reviewed
+   manifest to a new file.
+3. Run one baseline. Inspect every failed child receipt; do not weaken an
+   assertion merely to obtain a pass.
+4. Deliberately add one impossible text assertion and require status `failed`,
+   exit code 1, and the corresponding `failedCheckNames` entry.
+5. Restore and reseal the approved manifest, then run its required acceptance
+   count. `releaseGatePassed` must be true before delivering the report.
+6. Verify both `.sha256` sidecars and review screenshots for private data before
+   sharing `portable-summary.json`.
+
+This pack is read-only and unauthenticated. Logins, form submissions, purchases,
+deployments, customer contact, and hosted writes require a separately designed
+and explicitly authorized workflow.
 
 ## Actual local computer use
 

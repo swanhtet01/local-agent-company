@@ -9,7 +9,15 @@ import time
 from pathlib import Path
 
 from .capacity import machine_capacity_snapshot
-from .browser_operator import browser_doctor, run_browser_check, run_supermega_release_suite
+from .browser_operator import (
+    browser_doctor,
+    create_suite_template,
+    install_browser_operator,
+    run_browser_check,
+    run_browser_suite,
+    run_supermega_release_suite,
+    seal_suite_manifest,
+)
 from .computer_use import (
     RUN_CONFIRMATION,
     WindowsDesktopAdapter,
@@ -123,6 +131,28 @@ def parser() -> argparse.ArgumentParser:
     )
     browser_sub = browser.add_subparsers(dest="browser_command", required=True)
     browser_sub.add_parser("doctor", help="Live-check the local browser automation runtime")
+    browser_sub.add_parser("install", help="Install the pinned browser CLI and live-check it")
+    browser_template = browser_sub.add_parser(
+        "suite-template", help="Create one sealed, ready-to-run suite manifest"
+    )
+    browser_template.add_argument("output", type=Path)
+    browser_template.add_argument("--name", default="Example Domain release proof")
+    browser_template.add_argument("--page-id", default="home")
+    browser_template.add_argument("--url", default="https://example.com/")
+    browser_template.add_argument("--expect-title", default="Example Domain")
+    browser_template.add_argument("--expect-text", action="append")
+    browser_template.add_argument("--required-runs", type=int, default=1)
+    browser_seal = browser_sub.add_parser(
+        "suite-seal", help="Validate and seal an edited suite manifest to a new file"
+    )
+    browser_seal.add_argument("manifest", type=Path)
+    browser_seal.add_argument("--output", type=Path)
+    browser_suite = browser_sub.add_parser(
+        "suite", help="Run a verified sealed suite manifest and write a portable report"
+    )
+    browser_suite.add_argument("manifest", type=Path)
+    browser_suite.add_argument("--runs", type=int, default=1)
+    browser_suite.add_argument("--timeout-seconds", type=int, default=45)
     browser_supermega = browser_sub.add_parser(
         "supermega-release", help="Check all four public SuperMega product setup pages"
     )
@@ -749,6 +779,27 @@ def main() -> int:
         elif args.command == "browser":
             if args.browser_command == "doctor":
                 result = browser_doctor()
+            elif args.browser_command == "install":
+                result = install_browser_operator()
+            elif args.browser_command == "suite-template":
+                result = create_suite_template(
+                    args.output,
+                    name=args.name,
+                    page_id=args.page_id,
+                    url=args.url,
+                    expected_title=args.expect_title,
+                    expected_text=args.expect_text,
+                    required_runs=args.required_runs,
+                )
+            elif args.browser_command == "suite-seal":
+                result = seal_suite_manifest(args.manifest, args.output)
+            elif args.browser_command == "suite":
+                result = run_browser_suite(
+                    company.home,
+                    args.manifest,
+                    runs=args.runs,
+                    timeout_seconds=args.timeout_seconds,
+                )
             elif args.browser_command == "supermega-release":
                 result = run_supermega_release_suite(
                     company.home, runs=args.runs, timeout_seconds=args.timeout_seconds,
@@ -764,7 +815,7 @@ def main() -> int:
                     timeout_seconds=args.timeout_seconds,
                 )
             print(json.dumps(result, indent=2))
-            if result["status"] not in {"ready", "passed"}:
+            if result["status"] not in {"ready", "passed", "created", "sealed"}:
                 return 1
         elif args.command == "supermega":
             if args.supermega_command == "vision-sales":

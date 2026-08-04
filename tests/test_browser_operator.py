@@ -9,8 +9,13 @@ from unittest.mock import patch
 
 from local_company.browser_operator import (
     browser_doctor,
+    create_suite_template,
+    install_browser_operator,
+    load_sealed_suite_manifest,
     run_browser_check,
+    run_browser_suite,
     run_supermega_release_suite,
+    seal_suite_manifest,
 )
 from local_company.cli import parser
 
@@ -237,8 +242,200 @@ class BrowserOperatorTests(unittest.TestCase):
         ])
         self.assertEqual(args.browser_command, "check")
         self.assertEqual(args.expect_text, ["SuperMega"])
+        suite_args = parser().parse_args([
+            "browser", "suite", "customer.json", "--runs", "3",
+        ])
+        self.assertEqual(suite_args.browser_command, "suite")
+        self.assertEqual(suite_args.manifest, Path("customer.json"))
+        self.assertEqual(suite_args.runs, 3)
         with self.assertRaisesRegex(ValueError, "browser_url_credentials_forbidden"):
             run_browser_check(Path("unused"), "https://user:secret@example.test")
+
+    def test_template_is_sealed_ready_to_run_and_never_overwrites(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "example-suite.json"
+            result = create_suite_template(manifest)
+            definition, digest = load_sealed_suite_manifest(manifest)
+
+            self.assertEqual(result["status"], "created")
+            self.assertEqual(result["manifestSha256"], digest)
+            self.assertEqual(definition["requiredRuns"], 1)
+            self.assertEqual(len(definition["pages"]), 1)
+            self.assertFalse(result["externalActionPerformed"])
+            with self.assertRaises(FileExistsError):
+                create_suite_template(manifest)
+
+    def test_edited_manifest_can_be_resealed_to_a_new_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "original.json"
+            editable = root / "customer.json"
+            create_suite_template(original)
+            value = json.loads(original.read_text(encoding="utf-8"))
+            value.pop("seal")
+            value["name"] = "Customer public website"
+            value["pages"][0]["expectText"] = ["Example Domain"]
+            editable.write_text(json.dumps(value), encoding="utf-8")
+
+            sealed = seal_suite_manifest(editable)
+            destination = Path(str(sealed["path"]))
+            definition, digest = load_sealed_suite_manifest(destination)
+            self.assertEqual(definition["name"], "Customer public website")
+            self.assertEqual(sealed["manifestSha256"], digest)
+            self.assertNotEqual(destination, editable)
+            with self.assertRaises(FileExistsError):
+                seal_suite_manifest(editable)
+
+    def test_tampered_seal_fails_before_browser_or_output_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "tampered.json"
+            create_suite_template(manifest)
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            value["pages"][0]["expectText"] = ["changed after approval"]
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+
+            def should_not_run(*_args, **_kwargs):
+                raise AssertionError("browser opened before manifest integrity check")
+
+            company_home = root / "company"
+            with self.assertRaisesRegex(ValueError, "browser_suite_manifest_seal_mismatch"):
+                run_browser_suite(company_home, manifest, checker=should_not_run)
+            self.assertFalse((company_home / "browser-suites").exists())
+
+    def test_manifest_rejects_more_than_twenty_pages_and_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "too-many.json"
+            pages = [{
+                "id": f"page-{index}", "url": f"https://example.com/{index}",
+                "expectTitle": "Example", "expectText": [],
+                "failOnConsoleErrors": True, "maxA11yViolations": 0,
+            } for index in range(21)]
+            source.write_text(json.dumps({
+                "schema": "supermega.browser-suite-manifest.v1",
+                "name": "Too many", "requiredRuns": 1, "pages": pages,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "browser_suite_manifest_page_count_invalid"):
+                seal_suite_manifest(source)
+
+            pages.pop()
+            pages[0]["surprise"] = True
+            source.write_text(json.dumps({
+                "schema": "supermega.browser-suite-manifest.v1",
+                "name": "Unknown field", "requiredRuns": 1, "pages": pages,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "browser_suite_manifest_page_unknown_field"):
+                seal_suite_manifest(source)
+
+    def test_generic_suite_binds_receipts_and_writes_portable_hashed_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "customer.json"
+            create_suite_template(manifest, required_runs=2)
+            calls: list[str] = []
+
+            def checker(_company_home, url, **_kwargs):
+                calls.append(url)
+                child = root / f"child-{len(calls)}.json"
+                child.write_text(json.dumps({"call": len(calls)}), encoding="utf-8")
+                return {
+                    "status": "passed", "documentStatus": 200,
+                    "title": "Example Domain", "pageErrorCount": 0,
+                    "consoleErrorCount": 0, "accessibilityViolationCount": 2,
+                    "wallSeconds": 0.2, "receiptPath": str(child),
+                    "checks": [{"name": "expected_text_1", "passed": True}],
+                    "evidence": [{"file": "page.png", "sha256": "a" * 64}],
+                }
+
+            result = run_browser_suite(
+                root / "company", manifest, runs=2, checker=checker,
+            )
+            suite_dir = Path(str(result["suiteDirectory"]))
+            portable_path = suite_dir / "portable-summary.json"
+            portable_text = portable_path.read_text(encoding="utf-8")
+            portable = json.loads(portable_text)
+
+            self.assertEqual(result["status"], "passed")
+            self.assertTrue(result["releaseGatePassed"])
+            self.assertEqual(result["pageChecks"], 2)
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn(str(root), portable_text)
+            self.assertNotIn("receiptPath", portable_text)
+            self.assertEqual(portable["manifestSha256"], result["manifest"]["sha256"])
+            self.assertEqual(portable["runs"][0]["pages"][0]["screenshotSha256"], "a" * 64)
+            self.assertTrue((suite_dir / "portable-summary.sha256").is_file())
+            self.assertTrue((suite_dir / "suite-receipt.sha256").is_file())
+
+    def test_generic_suite_never_promotes_a_failed_assertion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "customer.json"
+            create_suite_template(manifest)
+
+            def checker(_company_home, _url, **_kwargs):
+                child = root / "failed-child.json"
+                child.write_text("{}", encoding="utf-8")
+                return {
+                    "status": "failed", "documentStatus": 200,
+                    "title": "Example Domain", "pageErrorCount": 0,
+                    "consoleErrorCount": 0, "accessibilityViolationCount": 2,
+                    "wallSeconds": 0.2, "receiptPath": str(child),
+                    "checks": [{"name": "expected_text_1", "passed": False}],
+                    "evidence": [],
+                }
+
+            result = run_browser_suite(root / "company", manifest, checker=checker)
+            self.assertEqual(result["status"], "failed")
+            self.assertFalse(result["releaseGatePassed"])
+            self.assertEqual(result["failedPageChecks"], 1)
+            self.assertEqual(
+                result["runs"][0]["pages"][0]["failedCheckNames"],
+                ["expected_text_1"],
+            )
+
+    def test_installer_can_bootstrap_the_pinned_cli_without_downloading_a_browser(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            browser = root / "browser.exe"
+            browser.write_bytes(b"browser")
+            fake = FakeAgentBrowser()
+            install_commands: list[list[str]] = []
+
+            def runner(command, **kwargs):
+                values = [str(item) for item in command]
+                if "install" in values:
+                    install_commands.append(values)
+                    tool = (
+                        root / ".local-company-tools" / "node_modules" /
+                        "agent-browser" / "bin" / "agent-browser-win32-x64.exe"
+                    )
+                    tool.parent.mkdir(parents=True)
+                    tool.write_bytes(b"tool")
+                    return subprocess.CompletedProcess(values, 0, "installed", "")
+                return fake(values, **kwargs)
+
+            def which(name: str):
+                return "C:\\fake\\npm.cmd" if name in {"npm.cmd", "npm"} else None
+
+            with (
+                patch.dict(
+                    "os.environ", {"LOCAL_COMPANY_BROWSER_EXECUTABLE": str(browser)},
+                    clear=False,
+                ),
+                patch("local_company.browser_operator.shutil.which", side_effect=which),
+            ):
+                result = install_browser_operator(repository_root=root, runner=runner)
+
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["reason"], "installed_and_ready")
+            self.assertTrue(result["installAttempted"])
+            self.assertTrue(result["networkAccessAttempted"])
+            self.assertFalse(result["browserDownloadAttempted"])
+            self.assertEqual(len(install_commands), 1)
+            self.assertIn("agent-browser@0.33.2", install_commands[0])
+            self.assertIn("--ignore-scripts", install_commands[0])
 
     def test_supermega_suite_binds_four_child_receipts_and_keeps_ten_run_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
