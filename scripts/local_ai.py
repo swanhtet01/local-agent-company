@@ -65,6 +65,14 @@ HELP = r"""Local AI Launchpad
 Use one command for local coding, business teams, research, planning, and queued work.
 
   local-ai.cmd check [model options]          Check Ollama and the configured model
+  local-ai.cmd automate doctor                Check local Windows computer-use readiness
+  local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+                                              Visibly prove the computer-use engine
+  local-ai.cmd automate lab                   Open the safe local workflow practice app
+  local-ai.cmd automate learn NAME            Learn a demonstrated desktop workflow
+  local-ai.cmd automate preview NAME          Resolve it without touching the computer
+  local-ai.cmd automate run NAME --confirm "RUN LOCAL COMPUTER WORKFLOW"
+                                              Replay it locally with evidence
   local-ai.cmd supermega [ACTION] ...         Operate SuperMega without retyping paths
   local-ai.cmd ask "QUESTION"                 Ask the grounded read-only local assistant
   local-ai.cmd code [PROJECT_PATH]            Open a local coding agent in a project
@@ -133,6 +141,12 @@ Examples:
   local-ai.cmd new "New Product" --description "Private product R&D"
   local-ai.cmd use "New Product"
   local-ai.cmd dashboard
+  local-ai.cmd automate doctor
+  local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+  local-ai.cmd automate lab
+  local-ai.cmd automate windows --limit 10
+  local-ai.cmd automate learn invoice-entry --seconds 60
+  local-ai.cmd automate preview invoice-entry
 
 Everything runs locally by default. Sensitive objectives stop at an owner gate.
 No command silently sends messages, spends money, deploys, or exposes a model server.
@@ -169,6 +183,17 @@ def translate(argv: list[str]) -> LaunchAction | None:
     tail = argv[1:]
     if name == "check":
         return LaunchAction(("doctor", *tail), "check", "Check the local model dependency without generating text.", False, False)
+    if name == "automate":
+        values = tail or ["doctor"]
+        operation = values[0].lower()
+        if operation not in {"doctor", "prove", "lab", "windows", "inspect", "capture", "learn", "list", "show", "preview", "run"}:
+            raise ValueError("automate_operation_unknown")
+        mutating = operation in {"prove", "lab", "capture", "learn", "run"}
+        return LaunchAction(
+            ("computer", *values), "automate",
+            "Learn, inspect, preview, or replay one local Windows workflow.",
+            False, mutating,
+        )
     if name == "supermega":
         operation = tail[0].lower() if tail else "status"
         values = tail[1:]

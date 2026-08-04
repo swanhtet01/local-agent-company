@@ -9,6 +9,20 @@ import time
 from pathlib import Path
 
 from .capacity import machine_capacity_snapshot
+from .computer_use import (
+    RUN_CONFIRMATION,
+    WindowsDesktopAdapter,
+    capture_screen,
+    inspect_window,
+    learn_workflow,
+    launch_workflow_lab,
+    list_workflows,
+    load_workflow,
+    preview_workflow,
+    prove_computer_use,
+    run_workflow,
+    windows_observation,
+)
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 from .focus import (
@@ -54,6 +68,55 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    computer = sub.add_parser(
+        "computer", help="Learn, inspect, preview, and replay local Windows workflows"
+    )
+    computer_sub = computer.add_subparsers(dest="computer_command", required=True)
+    computer_sub.add_parser("doctor", help="Check zero-download Windows computer-use readiness")
+    computer_sub.add_parser("lab", help="Open a zero-file local app for safe workflow practice")
+    computer_prove = computer_sub.add_parser(
+        "prove", help="Visibly prove local click, typing, verification, and evidence end to end"
+    )
+    computer_prove.add_argument("--confirm", required=True, choices=[RUN_CONFIRMATION])
+    computer_windows = computer_sub.add_parser("windows", help="List visible local windows")
+    computer_windows.add_argument("--limit", type=int, default=50)
+    computer_inspect = computer_sub.add_parser(
+        "inspect", help="Inspect bounded Windows UI Automation controls in one visible window"
+    )
+    computer_inspect.add_argument("--title", required=True)
+    computer_inspect.add_argument("--limit", type=int, default=100)
+    computer_capture = computer_sub.add_parser(
+        "capture", help="Capture one explicit local training screenshot"
+    )
+    computer_capture.add_argument("output", type=Path)
+    computer_learn = computer_sub.add_parser(
+        "learn", help="Learn clicks, safe keys, and private text placeholders from a demonstration"
+    )
+    computer_learn.add_argument("name")
+    computer_learn.add_argument("--seconds", type=int, default=60)
+    computer_learn.add_argument(
+        "--screenshots", action="store_true",
+        help="Capture post-demonstration app-window references; may contain visible private data",
+    )
+    computer_learn.add_argument("--expect-window-title")
+    computer_learn.add_argument("--expect-control-text")
+    computer_sub.add_parser("list", help="List sealed learned workflows")
+    computer_show = computer_sub.add_parser("show", help="Show one sealed workflow")
+    computer_show.add_argument("name")
+    computer_preview = computer_sub.add_parser(
+        "preview", help="Resolve every window and target without controlling the computer"
+    )
+    computer_preview.add_argument("name")
+    computer_preview.add_argument("--allow-network-apps", action="store_true")
+    computer_preview.add_argument("--allow-shells", action="store_true")
+    computer_run = computer_sub.add_parser(
+        "run", help="Replay one preview-ready workflow after exact local confirmation"
+    )
+    computer_run.add_argument("name")
+    computer_run.add_argument("--confirm", required=True, choices=[RUN_CONFIRMATION])
+    computer_run.add_argument("--allow-network-apps", action="store_true")
+    computer_run.add_argument("--allow-shells", action="store_true")
+    computer_run.add_argument("--no-evidence", action="store_true")
     supermega = sub.add_parser("supermega", help="Run bounded local SuperMega operating capabilities")
     supermega_sub = supermega.add_subparsers(dest="supermega_command", required=True)
     vision_sales = supermega_sub.add_parser("vision-sales", help="Process local Vision leads into owner-review sales drafts")
@@ -607,6 +670,62 @@ def main() -> int:
         elif args.command == "roles":
             for name, purpose in ROLES.items():
                 print(f"{name:16} {purpose}")
+        elif args.command == "computer":
+            desktop = WindowsDesktopAdapter()
+            if args.computer_command == "doctor":
+                result = desktop.doctor()
+            elif args.computer_command == "lab":
+                result = launch_workflow_lab()
+            elif args.computer_command == "prove":
+                result = prove_computer_use(
+                    company.home, args.confirm, adapter=desktop,
+                )
+            elif args.computer_command == "windows":
+                result = windows_observation(desktop, args.limit)
+            elif args.computer_command == "inspect":
+                result = inspect_window(desktop, args.title, args.limit)
+            elif args.computer_command == "capture":
+                result = capture_screen(desktop, args.output)
+            elif args.computer_command == "learn":
+                print(
+                    "Recording starts now. Demonstrate in the target app; press F8 to stop. "
+                    "Typed characters are not stored in the event stream; private TEXT placeholders "
+                    "are created. Screenshots are off by default; --screenshots captures bounded "
+                    "post-demonstration app-window references that may contain visible private data.",
+                    file=sys.stderr,
+                )
+                result = learn_workflow(
+                    company.home, args.name, args.seconds,
+                    screenshots=args.screenshots,
+                    expected_final_title=args.expect_window_title,
+                    expected_final_control_text=args.expect_control_text,
+                    adapter=desktop,
+                )
+            elif args.computer_command == "list":
+                result = list_workflows(company.home)
+            elif args.computer_command == "show":
+                _path, result = load_workflow(company.home, args.name)
+            elif args.computer_command == "preview":
+                result = preview_workflow(
+                    company.home, args.name,
+                    allow_network_apps=args.allow_network_apps,
+                    allow_shells=args.allow_shells, adapter=desktop,
+                )
+            else:
+                result = run_workflow(
+                    company.home, args.name, args.confirm,
+                    allow_network_apps=args.allow_network_apps,
+                    allow_shells=args.allow_shells,
+                    capture_evidence=not args.no_evidence,
+                    adapter=desktop,
+                )
+            print(json.dumps(result, indent=2))
+            if (
+                args.computer_command == "run" and result["status"] != "completed"
+            ) or (
+                args.computer_command == "prove" and result["status"] != "passed"
+            ):
+                return 1
         elif args.command == "supermega":
             if args.supermega_command == "vision-sales":
                 print(json.dumps(run_vision_sales(args.platform_root, args.sales_root), indent=2))

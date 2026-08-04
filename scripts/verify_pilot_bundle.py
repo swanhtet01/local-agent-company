@@ -6,6 +6,7 @@ import json
 import re
 import stat
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 
@@ -140,7 +141,7 @@ def verify_pilot_bundle(archive_path: Path) -> dict[str, object]:
             ).hexdigest()[:12]
             if manifest["bundleId"] != expected_bundle_id:
                 raise BundleVerificationError("bundle_identity_invalid")
-    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+    except (OSError, zipfile.BadZipFile, RuntimeError, zlib.error) as error:
         if isinstance(error, BundleVerificationError):
             raise
         raise BundleVerificationError("bundle_archive_invalid") from error

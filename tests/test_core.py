@@ -3980,10 +3980,12 @@ class CompanyTests(unittest.TestCase):
                 "scripts/stamp_build_manifest.py",
                 "src/local_company/__init__.py", "src/local_company/cli.py",
                 "src/local_company/capacity.py",
+                "src/local_company/computer_use.py",
                 "src/local_company/config.py", "src/local_company/core.py",
                 "src/local_company/dashboard.py", "src/local_company/service.py",
                 "src/local_company/focus.py", "src/local_company/spreadsheet.py",
                 "src/local_company/supermega.py", "src/local_company/mcp_server.py",
+                "src/local_company/workflow_lab.py",
             },
         )
         expected = hashlib.sha256()

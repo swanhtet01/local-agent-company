@@ -68,6 +68,61 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd dashboard
 ```
 
+## Actual local computer use
+
+The product is now organized as **SuperMega Local Workcell**: teach a bounded
+task once, preview it without input, replay it locally, and verify the result.
+The fastest way to establish that the Windows execution engine really works is
+the built-in visible proof:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+.\local-ai.cmd automate doctor
+.\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+```
+
+`prove` launches a no-file/no-network practice app, clicks and types into it,
+checks that the app reached its verified state, captures only that app's client
+area, writes a receipt containing evidence hashes under the private company
+home, and closes the
+process it started. It loads no model and uses no paid API. A `status` of
+`passed`, three completed steps, and `labClosedAfterProof: true` are the
+end-to-end acceptance receipt.
+
+To teach your own local Windows workflow:
+
+```powershell
+.\local-ai.cmd automate lab
+.\local-ai.cmd automate learn my-first-workflow --seconds 60 `
+  --expect-window-title "Verified locally"
+# Demonstrate the clicks and typing, then press F8.
+.\local-ai.cmd automate preview my-first-workflow
+.\local-ai.cmd automate run my-first-workflow `
+  --confirm "RUN LOCAL COMPUTER WORKFLOW"
+```
+
+Learning records click targets, safe keys, timing, and `TEXT_1`, `TEXT_2`, ...
+placeholders; it does not store the characters typed during the demonstration.
+At run time those values are requested privately and replace the currently
+focused field. Training screenshots are off by default. `--screenshots` adds
+post-demonstration app-window references and should be used only when visible
+content is safe to retain. Run evidence can also contain visible field values,
+so use `--no-evidence` when that tradeoff is unacceptable.
+
+The preflight checks the workflow seal, application identity, UI Automation
+targets, fallback coordinates, required values, and policy blockers without
+moving the mouse or typing. Known browser, messaging, and shell processes are
+blocked unless their explicit advanced flags are supplied. The engine halts on
+window drift or failed final checks and records the failure stage instead of
+claiming success.
+
+Current scope is honest: this is native Windows teach/preview/replay, not yet a
+general vision agent. Browser DOM automation, a local OmniParser-style visual
+fallback, workflow editing/repair, and Android/ADB support are planned and are
+not current capabilities. The research comparison, product thesis, SuperMega
+workflow-pack design, acceptance gates, and build-versus-integrate decisions
+are in [PRODUCT.md](PRODUCT.md).
+
 For the pathless SuperMega workflow, double-click **SuperMega AI Workbench** or
 use these aliases. The proof commands reuse the same receipt validation and
 human-review contracts as the general product workflow:
