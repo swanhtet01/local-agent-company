@@ -37,36 +37,75 @@ python .\scripts\check_company_mcp.py
 
 ## One-command launchpad
 
-Start with the general launchpad instead of memorizing the complete internal CLI:
+Do not start with the forty-command coordinator. Start with an outcome:
 
 ```powershell
 cd C:\Users\thesw\Projects\local-agent-company
-.\local-ai.cmd help
-.\local-ai.cmd check
-.\local-ai.cmd plan "Design a useful product I can validate and sell"
-.\local-ai.cmd experiment
-.\local-ai.cmd experiment-run
-.\local-ai.cmd experiment-pending
-.\local-ai.cmd experiment-review-interactive
-.\local-ai.cmd mission-candidate
-.\local-ai.cmd mission-review
-.\local-ai.cmd offer
-.\local-ai.cmd offer-pack
-.\local-ai.cmd validation-pack
-.\local-ai.cmd new "Future Product" --description "General product R&D"
-.\local-ai.cmd use "Future Product"
-.\local-ai.cmd work "Create a 30-day validation plan for that product"
-.\local-ai.cmd cycle --recover-memory
-.\local-ai.cmd autopilot status
-.\local-ai.cmd brief
-.\local-ai.cmd ask "What is usable now and what should I do next?"
-.\local-ai.cmd autopilot install
+.\local-ai.cmd web supermega
+.\local-ai.cmd web https://your-site.example --expect-text "Expected heading"
+.\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
 .\local-ai.cmd code C:\path\to\any-project
-.\local-ai.cmd vision-lite --check
-.\local-ai.cmd vision-lite
-.\local-ai.cmd vision
-.\local-ai.cmd dashboard
+.\local-ai.cmd help
 ```
+
+The first two commands perform real read-only website QA jobs. The third proves
+local Windows input and verification in a safe owned app. The fourth opens the
+existing free local coding specialist. `help` contains the planning, queue,
+data, evidence, and advanced company commands when a specific job needs them.
+
+## Read-only browser QA with evidence
+
+This is the first useful browser product path. It does not ask a model to guess
+what happened: it drives the installed Edge runtime through pinned
+`agent-browser` 0.33.2 and checks observable page state.
+
+For a fresh checkout, install the pinned local CLI into the already-ignored
+tool directory. `--ignore-scripts` prevents the package from downloading its
+own Chrome because the workcell reuses system Edge:
+
+```powershell
+npm.cmd install --prefix .local-company-tools agent-browser@0.33.2 `
+  --ignore-scripts --no-audit --no-fund
+.\local-ai.cmd web doctor
+```
+
+Run a proof against any explicit public or localhost HTTP(S) URL:
+
+```powershell
+.\local-ai.cmd web https://supermega.dev `
+  --expect-title SuperMega `
+  --expect-text SuperMega
+```
+
+SuperMega's first business-specific pack checks the Shop, Plant, Website, and
+Ecommerce setup pages with strong product-specific assertions:
+
+```powershell
+.\local-ai.cmd web supermega
+.\local-ai.cmd web supermega --runs 10
+```
+
+The first command is a fast release baseline. The second is the promotion gate:
+all 40 fresh-browser page checks must pass. The verified 2026-08-05 run passed
+40/40 in 275.44 seconds and returned `release_check_ready`; every page had HTTP
+200, its exact setup and working-sample content, zero page/console errors, and
+zero axe accessibility violations. This evidence covers public read-only setup
+pages only, not authenticated workflows or production writes.
+
+The command starts a fresh unauthenticated browser session, performs no clicks
+or form submissions, and closes the session. It verifies the document status,
+title, visible text, accessibility snapshot, uncaught page errors, and
+screenshot. It also records console messages, an axe accessibility audit, and
+Core Web Vitals. `--fail-on-console-errors` and `--max-a11y-violations N` can
+promote those findings to release gates.
+
+Every run returns `passed` or `failed` and writes `receipt.json`, a full-page
+PNG, sanitized network status, page text, accessibility evidence, error logs,
+and performance data under `<company-home>\browser-proofs\<proof-id>`. The
+receipt includes SHA-256 and byte length for every evidence file. URL query and
+fragment values and request headers are not stored. The current verified
+SuperMega homepage proof completed in 6.43 seconds with HTTP 200, zero page or
+console errors, zero axe violations, and no model or paid API.
 
 ## Actual local computer use
 
@@ -116,12 +155,11 @@ blocked unless their explicit advanced flags are supplied. The engine halts on
 window drift or failed final checks and records the failure stage instead of
 claiming success.
 
-Current scope is honest: this is native Windows teach/preview/replay, not yet a
-general vision agent. Browser DOM automation, a local OmniParser-style visual
-fallback, workflow editing/repair, and Android/ADB support are planned and are
-not current capabilities. The research comparison, product thesis, SuperMega
-workflow-pack design, acceptance gates, and build-versus-integrate decisions
-are in [PRODUCT.md](PRODUCT.md).
+Current scope is honest: Windows teach/preview/replay and read-only browser QA
+work now; arbitrary browser form operation, a local OmniParser-style visual
+fallback, workflow editing/repair, and Android support do not. The research
+comparison, product thesis, new goals, acceptance gates, and
+build-versus-integrate decisions are in [PRODUCT.md](PRODUCT.md).
 
 For the pathless SuperMega workflow, double-click **SuperMega AI Workbench** or
 use these aliases. The proof commands reuse the same receipt validation and

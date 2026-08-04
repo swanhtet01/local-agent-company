@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .capacity import machine_capacity_snapshot
+from .browser_operator import browser_doctor, run_browser_check, run_supermega_release_suite
 from .computer_use import (
     RUN_CONFIRMATION,
     WindowsDesktopAdapter,
@@ -117,6 +118,25 @@ def parser() -> argparse.ArgumentParser:
     computer_run.add_argument("--allow-network-apps", action="store_true")
     computer_run.add_argument("--allow-shells", action="store_true")
     computer_run.add_argument("--no-evidence", action="store_true")
+    browser = sub.add_parser(
+        "browser", help="Run model-free, read-only website checks with local evidence"
+    )
+    browser_sub = browser.add_subparsers(dest="browser_command", required=True)
+    browser_sub.add_parser("doctor", help="Live-check the local browser automation runtime")
+    browser_supermega = browser_sub.add_parser(
+        "supermega-release", help="Check all four public SuperMega product setup pages"
+    )
+    browser_supermega.add_argument("--runs", type=int, default=1)
+    browser_supermega.add_argument("--timeout-seconds", type=int, default=45)
+    browser_check = browser_sub.add_parser(
+        "check", help="Inspect one website and write a pass/fail evidence pack"
+    )
+    browser_check.add_argument("url")
+    browser_check.add_argument("--expect-title")
+    browser_check.add_argument("--expect-text", action="append", default=[])
+    browser_check.add_argument("--fail-on-console-errors", action="store_true")
+    browser_check.add_argument("--max-a11y-violations", type=int)
+    browser_check.add_argument("--timeout-seconds", type=int, default=30)
     supermega = sub.add_parser("supermega", help="Run bounded local SuperMega operating capabilities")
     supermega_sub = supermega.add_subparsers(dest="supermega_command", required=True)
     vision_sales = supermega_sub.add_parser("vision-sales", help="Process local Vision leads into owner-review sales drafts")
@@ -725,6 +745,26 @@ def main() -> int:
             ) or (
                 args.computer_command == "prove" and result["status"] != "passed"
             ):
+                return 1
+        elif args.command == "browser":
+            if args.browser_command == "doctor":
+                result = browser_doctor()
+            elif args.browser_command == "supermega-release":
+                result = run_supermega_release_suite(
+                    company.home, runs=args.runs, timeout_seconds=args.timeout_seconds,
+                )
+            else:
+                result = run_browser_check(
+                    company.home,
+                    args.url,
+                    expected_title=args.expect_title,
+                    expected_text=args.expect_text,
+                    fail_on_console_errors=args.fail_on_console_errors,
+                    max_a11y_violations=args.max_a11y_violations,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            print(json.dumps(result, indent=2))
+            if result["status"] not in {"ready", "passed"}:
                 return 1
         elif args.command == "supermega":
             if args.supermega_command == "vision-sales":

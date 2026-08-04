@@ -66,6 +66,15 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         self.assertEqual(translate(["use", "Future Lab"]).command, ("Future Lab",))
         self.assertEqual(translate(["vision"]).command, ("--vision",))
         self.assertEqual(translate(["vision-lite", "--check"]).command, ("--vision-lite", "--check"))
+        self.assertEqual(translate(["web", "doctor"]).command, ("browser", "doctor"))
+        self.assertEqual(
+            translate(["web", "https://supermega.dev", "--expect-text", "SuperMega"]).command,
+            ("browser", "check", "https://supermega.dev", "--expect-text", "SuperMega"),
+        )
+        self.assertEqual(
+            translate(["web", "supermega", "--runs", "10"]).command,
+            ("browser", "supermega-release", "--runs", "10"),
+        )
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
         self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
         self.assertEqual(translate(["brief"]).command, ())
@@ -130,7 +139,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["mode"], "work")
 
     def test_unknown_or_incomplete_commands_fail_closed(self) -> None:
-        cases = [(["unknown"], "launchpad_command_unknown"), (["ask"], "ask_objective_required"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required"), (["supermega", "ask"], "supermega_ask_objective_required"), (["supermega", "plan"], "supermega_plan_objective_required"), (["supermega", "unknown"], "supermega_operation_unknown")]
+        cases = [(["unknown"], "launchpad_command_unknown"), (["ask"], "ask_objective_required"), (["work"], "work_objective_required"), (["company"], "company_command_required"), (["autopilot"], "autopilot_action_required"), (["web"], "web_url_or_doctor_required"), (["supermega", "ask"], "supermega_ask_objective_required"), (["supermega", "plan"], "supermega_plan_objective_required"), (["supermega", "unknown"], "supermega_operation_unknown")]
         for args, reason in cases:
             error = io.StringIO()
             with self.subTest(args=args), redirect_stderr(error):

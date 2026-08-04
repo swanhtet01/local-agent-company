@@ -2,7 +2,7 @@
 
 > Teach it once. Preview it safely. Run it locally. Prove what changed.
 
-Product review date: 2026-08-04
+Product review date: 2026-08-05
 
 ## Product decision
 
@@ -13,10 +13,10 @@ understand is a private workcell that learns bounded computer tasks, compiles
 them into sealed workflows, replays them without paying for a model on every
 run, verifies the result, and keeps an audit receipt.
 
-The first supported substrate is the local Windows desktop. Coding through
-OpenCode/Ollama and the existing business/data team remain available behind
-the same launcher. Browser and Android substrates are roadmap items, not
-current claims.
+The supported substrates are bounded Windows desktop replay and read-only web
+quality checks. The browser path uses pinned `agent-browser` with the installed
+Edge runtime; coding remains delegated to OpenCode/Ollama. Android is a roadmap
+item, not a current claim.
 
 ## The problem
 
@@ -49,6 +49,8 @@ Run this from the repository:
 ```powershell
 .\local-ai.cmd automate doctor
 .\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+.\local-ai.cmd web doctor
+.\local-ai.cmd web https://supermega.dev --expect-text SuperMega
 ```
 
 The proof launches a built-in no-file/no-network Windows app, resolves its
@@ -57,25 +59,46 @@ clicks **Apply locally**, checks the resulting window title, captures only the
 app client area, writes hashes and a receipt, then closes the owned process. It
 does not call a model or a paid API.
 
-This proves the local execution substrate. It does not prove that an arbitrary
+The web command is a real external read, not a sample app. In the 2026-08-05
+local proof it checked `https://supermega.dev` in 6.43 seconds, observed HTTP
+200 and the expected content, found no uncaught page or console errors, ran an
+automated accessibility audit and performance capture, saved a full-page
+screenshot, and bound eight evidence files by SHA-256. It used no model,
+account, paid API, or authenticated profile and performed no external write.
+
+These prove the two execution substrates. They do not prove that an arbitrary
 third-party workflow is reliable; every real workflow still needs its own
-replay and outcome test.
+outcome checks and repeated acceptance runs.
 
 ## Market and technical review
 
 | System | What it does well | Lesson for this product |
 | --- | --- | --- |
 | [OpenHands](https://docs.openhands.dev/openhands/usage/architecture/runtime) | Sandboxed coding runtime with mounted repositories and action/observation isolation. | Keep coding in a sandbox-capable specialist; do not rebuild a general coding agent in the desktop runner. |
-| [Aider](https://aider.chat/docs/usage/commands.html) and [OpenCode](https://opencode.ai/docs/agents/) | Repository maps, visible diffs, tests, undo, specialist agents, and granular permissions. | Coding value comes from context, verification, and reversibility rather than a large roster of role prompts. |
+| [Aider](https://aider.chat/docs/usage/commands.html), [OpenCode](https://opencode.ai/docs/agents/), and [Goose](https://github.com/aaif-goose/goose) | Mature local coding/automation shells with diffs, permissions, extensions, MCP, and Ollama support. | Keep OpenCode as the default coding shell; add adapters only when they unlock a measured workflow. Do not rebuild another coding agent. |
+| [agent-browser](https://github.com/vercel-labs/agent-browser) and [Playwright MCP](https://github.com/microsoft/playwright-mcp) | Deterministic browser control through DOM/accessibility state, screenshots, JSON output, and local sessions. | Adopt now for browser work. The product adds governed checks, privacy rules, receipts, and business-specific proof packs rather than another browser driver. |
 | [Open Interpreter](https://www.openinterpreter.com/docs/desktop) | A broad desktop assistant spanning apps, files, browser tabs, and local model providers. | Natural-language computer control is useful, but our low-resource wedge should execute proven workflows without an LLM loop. |
 | [Power Automate Desktop](https://learn.microsoft.com/en-us/power-automate/desktop-flows/ui-elements) | Mature UI-element capture, multiple selectors, selector testing, and attended RPA. | A workflow editor, selector repair, variables, branches, and per-step testing are table stakes for a sellable RPA product. |
+| [FlaUI](https://github.com/FlaUI/FlaUI), [pywinauto](https://pywinauto.readthedocs.io/en/latest/getting_started.html), and [Robot Framework](https://robotframework.org/) | Maintained Windows UI Automation wrappers and keyword-driven test/RPA ecosystems. | Evaluate FlaUI as the structured Windows adapter before expanding the hand-written PowerShell bridge; use Robot interoperability for customer-authored suites. |
 | [OpenAdapt](https://docs.openadapt.ai/) | Demonstration-to-deterministic-replay, structural/visual resolution, effect checks, halt-on-drift, and teachable repair. | This is the closest prior art. We should learn from or integrate it, not claim to have invented demonstration compilation. Our narrower wedge is zero-download Windows operation plus SuperMega business packs and low-resource receipts. |
 | [Microsoft UFO](https://github.com/microsoft/UFO) | Hybrid Windows UIA/Win32/API execution, application-specialist agents, and multi-device DAG orchestration. | Prefer structured app APIs and accessibility before vision; add a DAG only after single-workflow reliability is measured. |
 | [UI-TARS Desktop](https://github.com/bytedance/UI-TARS-desktop) and [Agent S](https://github.com/simular-ai/Agent-S) | Screenshot-driven, cross-application autonomous GUI operation and increasingly capable GUI models. | Vision autonomy belongs in an optional planner/repair tier. It is too resource-heavy and probabilistic to be the default replay engine on the Ally. |
 | [Cua](https://github.com/trycua/cua) | Common local/cloud sandbox API across Linux, macOS, Windows, and Android, with trajectory and benchmark tooling. | Integrate a sandbox backend when isolation is required instead of building VM infrastructure ourselves. |
 | [Magentic-UI](https://github.com/microsoft/magentic-ui) | Transparent plans, progress, and human-in-the-loop control for web and coding tasks. | The operator must see the current step, stop the run, inspect evidence, and intervene without decoding raw logs. |
-| [n8n with Ollama](https://n8n.io/integrations/ollama/) | Visual, self-hosted API/data workflows with a large integration ecosystem. | Use or interoperate with n8n for APIs; reserve computer use for applications with no safe structured integration. |
+| [Activepieces](https://github.com/activepieces/activepieces), [Prefect](https://github.com/PrefectHQ/prefect), and [n8n](https://docs.n8n.io/) | Visual integrations or durable Python workflow state, retries, and schedules. | Interoperate instead of replacing the current queue. Prefer components whose license permits the intended commercial packaging; reserve GUI automation for gaps without safer APIs. |
+| [Maestro](https://github.com/mobile-dev-inc/Maestro) and [Appium](https://github.com/appium/appium) | Human-readable mobile flows and a broad modular mobile automation protocol. | Start Android with Maestro flows in an emulator; add Appium only for device/app coverage Maestro cannot provide. |
+| [Promptfoo](https://www.promptfoo.dev/docs/faq/) | Local-first model and agent evaluation with Ollama and executable providers. | Adopt when a model is actually in a decision loop; deterministic browser and desktop checks remain ordinary tests. |
 | [Windows Agent Arena](https://github.com/microsoft/WindowsAgentArena), [OSWorld](https://github.com/xlang-ai/OSWorld), and [AndroidWorld](https://github.com/google-research/android_world) | Reproducible task environments and execution-based evaluation. Windows Agent Arena recommends combining UIA with visual parsing. | Success must be measured by task-state verifiers, not by an agent saying it finished. UIA-first plus optional vision is the correct resolution ladder. |
+
+### Build versus integrate
+
+| Decision | Components | Why |
+| --- | --- | --- |
+| Use now | OpenCode + Ollama, `agent-browser` 0.33.2 + Edge, SQLite queue, current Win32/UIA adapter | Already installed or lightweight, local, measurable, and directly tied to completed work. |
+| Build here | Workflow-pack schemas, policy gates, task-state assertions, evidence minimization, SHA-256 receipts, operator UX, and SuperMega-specific packs | This is where the customer outcome and defensible operating know-how live. |
+| Adapter next | OpenAdapt, FlaUI, Maestro, Promptfoo | Each replaces a difficult subsystem after a real task proves the need. |
+| Interoperate only | Activepieces/n8n, Robot Framework, Appium, Cua/OpenHands sandboxes | Valuable ecosystems, but embedding their full runtime now would add more operations than customer value. |
+| Defer | UI-TARS/OmniParser/local VLMs, multi-machine schedulers, more role agents | The Ally does not need a heavy vision loop for structured pages, and agent count is not an outcome. |
 
 ## What is actually differentiated
 
@@ -120,9 +143,10 @@ local-ai.cmd
     +-- RECEIPT: hashes + bounded evidence + timings + halt stage
             |
             +-- Windows adapter (current: UIA -> window-relative fallback)
-            +-- Browser adapter (planned: DOM/accessibility -> visual fallback)
+            +-- Browser proof adapter (current: agent-browser -> Edge)
+            |       DOM/accessibility + HTTP + JS errors + axe + vitals + screenshot
             +-- Android adapter (planned: ADB/accessibility -> visual fallback)
-            +-- Structured APIs (reuse n8n/MCP/app APIs when safer)
+            +-- Structured APIs (reuse MCP/app APIs or workflow tools when safer)
 
 Optional local intelligence:
     Ollama/OpenCode -> plan, code, classify, or propose a repair
@@ -145,9 +169,11 @@ SuperMega is the first design partner and workflow-pack customer. The workcell
 adds value where SuperMega currently loses time switching between local tools
 or repeating verification:
 
-- **Product and release evidence pack:** open a bounded local build, execute a
-  known smoke path, capture app-only evidence, and return a release-review
-  receipt. Deployment stays gated.
+- **Product and release evidence pack (usable baseline):** inspect a public or
+  local URL in a fresh browser; verify HTTP status, title, expected text,
+  accessibility state, page errors, and screenshot; return a hashed receipt.
+  The homepage proof and four-product SuperMega suite work now;
+  customer-configurable manifests are next. Deployment stays gated.
 - **Shop operations pack:** transfer reviewed local invoice/order fields into a
   desktop system and verify the resulting status. Payable approval, sending,
   and production persistence stay gated.
@@ -166,7 +192,24 @@ has a stable local or test environment and no irreversible side effect.
 
 ## Sellable offer
 
-Do not sell "an AI army." Sell an outcome-specific private workcell:
+Do not sell "an AI army." The first offer available for supervised delivery is
+the **Private Web Release Proof**:
+
+- Install the pinned local browser runtime and reuse the customer's Edge.
+- Define public or staging URLs plus exact title/text/error/accessibility gates.
+- Run a fresh-browser baseline and a ten-run acceptance sequence.
+- Deliver screenshots, sanitized observations, performance data, and hashed
+  receipts; review every failure with the customer.
+- Keep logins, submissions, purchases, deployments, and production writes out
+  of scope unless a later pack receives explicit authority and its own tests.
+
+The SuperMega reference pack passed 40/40 product-page checks in 275.44 seconds
+on the Ally. That supports selling setup and supervised QA engineering; it does
+not prove every customer site, authenticated journey, or business outcome. A
+customer-configurable suite manifest and portable report are the next product
+gate before calling this self-serve.
+
+For desktop work, sell an outcome-specific private workcell:
 
 - Installation and machine readiness check.
 - One mapped and recorded workflow.
@@ -201,39 +244,55 @@ reusable pack requires all of these:
 
 ## Roadmap and build/integrate decisions
 
-### P0 - usable Windows proof and workflow engine (current slice)
+### P0 - usable execution baselines (completed)
 
 - One-command visible proof.
 - Window inventory and bounded UIA inspection.
 - Demonstration capture with typed-value placeholders.
 - Integrity-sealed workflow, read-only preflight, exact confirmation, target
   resolution, app-only evidence, postconditions, and halt-stage receipt.
+- Pinned browser CLI discovery, live doctor, one-process browser batch, HTTP and
+  content assertions, error/a11y/performance capture, screenshot, and receipt.
+- Live SuperMega homepage proof in under seven seconds with no model call.
 
-### P1 - workflow studio and repair loop
+### P1 - SuperMega release journey pack (completed)
 
-- A simple visual timeline/editor instead of raw JSON.
-- Explicit field targets and text modes, variables, retries, waits, branches,
-  loops, and per-step effect checks.
-- Selector ranking using recorded bounds and control ancestry.
-- "Teach the repair" flow and versioned workflow migrations.
-- A local evaluation runner with success rate, latency, drift, and correction
-  dashboards.
+- One command checks Shop, Plant, Website, and Ecommerce with exact title,
+  product heading, and working-sample assertions.
+- Each fresh session captures HTTP, content, page/console error,
+  accessibility, performance, screenshot, and hash-bound receipt evidence.
+- The promotion run passed 40/40 page checks across ten consecutive runs in
+  275.44 seconds with zero page, console, or axe violations.
+- No session signed in, submitted a form, deployed, or mutated hosted data.
 
-### P2 - first SuperMega workflow pack
+### P2 - customer-configurable web proof pack (current goal)
 
-- Interview the actual operator and measure one repeated task.
+- Replace the built-in route list with a validated, integrity-sealed manifest
+  for 1-20 customer URLs and exact assertions, without requiring code edits.
+- Produce a portable suite report with a redacted executive summary and child
+  receipt hashes.
+- Add a deliberate failing fixture and recovery test so fail-closed behavior is
+  demonstrated, not inferred from passing pages.
+- Package a one-command install/doctor path and a supervised pilot runbook.
+
+### P3 - first paid desktop-workflow candidate
+
+- Measure one repeated operator task: runs per week, minutes, error cost,
+  application, and machine-checkable final state.
 - Record a safe test-environment demonstration.
 - Build an outcome oracle and 20-run acceptance set.
-- Package onboarding, runbook, policy, and support—not just the JSON workflow.
+- Package onboarding, policy, recovery, training, and support—not just a JSON
+  workflow.
 
-### P3 - browser substrate
+### P4 - workflow studio and repair loop
 
-- Prefer Playwright/DOM/accessibility and network-safe read operations.
-- Reuse n8n or MCP for stable API steps.
-- Keep final submissions, messages, purchases, credential use, and production
-  writes behind owner confirmation.
+- Add a simple visual timeline/editor instead of raw JSON.
+- Add variables, retries, waits, branches, loops, and per-step effect checks.
+- Rank selectors using recorded bounds and control ancestry.
+- Add a governed "teach the repair" flow and versioned workflow migrations.
+- Report success rate, latency, drift, and human correction time.
 
-### P4 - optional local visual resolver and training data
+### P5 - optional local visual resolver and training data
 
 - Evaluate OmniParser or a smaller local UI grounding model only when UIA/DOM
   cannot identify the target.
@@ -242,13 +301,14 @@ reusable pack requires all of these:
 - Compare structured-only, vision-only, and hybrid resolution on the same test
   cases before adding model weight to the product.
 
-### P5 - Android/mobile adapter
+### P6 - Android/mobile adapter
 
-- Use ADB plus Android accessibility in an emulator first.
+- Use Maestro plus Android accessibility in an emulator first; retain Appium as
+  the broader fallback.
 - Adopt AndroidWorld-style task resets and state verifiers.
 - Move to a real device only after emulator safety and recovery are repeatable.
 
-### P6 - isolation and scale
+### P7 - isolation and scale
 
 - Evaluate Cua/OpenHands-style local sandboxes instead of implementing a VM
   platform.
@@ -273,7 +333,15 @@ professional review.
 
 ## Immediate milestone
 
-The next milestone is not more roles. It is one useful SuperMega workflow pack
-that passes the 20-run reliability gate and saves measured human time. The
-built-in proof establishes the engine baseline; the first real pack establishes
-product value.
+The north-star metric is **verified useful workflows completed per operator
+hour**, not models, roles, commands, or autonomous runtime.
+
+The SuperMega release journey milestone is complete at 40/40 passing page
+checks. The current goal is a customer-configurable, integrity-sealed web suite
+and portable report that can be delivered without changing code. It is complete
+only when a second manifest passes, an intentionally broken assertion fails,
+and a fresh operator can install and run it from the documented commands.
+
+After that, the commercial desktop goal is one measured customer workflow that
+passes 20 supervised runs and has evidence of minutes saved. No new framework,
+model, role, dashboard, or paper work outranks those outcome gates.

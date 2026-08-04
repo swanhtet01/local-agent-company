@@ -3979,6 +3979,7 @@ class CompanyTests(unittest.TestCase):
                 "scripts/runtime_guard.py", "scripts/setup_local_ai.py",
                 "scripts/stamp_build_manifest.py",
                 "src/local_company/__init__.py", "src/local_company/cli.py",
+                "src/local_company/browser_operator.py",
                 "src/local_company/capacity.py",
                 "src/local_company/computer_use.py",
                 "src/local_company/config.py", "src/local_company/core.py",

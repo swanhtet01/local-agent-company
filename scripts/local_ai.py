@@ -73,6 +73,9 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd automate preview NAME          Resolve it without touching the computer
   local-ai.cmd automate run NAME --confirm "RUN LOCAL COMPUTER WORKFLOW"
                                               Replay it locally with evidence
+  local-ai.cmd web doctor                     Check the local browser runtime
+  local-ai.cmd web URL [--expect-text TEXT]   Audit a website and save evidence
+  local-ai.cmd web supermega [--runs 10]      Check all four product setup pages
   local-ai.cmd supermega [ACTION] ...         Operate SuperMega without retyping paths
   local-ai.cmd ask "QUESTION"                 Ask the grounded read-only local assistant
   local-ai.cmd code [PROJECT_PATH]            Open a local coding agent in a project
@@ -147,6 +150,8 @@ Examples:
   local-ai.cmd automate windows --limit 10
   local-ai.cmd automate learn invoice-entry --seconds 60
   local-ai.cmd automate preview invoice-entry
+  local-ai.cmd web https://supermega.dev --expect-text SuperMega
+  local-ai.cmd web supermega
 
 Everything runs locally by default. Sensitive objectives stop at an owner gate.
 No command silently sends messages, spends money, deploys, or exposes a model server.
@@ -193,6 +198,28 @@ def translate(argv: list[str]) -> LaunchAction | None:
             ("computer", *values), "automate",
             "Learn, inspect, preview, or replay one local Windows workflow.",
             False, mutating,
+        )
+    if name == "web":
+        if not tail:
+            raise ValueError("web_url_or_doctor_required")
+        if tail[0].lower() == "doctor":
+            if len(tail) != 1:
+                raise ValueError("web_doctor_accepts_no_arguments")
+            return LaunchAction(
+                ("browser", "doctor"), "web",
+                "Live-check the free local browser automation runtime.",
+                False, False,
+            )
+        if tail[0].lower() == "supermega":
+            return LaunchAction(
+                ("browser", "supermega-release", *tail[1:]), "web",
+                "Run the read-only four-product SuperMega release evidence pack.",
+                False, True,
+            )
+        return LaunchAction(
+            ("browser", "check", *tail), "web",
+            "Read one website in a fresh local browser and write a verified QA evidence pack.",
+            False, True,
         )
     if name == "supermega":
         operation = tail[0].lower() if tail else "status"
