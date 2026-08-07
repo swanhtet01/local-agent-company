@@ -32,6 +32,14 @@ from .computer_use import (
     run_workflow,
     windows_observation,
 )
+from .workflow_pilot import (
+    BASELINE_CONFIRMATION,
+    MINIMUM_ACCEPTANCE_RUNS,
+    REVIEW_CONFIRMATION,
+    review_workflow_pilot_run,
+    start_workflow_pilot,
+    workflow_pilot_status,
+)
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 from .focus import (
@@ -126,6 +134,45 @@ def parser() -> argparse.ArgumentParser:
     computer_run.add_argument("--allow-network-apps", action="store_true")
     computer_run.add_argument("--allow-shells", action="store_true")
     computer_run.add_argument("--no-evidence", action="store_true")
+    computer_pilot_start = computer_sub.add_parser(
+        "pilot-start",
+        help="Bind one sealed workflow to an owner-observed baseline and acceptance gate",
+    )
+    computer_pilot_start.add_argument("name")
+    computer_pilot_start.add_argument("--observed-runs", type=int, required=True)
+    computer_pilot_start.add_argument(
+        "--observed-human-minutes-total", type=float, required=True,
+    )
+    computer_pilot_start.add_argument("--runs-per-week", type=float, required=True)
+    computer_pilot_start.add_argument("--observed-errors", type=int, default=0)
+    computer_pilot_start.add_argument(
+        "--observed-error-cost-total", type=float, default=0,
+    )
+    computer_pilot_start.add_argument("--outcome", required=True)
+    computer_pilot_start.add_argument(
+        "--required-runs", type=int, default=MINIMUM_ACCEPTANCE_RUNS,
+    )
+    computer_pilot_start.add_argument(
+        "--confirm", required=True, choices=[BASELINE_CONFIRMATION],
+    )
+    computer_pilot_status = computer_sub.add_parser(
+        "pilot-status", help="Inspect path-free measured acceptance evidence for one workflow",
+    )
+    computer_pilot_status.add_argument("name")
+    computer_pilot_review = computer_sub.add_parser(
+        "pilot-review", help="Append one human review bound to an integrity-checked run receipt",
+    )
+    computer_pilot_review.add_argument("name")
+    computer_pilot_review.add_argument("run_id")
+    computer_pilot_review.add_argument(
+        "--outcome", required=True, choices=("correct", "incorrect"),
+    )
+    computer_pilot_review.add_argument("--correction-minutes", type=float, required=True)
+    computer_pilot_review.add_argument("--wrong-target-actions", type=int, required=True)
+    computer_pilot_review.add_argument("--external-effect-observed", action="store_true")
+    computer_pilot_review.add_argument(
+        "--confirm", required=True, choices=[REVIEW_CONFIRMATION],
+    )
     browser = sub.add_parser(
         "browser", help="Run model-free, read-only website checks with local evidence"
     )
@@ -761,6 +808,32 @@ def main() -> int:
                     allow_network_apps=args.allow_network_apps,
                     allow_shells=args.allow_shells, adapter=desktop,
                 )
+            elif args.computer_command == "pilot-start":
+                result = start_workflow_pilot(
+                    company.home,
+                    args.name,
+                    observed_runs=args.observed_runs,
+                    observed_human_minutes_total=args.observed_human_minutes_total,
+                    runs_per_week=args.runs_per_week,
+                    observed_errors=args.observed_errors,
+                    observed_error_cost_total=args.observed_error_cost_total,
+                    outcome_label=args.outcome,
+                    required_runs=args.required_runs,
+                    confirmation=args.confirm,
+                )
+            elif args.computer_command == "pilot-status":
+                result = workflow_pilot_status(company.home, args.name)
+            elif args.computer_command == "pilot-review":
+                result = review_workflow_pilot_run(
+                    company.home,
+                    args.name,
+                    args.run_id,
+                    observed_outcome=args.outcome,
+                    correction_minutes=args.correction_minutes,
+                    wrong_target_actions=args.wrong_target_actions,
+                    external_effect_observed=args.external_effect_observed,
+                    confirmation=args.confirm,
+                )
             else:
                 result = run_workflow(
                     company.home, args.name, args.confirm,
@@ -773,7 +846,13 @@ def main() -> int:
             if (
                 args.computer_command == "run" and result["status"] != "completed"
             ) or (
+                args.computer_command == "run"
+                and result.get("pilotRunAnchorRequired") is True
+                and result.get("pilotRunAnchorStatus") != "anchored"
+            ) or (
                 args.computer_command == "prove" and result["status"] != "passed"
+            ) or (
+                args.computer_command == "pilot-status" and result["status"] == "blocked"
             ):
                 return 1
         elif args.command == "browser":

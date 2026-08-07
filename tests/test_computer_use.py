@@ -231,6 +231,11 @@ class ComputerUseWorkflowTests(unittest.TestCase):
                 [("click", "run-button"), ("key", "TAB"), ("text", "private-customer-value")],
             )
             self.assertEqual(result["completedSteps"], 3)
+            self.assertTrue(result["outcomeVerified"])
+            self.assertEqual(len(result["receiptSha256"]), 64)
+            self.assertTrue(
+                Path(result["receiptPath"]).with_name("receipt.sha256").is_file()
+            )
             self.assertTrue(result["localComputerActionsPerformed"])
             receipt = Path(result["receiptPath"]).read_text(encoding="utf-8")
             workflow = (workflow_root(home) / "invoice-entry" / "workflow.json").read_text(

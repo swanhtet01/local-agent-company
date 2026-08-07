@@ -73,6 +73,10 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd automate preview NAME          Resolve it without touching the computer
   local-ai.cmd automate run NAME --confirm "RUN LOCAL COMPUTER WORKFLOW"
                                               Replay it locally with evidence
+  local-ai.cmd automate pilot-start NAME ...  Lock a measured baseline and 20-run gate
+  local-ai.cmd automate pilot-status NAME     Inspect measured acceptance and value
+  local-ai.cmd automate pilot-review NAME RUN_ID ...
+                                              Bind a human outcome review to one run
   local-ai.cmd web doctor                     Check the local browser runtime
   local-ai.cmd web install                    Install the pinned local browser CLI
   local-ai.cmd web URL [--expect-text TEXT]   Audit a website and save evidence
@@ -198,9 +202,15 @@ def translate(argv: list[str]) -> LaunchAction | None:
     if name == "automate":
         values = tail or ["doctor"]
         operation = values[0].lower()
-        if operation not in {"doctor", "prove", "lab", "windows", "inspect", "capture", "learn", "list", "show", "preview", "run"}:
+        if operation not in {
+            "doctor", "prove", "lab", "windows", "inspect", "capture", "learn",
+            "list", "show", "preview", "run", "pilot-start", "pilot-status",
+            "pilot-review",
+        }:
             raise ValueError("automate_operation_unknown")
-        mutating = operation in {"prove", "lab", "capture", "learn", "run"}
+        mutating = operation in {
+            "prove", "lab", "capture", "learn", "run", "pilot-start", "pilot-review",
+        }
         return LaunchAction(
             ("computer", *values), "automate",
             "Learn, inspect, preview, or replay one local Windows workflow.",

@@ -87,6 +87,13 @@ def _atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(value, encoding="ascii")
+    os.replace(temporary, path)
+
+
 def _safe_name(name: str) -> str:
     value = name.strip().lower()
     if not _NAME.fullmatch(value):
@@ -1338,7 +1345,43 @@ def run_workflow(
         "externalActionPerformed": None,
         "externalActionVerification": "not_proven_by_ui_replay",
         "externalActionBoundary": "known network and shell apps are blocked unless explicitly enabled",
+        "outcomeVerified": (
+            status == "completed"
+            and bool(
+                payload.get("expectedFinalWindowTitleContains")
+                or payload.get("expectedFinalControlTextContains")
+            )
+        ),
+        "outcomeVerifier": {
+            "windowTitleAssertionConfigured": bool(
+                payload.get("expectedFinalWindowTitleContains")
+            ),
+            "controlTextAssertionConfigured": bool(
+                payload.get("expectedFinalControlTextContains")
+            ),
+        },
+        "receiptSha256Sidecar": "receipt.sha256",
     }
-    _atomic_json(run_root / "receipt.json", receipt)
-    receipt["receiptPath"] = str(run_root / "receipt.json")
+    receipt_path = run_root / "receipt.json"
+    _atomic_json(receipt_path, receipt)
+    receipt_sha256 = _file_digest(receipt_path)
+    _atomic_text(
+        run_root / "receipt.sha256",
+        f"{receipt_sha256} *{receipt_path.name}\n",
+    )
+    receipt["receiptPath"] = str(receipt_path)
+    receipt["receiptSha256"] = receipt_sha256
+    pilot_path = workflow_path.parent / "pilot" / "pilot.json"
+    receipt["pilotRunAnchorRequired"] = pilot_path.is_file()
+    receipt["pilotRunAnchorStatus"] = "not_required"
+    if pilot_path.is_file():
+        try:
+            from .workflow_pilot import anchor_workflow_pilot_run
+
+            anchor = anchor_workflow_pilot_run(company_home, name, run_id)
+            receipt["pilotRunAnchorStatus"] = "anchored"
+            receipt["pilotRunAnchorSha256"] = anchor["anchorSha256"]
+        except (OSError, UnicodeError, ValueError) as error:
+            receipt["pilotRunAnchorStatus"] = "failed"
+            receipt["pilotRunAnchorError"] = str(error)[:200]
     return receipt
