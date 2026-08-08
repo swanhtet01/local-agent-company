@@ -63,7 +63,7 @@ class LocalCompanyPromptTests(unittest.TestCase):
             output = io.StringIO()
             with patch(
                 "scripts.run_local_company_prompt.installed_ollama_models",
-                return_value={"qwen3.5:0.8b"},
+                return_value={"llama3.2:1b"},
             ), patch(
                 "scripts.run_local_company_prompt.available_memory_bytes", return_value=3 * GIB,
             ), patch(
@@ -98,7 +98,7 @@ class LocalCompanyPromptTests(unittest.TestCase):
                 output = io.StringIO()
                 with patch(
                     "scripts.run_local_company_prompt.installed_ollama_models",
-                    return_value={"qwen3.5:0.8b"},
+                    return_value={"llama3.2:1b"},
                 ), patch(
                     "scripts.run_local_company_prompt.available_memory_bytes", return_value=3 * GIB,
                 ), patch(
@@ -118,7 +118,7 @@ class LocalCompanyPromptTests(unittest.TestCase):
             error = io.StringIO()
             with patch(
                 "scripts.run_local_company_prompt.installed_ollama_models",
-                return_value={"qwen3.5:0.8b"},
+                return_value={"llama3.2:1b"},
             ), patch(
                 "scripts.run_local_company_prompt.available_memory_bytes",
                 return_value=GIB,
@@ -128,8 +128,8 @@ class LocalCompanyPromptTests(unittest.TestCase):
             receipt = json.loads(error.getvalue())
             self.assertEqual(receipt["reason"], "installed_models_memory_blocked")
             self.assertEqual(receipt["admissionAvailableBytes"], GIB)
-            self.assertEqual(receipt["minimumAvailableBytes"], 2 * GIB)
-            self.assertEqual(receipt["memoryShortfallBytes"], GIB)
+            self.assertEqual(receipt["minimumAvailableBytes"], 5 * GIB // 2)
+            self.assertEqual(receipt["memoryShortfallBytes"], 3 * GIB // 2)
             self.assertFalse(receipt["modelCalled"])
 
 

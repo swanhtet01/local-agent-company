@@ -13,12 +13,12 @@ from dataclasses import dataclass
 
 SCHEMA = "local-ai.code-model-selection.v1"
 GIB = 1024**3
-SUPPORTED_MODELS = ("qwen3.5:4b", "qwen3.5:0.8b")
+SUPPORTED_MODELS = ("llama3.2:3b", "llama3.2:1b")
 MINIMUM_AVAILABLE_BYTES = {
-    "qwen3.5:4b": 5 * GIB,
-    # A measured OpenCode cold start consumed about 0.91 GiB after admission.
-    # Keep another full GiB available for the OS, launcher, and review tools.
-    "qwen3.5:0.8b": 2 * GIB,
+    "llama3.2:3b": 4 * GIB,
+    # The 1B model occupies about 1.3 GiB on disk. Keep additional headroom for
+    # its runtime allocation, OpenCode, the OS, and the owner's active apps.
+    "llama3.2:1b": 5 * GIB // 2,
 }
 MODEL_NAME = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,79}$")
 

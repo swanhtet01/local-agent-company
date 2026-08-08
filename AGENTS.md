@@ -7,7 +7,7 @@ Use this repository to run local-first business teams and coding agents without 
 - Use Ollama plus OpenCode for terminal coding work through `local-code.cmd`.
 - Use Bionic Code Projects as an alternative local coding agent and Work Projects for document, research, and analysis tasks.
 - Use LM Studio for model evaluation or an optional OpenAI-compatible loopback API.
-- Run one inference runtime at a time on the ROG Ally. Let `local-code.cmd` prefer `qwen3.5:4b` only when its current-memory gate passes; otherwise use `qwen3.5:0.8b` for small bounded work. The 0.8B model requires at least 2 GiB currently available so its measured cold-start footprint does not consume the OS reserve.
+- Run one inference runtime at a time on the ROG Ally. Let `local-code.cmd` prefer `llama3.2:3b` only when its current-memory gate passes; otherwise use `llama3.2:1b` for small bounded work. The 1B model requires at least 2.5 GiB currently available so its runtime allocation does not consume the OS reserve.
 - Keep servers on `127.0.0.1`, models scale-to-zero, and paid/cloud models opt-in only.
 
 ## Execution

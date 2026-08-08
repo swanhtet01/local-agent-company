@@ -16,7 +16,7 @@ if not defined OPENCODE_EXE for %%I in (opencode.cmd) do set "OPENCODE_EXE=%%~$P
 if not defined OPENCODE_EXE if defined APPDATA set "OPENCODE_EXE=%APPDATA%\npm\opencode.cmd"
 if not exist "%OPENCODE_EXE%" (
   echo ERROR: OpenCode was not found in LOCAL_OPENCODE, PATH, or APPDATA\npm.
-  echo Run: ollama launch opencode --model qwen3.5:0.8b -y
+  echo Run: ollama launch opencode --model llama3.2:1b -y
   exit /b 1
 )
 
