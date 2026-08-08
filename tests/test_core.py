@@ -362,8 +362,9 @@ class StructuredRepairModel(MockModel):
         if "report editor" in system:
             raise AssertionError("Text editor fallback should not run after valid structured output")
         return (
-            "Telemetry is active and deployment passed [EVIDENCE:not-real]. "
-            "This internal draft proposes a local evidence review."
+            "Not verified or performed: Proposed next action: Review one bounded alpha.md "
+            "gap. Assumption: Current readiness remains unverified. Missing proof: Current "
+            "evidence does not prove readiness."
         )
 
     def complete_structured(self, system, prompt, schema):
@@ -5334,6 +5335,7 @@ class CompanyTests(unittest.TestCase):
                 super().__init__("llama3.2:1b", num_predict=2048)
                 self.bounded_caps = []
                 self.specialist_systems = []
+                self.specialist_prompts = []
                 self.structured_prompts = []
 
             def complete(self, system, prompt):
@@ -5342,6 +5344,7 @@ class CompanyTests(unittest.TestCase):
             def complete_bounded(self, system, prompt, *, num_predict):
                 self.bounded_caps.append(num_predict)
                 self.specialist_systems.append(system)
+                self.specialist_prompts.append(prompt)
                 self.last_metrics = {
                     "done": True, "done_reason": "length", "output_tokens": num_predict,
                     "num_predict": num_predict,
@@ -5383,13 +5386,20 @@ class CompanyTests(unittest.TestCase):
                 objective, roles=["operations"], project=project,
             )
             evaluation = company.evaluate_job(job_id)
-            self.assertTrue(evaluation["passed"], {
+            self.assertFalse(evaluation["passed"], {
                 key: value for key, value in evaluation["checks"].items() if not value
             })
+            self.assertFalse(evaluation["checks"]["specialist_advisories_complete"])
             self.assertTrue(evaluation["checks"]["evidence_filename_pairs_valid"])
             self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
             self.assertEqual(evaluation["incomplete_specialist_roles"], ["operations"])
             self.assertEqual(model.bounded_caps, [768])
+            self.assertNotIn("Relevant local sources:", model.specialist_prompts[0])
+            self.assertNotIn("[EVIDENCE:", model.specialist_prompts[0])
+            self.assertNotIn(
+                "Hosted activation remains pending owner review.",
+                model.specialist_prompts[0],
+            )
             self.assertNotIn("UNTRUSTED_RAW_PARTIAL", model.structured_prompts[0])
             self.assertNotIn(
                 "UNTRUSTED_RAW_PARTIAL", report_path.read_text(encoding="utf-8"),
@@ -5420,8 +5430,9 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(policy_events, [{
                 "configured_num_predict": 2048,
                 "effective_num_predict": 768,
-                "policy": "strict-bounded-v1",
+                "policy": "strict-bounded-v2",
                 "role": "operations",
+                "source_context_included": False,
             }])
             specialist_system = model.specialist_systems[0]
             self.assertIn("Proposed next action", specialist_system)
@@ -5514,10 +5525,15 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(resumed_id, job_id)
             self.assertEqual(model.bounded_calls, 1)
             evaluation = company.evaluate_job(job_id)
-            self.assertTrue(evaluation["passed"], {
+            self.assertFalse(evaluation["passed"], {
                 key: value for key, value in evaluation["checks"].items() if not value
             })
             self.assertTrue(evaluation["checks"]["model_stopped_cleanly"])
+            self.assertFalse(evaluation["checks"]["specialist_advisories_complete"])
+            self.assertIn(
+                "regenerate_one_complete_bounded_specialist_advisory_before_retry",
+                company.quality_recovery_summary(job_id)["repair_actions"],
+            )
             with closing(sqlite3.connect(company.db_path)) as db:
                 result = db.execute(
                     "SELECT result FROM assignments WHERE job_id=? AND role='operations'",
@@ -6408,7 +6424,14 @@ class CompanyTests(unittest.TestCase):
                 "Not verified or performed:" in result for result in assignment_results
             ))
             self.assertTrue(all("EVIDENCE:" not in result for result in assignment_results))
-            self.assertTrue(all("draft withheld" in result for result in assignment_results))
+            self.assertTrue(all("alpha.md" not in result for result in assignment_results))
+            self.assertTrue(all("draft withheld" not in result for result in assignment_results))
+            self.assertTrue(all(
+                "Proposed next action:" in result
+                and "Assumption:" in result
+                and "Missing proof:" in result
+                for result in assignment_results
+            ))
             self.assertFalse(any(
                 "executive chair" in system or "report editor" in system
                 for system, _ in model.complete_calls
@@ -6665,8 +6688,8 @@ class CompanyTests(unittest.TestCase):
             def last_metrics(self):
                 return {
                     "done": True,
-                    "done_reason": "length",
-                    "output_tokens": 512,
+                    "done_reason": "stop",
+                    "output_tokens": 64,
                     "num_predict": 512,
                 }
 

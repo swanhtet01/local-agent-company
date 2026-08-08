@@ -219,11 +219,12 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-30.19"
+EVALUATOR_VERSION = "local-quality-2026-07-30.20"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 768
+STRICT_SPECIALIST_GENERATION_POLICY = "strict-bounded-v2"
 EXECUTION_HEARTBEAT_SECONDS = 5.0
 DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v3"
 LEGACY_DATASET_PROFILE_SCHEMA = "local-company.dataset-profile.v2"
@@ -940,6 +941,39 @@ def mark_unverified_advisory(text: str, limit: int = 90) -> str:
     return mark_unverified_draft(
         "specialist draft withheld after advisory clause normalization failed", limit,
     )
+
+
+def _strict_specialist_advisory_is_usable(text: str, limit: int = 90) -> bool:
+    """Require the exact canonical advisory that the downstream CEO contract accepts."""
+    if not isinstance(text, str) or not text.startswith("Not verified or performed:"):
+        return False
+    if not 1 <= limit <= 90 or count_words(text) > limit:
+        return False
+    if any(
+        marker in text.casefold()
+        for marker in (
+            "specialist draft withheld", "incomplete model output",
+            "no substantive specialist draft",
+        )
+    ):
+        return False
+    if any(
+        len(re.findall(re.escape(label), text, flags=re.IGNORECASE)) != 1
+        for label in ("Proposed next action:", "Assumption:", "Missing proof:")
+    ):
+        return False
+    if re.search(
+        r"[\\`]|\b[a-z][a-z0-9+.-]*://|\b[A-Za-z]:[\\/]|"
+        r"(?:^|\s)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+(?:\s|$)|"
+        r"\b[A-Za-z0-9][A-Za-z0-9._-]{0,80}[.,;:]"
+        r"(?:md|json|toml|ya?ml|csv|sql|html|css|tsx?|m?js|py|ps1)\b|"
+        r"\b(?:dot|comma|period)\s+"
+        r"(?:md|json|toml|ya?ml|csv|sql|html|css|tsx?|m?js|py|ps1)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return mark_unverified_advisory(text, limit) == text
 
 
 def _proposal_clause(text: str, forbidden_source_names: set[str]) -> str:
@@ -6232,7 +6266,8 @@ class Company:
                 "SELECT detail FROM events WHERE job_id=? AND kind='model_metrics'", (job_id,)
             )]
             isolation_details = [row[0] for row in db.execute(
-                "SELECT detail FROM events WHERE job_id=? AND kind='specialist_draft_isolated'",
+                "SELECT detail FROM events WHERE job_id=? AND kind='specialist_draft_isolated' "
+                "ORDER BY id",
                 (job_id,),
             )]
         report_bytes = b""
@@ -6305,8 +6340,7 @@ class Company:
                 continue
             if isinstance(metric, dict):
                 parsed_metrics.append(metric)
-        isolated_event_roles: set[str] = set()
-        incomplete_event_roles: set[str] = set()
+        isolation_status_by_role: dict[str, str] = {}
         for detail in isolation_details:
             try:
                 isolated = json.loads(detail)
@@ -6320,9 +6354,16 @@ class Company:
                 }
                 and isinstance(isolated.get("role"), str)
             ):
-                isolated_event_roles.add(isolated["role"])
-                if isolated["status"] == "incomplete_withheld":
-                    incomplete_event_roles.add(isolated["role"])
+                isolation_status_by_role[isolated["role"]] = isolated["status"]
+        isolated_event_roles = set(isolation_status_by_role)
+        incomplete_event_roles = {
+            role for role, status in isolation_status_by_role.items()
+            if status == "incomplete_withheld"
+        }
+        complete_advisory_event_roles = {
+            role for role, status in isolation_status_by_role.items()
+            if status == "unverified_not_performed"
+        }
         isolated_assignment_roles = {
             role for role, status, result in assignment_rows
             if status == "complete"
@@ -6355,6 +6396,21 @@ class Company:
             limit = int(specialist_limit.group(1))
             checks["specialists_within_word_limit"] = bool(assignment_rows) and all(
                 count_words(result) <= limit for _, _, result in assignment_rows
+            )
+        if _requires_strict_grounded_synthesis(objective):
+            advisory_limit = min(
+                int(specialist_limit.group(1)) if specialist_limit else 90,
+                90,
+            )
+            assignment_roles = {role for role, _, _ in assignment_rows}
+            checks["specialist_advisories_complete"] = bool(assignment_rows) and bool(
+                assignment_roles == complete_advisory_event_roles
+                and not incomplete_specialist_roles
+                and all(
+                    status == "complete"
+                    and _strict_specialist_advisory_is_usable(result, advisory_limit)
+                    for _, status, result in assignment_rows
+                )
             )
         synthesis_limit = re.search(
             r"\bexecutive synthesis\b.*?\bat most\s+(\d+)\s+words?\b",
@@ -7806,7 +7862,10 @@ class Company:
                         )
                         isolation_status = "incomplete_withheld"
                     else:
-                        normalized = mark_unverified_advisory(original, quarantine_limit)
+                        normalized = mark_unverified_advisory(
+                            _redact_frozen_source_references(original, sources),
+                            quarantine_limit,
+                        )
                         isolation_status = "unverified_not_performed"
                     normalized_results.append((item, normalized))
                     resumed_isolations.append(
@@ -7877,8 +7936,9 @@ class Company:
                                     {
                                         "configured_num_predict": self.model.num_predict,
                                         "effective_num_predict": strict_specialist_num_predict,
-                                        "policy": "strict-bounded-v1",
+                                        "policy": STRICT_SPECIALIST_GENERATION_POLICY,
                                         "role": item.role,
+                                        "source_context_included": False,
                                     },
                                     sort_keys=True,
                                 ),
@@ -7904,7 +7964,7 @@ class Company:
                         f"\n\nHard output limit: at most {specialist_word_limit} words. "
                         "Count before responding and remove anything over the limit."
                     )
-                if source_context:
+                if source_context and not strict_evidence_pairs_required:
                     prompt += f"\n\nRelevant local sources:\n{source_context}"
                 if results:
                     prior_work = bounded_context_blocks([
@@ -7943,7 +8003,10 @@ class Company:
                         )
                         isolation_status = "incomplete_withheld"
                     else:
-                        result = mark_unverified_advisory(result, quarantine_limit)
+                        result = mark_unverified_advisory(
+                            _redact_frozen_source_references(result, sources),
+                            quarantine_limit,
+                        )
                     result_trimmed = original_word_count > quarantine_limit
                 elif specialist_word_limit:
                     result, result_trimmed = truncate_words(result, specialist_word_limit)
@@ -9224,6 +9287,10 @@ class Company:
             (
                 {"specialists_within_word_limit", "synthesis_within_word_limit"},
                 "shorten_sections_to_requested_word_limits",
+            ),
+            (
+                {"specialist_advisories_complete"},
+                "regenerate_one_complete_bounded_specialist_advisory_before_retry",
             ),
             (
                 {
