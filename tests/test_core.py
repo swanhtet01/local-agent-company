@@ -7068,6 +7068,20 @@ class CompanyTests(unittest.TestCase):
         )
         self.assertNotIn("Execute", unsafe_action)
 
+        malformed_safe_output = mark_unverified_advisory(
+            "Here is a concise brief: ## Proposed next action Reconcile the ledger, "
+            "Assumption: persistence/security remain not ready, Missing proof: None, "
+            "## Assumptions The evidence may be current, ## Missing proof None.",
+            90,
+        )
+        self.assertEqual(
+            malformed_safe_output,
+            "Not verified or performed: Proposed next action: Review one bounded local evidence "
+            "gap. Assumption: Current readiness remains unverified. Missing proof: Current "
+            "evidence does not prove readiness.",
+        )
+        self.assertNotIn("##", malformed_safe_output)
+
     def test_structured_compaction_preserves_templates_and_atomic_citations(self):
         evidence = "[EVIDENCE:0123456789abcdef]"
         labels = [

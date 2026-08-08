@@ -866,6 +866,11 @@ _DANGLING_ADVISORY_WORDS = {
 
 def mark_unverified_advisory(text: str, limit: int = 90) -> str:
     """Render three complete bounded advisory clauses without granting evidentiary status."""
+    fallback_advisory = (
+        "Not verified or performed: Proposed next action: Review one bounded local evidence gap. "
+        "Assumption: Current readiness remains unverified. "
+        "Missing proof: Current evidence does not prove readiness."
+    )
     rendered = mark_unverified_draft(text)
     if "draft withheld" in rendered or "no substantive specialist draft" in rendered:
         return mark_unverified_draft(text, limit)
@@ -877,7 +882,9 @@ def mark_unverified_advisory(text: str, limit: int = 90) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not match:
-        return mark_unverified_draft(text, limit)
+        return fallback_advisory if count_words(fallback_advisory) <= limit else mark_unverified_draft(
+            "specialist draft withheld after advisory clause normalization failed", limit,
+        )
 
     def bounded_value(value: str, word_limit: int, fallback: str) -> str:
         bounded, truncated = truncate_words(value.strip(" ,."), word_limit)

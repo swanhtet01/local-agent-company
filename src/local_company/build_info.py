@@ -7,5 +7,5 @@ Git reads to construct its health response.
 """
 
 RUNTIME_BUILD_SCHEMA = "local-company.runtime-build.v2"
-BUILD_ID = "local-build-20260808.1"
-SOURCE_SHA256 = "2034571e18e263188b004b346502c950a0d6ee23ebb2044b8b6297fcd1913358"
+BUILD_ID = "local-build-20260808.2"
+SOURCE_SHA256 = "118102fbf31c53807109b62d6e235032e898a63cf1588fc2ca753744efdf55be"
