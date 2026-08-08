@@ -24,6 +24,9 @@ from local_company.config import (  # noqa: E402
     COMPANY_STORE_SCHEMA, default_company_home,
     read_validated_company_instance_id, valid_company_instance_id,
 )
+from local_company.model_policy import (  # noqa: E402
+    DEFAULT_LOCAL_MODEL, is_supported_local_model, require_local_llama_model,
+)
 
 if __package__:
     from .check_live_build import (
@@ -40,7 +43,7 @@ else:
 
 
 READINESS_SCHEMA = "local-company.readiness.v1"
-DEFAULT_MODEL = os.getenv("LOCAL_COMPANY_MODEL", "qwen3.5:0.8b")
+DEFAULT_MODEL = os.getenv("LOCAL_COMPANY_MODEL", DEFAULT_LOCAL_MODEL)
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 MAX_OLLAMA_BYTES = 256 * 1024
 MAX_MODELS = 4096
@@ -172,6 +175,9 @@ def ollama_model_installed(required_model: str) -> bool:
     """Check one exact model name through a bounded fixed loopback request."""
     if not _valid_model_name(required_model):
         raise OllamaProbeError("invalid_model_name")
+    if not is_supported_local_model(required_model):
+        raise OllamaProbeError("unsupported_model")
+    required_model = require_local_llama_model(required_model)
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _NoRedirectHandler(),
     )
@@ -281,7 +287,7 @@ def _runtime_status(health: dict[str, object], required_model: str) -> str:
     if type(provider) is not str or provider not in {"ollama", "mock", "unknown"}:
         return "invalid"
     if provider == "ollama":
-        if not _valid_model_name(model):
+        if not _valid_model_name(model) or not is_supported_local_model(model):
             return "invalid"
         if type(endpoint) is not str or endpoint not in {"loopback_default", "nonlocal"}:
             return "invalid"
@@ -322,6 +328,13 @@ def run_readiness(
         return _payload(
             "indeterminate", components, ["invalid_model_name"], "fix_model_name",
         ), 2
+    if not is_supported_local_model(required_model):
+        components["model_installed"] = "invalid"
+        return _payload(
+            "indeterminate", components, ["unsupported_model"],
+            "use_supported_llama_model",
+        ), 2
+    required_model = require_local_llama_model(required_model)
 
     try:
         disk = check_project(PROJECT_ROOT)

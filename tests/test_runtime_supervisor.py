@@ -14,7 +14,7 @@ from scripts import check_runtime_supervisor as supervisor
 from scripts import runtime_guard
 
 
-MODEL = "qwen3.5:0.8b"
+MODEL = "llama3.2:1b"
 TASK_NAME = "SuperMega Local Runtime Guard"
 NOW_NS = 2_000_000_000_000_000_000
 IDENTITY = {

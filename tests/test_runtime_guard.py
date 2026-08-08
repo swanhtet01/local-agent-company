@@ -17,7 +17,7 @@ from scripts.check_readiness import OllamaProbeError
 from scripts.stamp_build_manifest import ManifestError
 
 
-MODEL = "qwen3.5:0.8b"
+MODEL = "llama3.2:1b"
 IDENTITY = {
     "schema": "local-company.store.v1",
     "instance_id": "123e4567e89b42d3a456426614174000",
@@ -1316,7 +1316,7 @@ result = guard._payload(
     blockers=[],
     action="none",
     changes=[],
-    model="qwen3.5:0.8b",
+    model="llama3.2:1b",
 )
 guard.read_company_identity = lambda selected_home: identity
 guard._runtime_guard_lock = lambda selected_home: contextlib.nullcontext()

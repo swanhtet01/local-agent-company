@@ -33,9 +33,9 @@ else:
 SCHEMA = "local-ai.setup.v1"
 OPENCODE_SCHEMA = "https://opencode.ai/config.json"
 OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-AGENT_MODEL = "qwen3.5:0.8b"
-QUALITY_MODEL = "qwen3.5:4b"
-ASK_MODEL = "qwen2.5-coder:0.5b"
+AGENT_MODEL = "llama3.2:1b"
+QUALITY_MODEL = "llama3.2:3b"
+ASK_MODEL = AGENT_MODEL
 STARTER_PROJECT = "Local AI Product Lab"
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROCESS_OUTPUT_BYTES = 256_000
@@ -257,15 +257,15 @@ def _merge_config(existing: dict[str, Any], root: Path) -> tuple[dict[str, Any],
         if "ollama" in disabled:
             raise SetupError("ollama_provider_disabled")
     enabled = merged.get("enabled_providers")
-    if enabled is not None:
-        if not isinstance(enabled, list) or any(not isinstance(item, str) for item in enabled):
-            raise SetupError("opencode_enabled_providers_invalid")
-        if "ollama" not in enabled:
-            merged["enabled_providers"] = [*enabled, "ollama"]
-            changes.append("ollama_enabled")
+    if enabled is not None and (
+        not isinstance(enabled, list) or any(not isinstance(item, str) for item in enabled)
+    ):
+        raise SetupError("opencode_enabled_providers_invalid")
+    if enabled != ["ollama"]:
+        merged["enabled_providers"] = ["ollama"]
+        changes.append("llama_only_provider_policy_configured")
 
     providers = _dict(merged.get("provider"), "opencode_provider_config_invalid")
-    merged["provider"] = providers
     ollama = _dict(providers.get("ollama"), "ollama_provider_config_invalid")
     if ollama:
         if ollama.get("npm") not in {None, "@ai-sdk/openai-compatible"}:
@@ -273,28 +273,22 @@ def _merge_config(existing: dict[str, Any], root: Path) -> tuple[dict[str, Any],
         options = ollama.get("options")
         if options is not None and options != {"baseURL": OLLAMA_BASE_URL}:
             raise SetupError("ollama_provider_endpoint_conflict")
-        models = _dict(ollama.get("models"), "ollama_models_config_invalid")
-    else:
-        models = {}
+        _dict(ollama.get("models"), "ollama_models_config_invalid")
     desired_models = {
-        AGENT_MODEL: {"name": "Qwen 3.5 0.8B - fast local"},
-        ASK_MODEL: {"name": "Qwen 2.5 Coder 0.5B - drafting only (no agent tools)"},
-        QUALITY_MODEL: {"name": "Qwen 3.5 4B - local coding"},
+        AGENT_MODEL: {"name": "Llama 3.2 1B - low-memory local default"},
+        QUALITY_MODEL: {"name": "Llama 3.2 3B - memory-gated local quality"},
     }
-    for name, value in desired_models.items():
-        if models.get(name) != value:
-            models[name] = value
-            changes.append(f"model_registered:{name}")
     desired_ollama = {
         **ollama,
         "npm": "@ai-sdk/openai-compatible",
         "name": "Ollama (local only)",
         "options": {"baseURL": OLLAMA_BASE_URL},
-        "models": models,
+        "models": desired_models,
     }
-    if providers.get("ollama") != desired_ollama:
-        providers["ollama"] = desired_ollama
+    desired_providers = {"ollama": desired_ollama}
+    if providers != desired_providers:
         changes.append("ollama_provider_configured")
+    merged["provider"] = desired_providers
 
     mcp = _dict(merged.get("mcp"), "opencode_mcp_config_invalid")
     merged["mcp"] = mcp
@@ -334,12 +328,12 @@ def _merge_config(existing: dict[str, Any], root: Path) -> tuple[dict[str, Any],
         agents["local-company"] = desired_agent
         changes.append("local_company_agent_configured")
 
-    if "model" not in merged:
+    if merged.get("model") != f"ollama/{AGENT_MODEL}":
         merged["model"] = f"ollama/{AGENT_MODEL}"
-        changes.append("default_model_added")
-    if "small_model" not in merged:
+        changes.append("default_model_configured")
+    if merged.get("small_model") != f"ollama/{AGENT_MODEL}":
         merged["small_model"] = f"ollama/{AGENT_MODEL}"
-        changes.append("small_model_added")
+        changes.append("small_model_configured")
     return merged, changes
 
 
@@ -672,7 +666,7 @@ def _actions(
         actions.append("install_opencode")
     if dependencies["agentModelInstalled"] is not True:
         actions.append(f"ollama_pull_{AGENT_MODEL}")
-    if dependencies["askModelInstalled"] is not True:
+    if ASK_MODEL != AGENT_MODEL and dependencies["askModelInstalled"] is not True:
         actions.append(f"ollama_pull_{ASK_MODEL}")
     if mcp_self_test["ready"] is not True:
         actions.append("inspect_company_mcp")

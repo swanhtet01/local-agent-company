@@ -402,7 +402,7 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 "autoPermissionsEnabled": False, "externalActionPerformed": False,
                 "modelCalled": True, "ok": True, "paidApiUsed": False,
                 "reason": "accepted", "status": "accepted", "wallSeconds": 42.5,
-                "model": "qwen3.5:0.8b", "toolActions": ["status"],
+                "model": "llama3.2:1b", "toolActions": ["status"],
                 "toolCallCount": 1, "response": "Company ready.", "observedCost": 0.0,
                 "modelUnloadedAfterRun": True, "agentExitCode": 0,
                 "admissionAvailableBytes": 3 * 1024**3,

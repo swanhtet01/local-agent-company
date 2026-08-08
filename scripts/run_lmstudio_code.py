@@ -17,8 +17,8 @@ except ImportError:
 
 
 SCHEMA = "local-ai.lmstudio-code.v1"
-MODEL_KEY = "qwen/qwen3.5-4b"
-MODEL_IDENTIFIER = "supermega-qwen35-4b"
+MODEL_KEY = "meta-llama/llama-3.2-3b-instruct"
+MODEL_IDENTIFIER = "supermega-llama32-3b"
 OPENCODE_MODEL = f"lmstudio/{MODEL_IDENTIFIER}"
 BASE_URL = "http://127.0.0.1:1234/v1"
 MINIMUM_AVAILABLE_BYTES = 5 * GIB
@@ -208,7 +208,7 @@ def _cleanup(lms: Path, *, load_attempted: bool, server_started: bool) -> tuple[
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Run OpenCode on the existing LM Studio Qwen 3.5 4B model.")
+    result = argparse.ArgumentParser(description="Run OpenCode on an explicitly installed LM Studio Llama 3.2 3B model.")
     result.add_argument("--lmstudio", action="store_true", help=argparse.SUPPRESS)
     result.add_argument("--check", action="store_true")
     result.add_argument("--agent", choices=["vision-product"])

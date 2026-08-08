@@ -26,7 +26,7 @@ from scripts.check_readiness import (
 from scripts.stamp_build_manifest import ManifestError
 
 
-MODEL = "qwen3.5:0.8b"
+MODEL = "llama3.2:1b"
 DIGEST = "a" * 64
 INSTANCE_ID = "123e4567e89b42d3a456426614174000"
 
@@ -419,7 +419,7 @@ class ReadinessTests(unittest.TestCase):
 
         model_mismatch = _health()
         model_mismatch["runtime"] = {
-            "provider": "ollama", "model": "other:latest",
+            "provider": "ollama", "model": "llama3.2:3b",
             "endpoint": "loopback_default",
         }
         payload, exit_code = self._run(health=model_mismatch)
@@ -527,6 +527,12 @@ class ReadinessTests(unittest.TestCase):
             self.assertEqual(payload["blockers"], ["invalid_model_name"])
             self.assertIsNone(payload["required_model"])
 
+        payload, exit_code = run_readiness("gemma3:latest")
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["blockers"], ["unsupported_model"])
+        self.assertEqual(payload["action"], "use_supported_llama_model")
+        self.assertIsNone(payload["required_model"])
+
     def test_ollama_probe_is_fixed_bounded_proxy_free_and_strict(self):
         payload = {"models": [{"name": MODEL, "digest": DIGEST}]}
         opener = Mock()
@@ -535,6 +541,7 @@ class ReadinessTests(unittest.TestCase):
             "scripts.check_readiness.urllib.request.build_opener", return_value=opener,
         ) as build_opener:
             self.assertTrue(ollama_model_installed(MODEL))
+            self.assertTrue(ollama_model_installed("LLAMA3.2:1B"))
         proxy_handler, redirect_handler = build_opener.call_args.args
         self.assertEqual(proxy_handler.proxies, {})
         self.assertIsNone(redirect_handler.redirect_request())
@@ -562,13 +569,18 @@ class ReadinessTests(unittest.TestCase):
             self.assertTrue(ollama_model_installed(MODEL))
 
         alias = _Response({
-            "models": [{"name": "gemma3:latest", "digest": DIGEST}],
+            "models": [{"name": MODEL, "digest": DIGEST}],
         }, "Application/JSON; charset=utf-8")
         opener.open.return_value = alias
         with patch(
             "scripts.check_readiness.urllib.request.build_opener", return_value=opener,
         ):
-            self.assertTrue(ollama_model_installed("gemma3"))
+            self.assertTrue(ollama_model_installed(MODEL))
+
+        with patch("scripts.check_readiness.urllib.request.build_opener") as build_opener:
+            with self.assertRaisesRegex(OllamaProbeError, "unsupported_model"):
+                ollama_model_installed("gemma3:latest")
+        build_opener.assert_not_called()
 
         oversized = _Response(payload)
         oversized.body = b"x" * (MAX_OLLAMA_BYTES + 1)

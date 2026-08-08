@@ -53,6 +53,7 @@ from .focus import (
     read_execution_focus,
     set_execution_focus,
 )
+from .model_policy import DEFAULT_LOCAL_MODEL
 from .supermega import (
     create_vision_founding_pilot_packages,
     create_vision_sales_intake,
@@ -67,7 +68,7 @@ from .supermega import (
 
 
 DEFAULT_PROVIDER = os.getenv("LOCAL_COMPANY_PROVIDER", "ollama")
-DEFAULT_MODEL = os.getenv("LOCAL_COMPANY_MODEL", "qwen3.5:0.8b")
+DEFAULT_MODEL = os.getenv("LOCAL_COMPANY_MODEL", DEFAULT_LOCAL_MODEL)
 
 
 def find_ollama_executable() -> str | None:

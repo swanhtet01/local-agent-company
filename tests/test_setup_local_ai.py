@@ -71,7 +71,7 @@ class SetupLocalAiTests(unittest.TestCase):
             self.assertFalse(paths.company_home.exists())
             self.assertEqual(list(paths.desktop.iterdir()), [])
 
-    def test_apply_preserves_unrelated_config_backs_up_and_is_idempotent(self) -> None:
+    def test_apply_enforces_llama_only_config_backs_up_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             paths = self.paths(base)
@@ -105,11 +105,11 @@ class SetupLocalAiTests(unittest.TestCase):
 
             configured = json.loads(paths.config.read_text(encoding="utf-8"))
             self.assertEqual(configured["theme"], "system")
-            self.assertEqual(configured["model"], "private_fixture/cloud-model")
-            self.assertEqual(
-                configured["provider"]["private_fixture"]["options"]["apiKey"],
-                "DO-NOT-RETURN",
-            )
+            self.assertEqual(configured["model"], f"ollama/{AGENT_MODEL}")
+            self.assertEqual(configured["small_model"], f"ollama/{AGENT_MODEL}")
+            self.assertEqual(configured["enabled_providers"], ["ollama"])
+            self.assertEqual(set(configured["provider"]), {"ollama"})
+            self.assertNotIn("DO-NOT-RETURN", json.dumps(configured))
             self.assertIn(AGENT_MODEL, configured["provider"]["ollama"]["models"])
             self.assertIn(ASK_MODEL, configured["provider"]["ollama"]["models"])
             self.assertFalse(configured["tools"]["local_company_*"])
@@ -209,7 +209,7 @@ class SetupLocalAiTests(unittest.TestCase):
     def test_check_distinguishes_configuration_from_missing_dependencies(self) -> None:
         missing = ready_dependencies()
         missing["openCodeInstalled"] = False
-        missing["askModelInstalled"] = False
+        missing["agentModelInstalled"] = False
         with tempfile.TemporaryDirectory() as directory:
             paths = self.paths(Path(directory))
             apply_code, applied = run_setup(
@@ -220,7 +220,7 @@ class SetupLocalAiTests(unittest.TestCase):
             self.assertEqual(applied["status"], "configured_attention")
             self.assertFalse(applied["ready"])
             self.assertIn("install_opencode", applied["actions"])
-            self.assertIn(f"ollama_pull_{ASK_MODEL}", applied["actions"])
+            self.assertIn(f"ollama_pull_{AGENT_MODEL}", applied["actions"])
 
             check_code, checked = run_setup(
                 "check", paths, dependency_probe=lambda: missing,

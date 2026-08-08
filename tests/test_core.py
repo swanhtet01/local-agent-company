@@ -1137,7 +1137,7 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(service_args.num_predict, 768)
         self.assertEqual(service_args.keep_alive, "0s")
 
-        model = OllamaModel("qwen3.5:0.8b")
+        model = OllamaModel("llama3.2:1b")
         self.assertEqual(model.num_ctx, 4096)
         self.assertEqual(model.num_predict, 512)
         self.assertEqual(model.keep_alive, "30s")
@@ -1381,7 +1381,7 @@ class CompanyTests(unittest.TestCase):
              "Doctor action: install_configured_model"),
             (["other:latest"], 1, "Configured model status: not installed",
              "Doctor action: install_configured_model"),
-            (["qwen3.5:0.8b"], 0, "Configured model status: installed",
+            (["llama3.2:1b"], 0, "Configured model status: installed",
              "Doctor action: none"),
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -1391,7 +1391,7 @@ class CompanyTests(unittest.TestCase):
                     with patch(
                         "sys.argv", [
                             "local-company", "--home", tmp, "doctor",
-                            "--model", "qwen3.5:0.8b",
+                            "--model", "llama3.2:1b",
                         ],
                     ), patch(
                         "local_company.cli.OllamaModel.models", return_value=models,
@@ -1424,7 +1424,7 @@ class CompanyTests(unittest.TestCase):
                     with patch(
                         "sys.argv", [
                             "local-company", "--home", tmp, "doctor",
-                            "--model", "qwen3.5:0.8b",
+                            "--model", "llama3.2:1b",
                         ],
                     ), patch(
                         "local_company.cli.OllamaModel.models", new=probe,
@@ -1439,7 +1439,7 @@ class CompanyTests(unittest.TestCase):
                     self.assertNotIn("SENTINEL", stderr.getvalue())
 
     def test_ollama_structured_completion_sends_json_schema(self):
-        model = OllamaModel("qwen3.5:0.8b")
+        model = OllamaModel("llama3.2:1b")
         schema = {
             "type": "object",
             "properties": {"items": {"type": "array", "items": {"type": "string"}}},
@@ -1475,7 +1475,7 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.last_metrics["done_reason"], "stop")
 
     def test_ollama_bounded_completion_caps_only_that_request(self):
-        model = OllamaModel("qwen3.5:0.8b", num_predict=2048)
+        model = OllamaModel("llama3.2:1b", num_predict=2048)
         response_payload = {
             "message": {"content": "bounded local draft"},
             "done": True,
@@ -1529,7 +1529,7 @@ class CompanyTests(unittest.TestCase):
         self.assertNotIn("format", request_bodies[1])
         self.assertEqual(request_bodies[2]["format"], schema)
         self.assertEqual(model.num_predict, 2048)
-        low_budget = OllamaModel("qwen3.5:0.8b", num_predict=256)
+        low_budget = OllamaModel("llama3.2:1b", num_predict=256)
         low_budget.opener = Mock()
         for invalid in (True, 16, 512):
             with self.subTest(invalid=invalid):
@@ -1564,7 +1564,7 @@ class CompanyTests(unittest.TestCase):
         )
         for name, content, done, done_reason in cases:
             with self.subTest(case=name):
-                model = OllamaModel("qwen3.5:0.8b")
+                model = OllamaModel("llama3.2:1b")
                 payload = {
                     "message": {"content": content},
                     "done": done,
@@ -3289,7 +3289,7 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(company.jobs(), [])
 
     def test_ollama_metrics_are_isolated_per_worker_thread(self):
-        model = OllamaModel("qwen3.5:0.8b")
+        model = OllamaModel("llama3.2:1b")
         observed = {}
         ready = threading.Barrier(2)
 
@@ -3821,7 +3821,7 @@ class CompanyTests(unittest.TestCase):
                 "source_sha256": "a" * 64,
             },
             {
-                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "provider": "ollama", "model": "llama3.2:1b",
                 "endpoint": "loopback_default",
             },
             {
@@ -3832,7 +3832,7 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(snapshot["worker"], {"status": "running"})
         self.assertEqual(
             snapshot["runtime"], {
-                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "provider": "ollama", "model": "llama3.2:1b",
                 "endpoint": "loopback_default",
             },
         )
@@ -3845,18 +3845,18 @@ class CompanyTests(unittest.TestCase):
         self.assertLess(len(json.dumps(snapshot).encode("utf-8")), 2048)
 
         with tempfile.TemporaryDirectory() as tmp:
-            ollama_company = Company(Path(tmp), OllamaModel("qwen3.5:0.8b"))
+            ollama_company = Company(Path(tmp), OllamaModel("llama3.2:1b"))
             self.assertEqual(
                 runtime_model_identity(ollama_company),
                 {
-                    "provider": "ollama", "model": "qwen3.5:0.8b",
+                    "provider": "ollama", "model": "llama3.2:1b",
                     "endpoint": "loopback_default",
                 },
             )
             ollama_company.model.model = "x" * 257
             self.assertEqual(runtime_model_identity(ollama_company)["model"], None)
             external_company = Company(
-                Path(tmp), OllamaModel("qwen3.5:0.8b", host="https://example.invalid"),
+                Path(tmp), OllamaModel("llama3.2:1b", host="https://example.invalid"),
             )
             self.assertEqual(runtime_model_identity(external_company)["endpoint"], "nonlocal")
 
@@ -3872,7 +3872,7 @@ class CompanyTests(unittest.TestCase):
                 "source_sha256": "b" * 64,
             }
             runtime_identity = {
-                "provider": "ollama", "model": "qwen3.5:0.8b",
+                "provider": "ollama", "model": "llama3.2:1b",
                 "endpoint": "loopback_default",
             }
             company_identity = company.company_identity()
@@ -3985,6 +3985,7 @@ class CompanyTests(unittest.TestCase):
                 "src/local_company/config.py", "src/local_company/core.py",
                 "src/local_company/dashboard.py", "src/local_company/service.py",
                 "src/local_company/focus.py", "src/local_company/spreadsheet.py",
+                "src/local_company/model_policy.py",
                 "src/local_company/supermega.py", "src/local_company/mcp_server.py",
                 "src/local_company/workflow_lab.py",
                 "src/local_company/workflow_pilot.py",
@@ -5253,7 +5254,7 @@ class CompanyTests(unittest.TestCase):
     def test_nonstrict_ollama_generation_keeps_the_configured_budget_path(self):
         class RoutingOllamaModel(OfflineOllamaModel):
             def __init__(self):
-                super().__init__("qwen3.5:0.8b", num_predict=2048)
+                super().__init__("llama3.2:1b", num_predict=2048)
                 self.complete_calls = 0
                 self.bounded_calls = 0
 
@@ -5284,7 +5285,7 @@ class CompanyTests(unittest.TestCase):
     def test_strict_bounded_transport_failure_records_policy_without_result_proof(self):
         class FailingBoundedOllama(OfflineOllamaModel):
             def __init__(self):
-                super().__init__("qwen3.5:0.8b", num_predict=256)
+                super().__init__("llama3.2:1b", num_predict=256)
                 self.bounded_caps = []
 
             def complete(self, system, prompt):
@@ -5330,7 +5331,7 @@ class CompanyTests(unittest.TestCase):
     def test_strict_quality_withholds_and_excludes_incomplete_specialist_draft(self):
         class IncompleteSpecialistModel(OfflineOllamaModel):
             def __init__(self):
-                super().__init__("qwen3.5:0.8b", num_predict=2048)
+                super().__init__("llama3.2:1b", num_predict=2048)
                 self.bounded_caps = []
                 self.specialist_systems = []
                 self.structured_prompts = []
@@ -5450,7 +5451,7 @@ class CompanyTests(unittest.TestCase):
     def test_strict_resume_rebinds_legacy_incomplete_specialist_draft(self):
         class LegacyIncompleteModel(OfflineOllamaModel):
             def __init__(self):
-                super().__init__("qwen3.5:0.8b", num_predict=2048)
+                super().__init__("llama3.2:1b", num_predict=2048)
                 self.fail_structured = True
                 self.bounded_calls = 0
 

@@ -25,6 +25,9 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from local_company.config import default_company_home  # noqa: E402
+from local_company.model_policy import (  # noqa: E402
+    DEFAULT_LOCAL_MODEL, is_supported_local_model, require_local_llama_model,
+)
 from local_company.service import (  # noqa: E402
     _open_regular_lock_file, _terminate_owned_child, _windows_breakaway_denied,
     _windows_detached_creation_flags, _windows_inherited_creation_flags,
@@ -75,6 +78,7 @@ READINESS_ACTION_MAP = {
     "retry_readiness": "retry_runtime_guard",
     "start_ollama_locally": "start_ollama_manually",
     "start_worker_enabled_service": "relaunch_service_manually",
+    "use_supported_llama_model": "use_supported_llama_model",
 }
 
 
@@ -152,6 +156,7 @@ def _valid_runtime_arguments(
     return bool(
         type(port) is int and port == 8765
         and _valid_model_name(model)
+        and is_supported_local_model(model)
         and type(num_ctx) is int and 1024 <= num_ctx <= 131072
         and type(num_predict) is int and 32 <= num_predict <= 4096
         and type(keep_alive) is str
@@ -268,7 +273,10 @@ def _render_result(result: object) -> bytes:
         or re.fullmatch(r"[a-z][a-z_]{0,63}", result["action"]) is None
         or not isinstance(changes, list) or len(changes) > 2
         or any(value not in {"ollama_started", "service_started"} for value in changes)
-        or not (required_model is None or _valid_model_name(required_model))
+        or not (
+            required_model is None
+            or (_valid_model_name(required_model) and is_supported_local_model(required_model))
+        )
         or result.get("missions_started") != 0
         or result.get("models_pulled") != 0
     ):
@@ -1268,7 +1276,7 @@ def _guard_locked(
 
 
 def guard_once(
-    home: Path, *, port: int = 8765, model: str = "qwen3.5:0.8b",
+    home: Path, *, port: int = 8765, model: str = DEFAULT_LOCAL_MODEL,
     num_ctx: int = RUNTIME_NUM_CTX, num_predict: int = RUNTIME_NUM_PREDICT,
     keep_alive: str = RUNTIME_KEEP_ALIVE,
     wait_seconds: int = 10, ollama_executable: Path | None = None,
@@ -1293,6 +1301,7 @@ def guard_once(
         )
     ):
         raise GuardUsageError("invalid runtime arguments")
+    model = require_local_llama_model(model)
     components = _empty_components()
     try:
         normalized_home = _normalized_company_home(Path(home))
@@ -1353,7 +1362,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--home", type=Path)
     result.add_argument("--port", type=int, default=8765)
-    result.add_argument("--model", default="qwen3.5:0.8b")
+    result.add_argument("--model", default=DEFAULT_LOCAL_MODEL)
     result.add_argument("--num-ctx", type=int, default=RUNTIME_NUM_CTX)
     result.add_argument("--num-predict", type=int, default=RUNTIME_NUM_PREDICT)
     result.add_argument("--keep-alive", default=RUNTIME_KEEP_ALIVE)

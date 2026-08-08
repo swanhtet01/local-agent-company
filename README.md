@@ -274,13 +274,13 @@ even when the Ally does not have enough memory for inference.
 ### Low-memory grounded assistant
 
 `ask` is the usable read-only path while the larger agent model is blocked by
-desktop memory pressure. It uses the installed `qwen2.5-coder:0.5b` model only
+desktop memory pressure. It uses the installed `llama3.2:1b` model only
 on Ollama's loopback endpoint, automatically applies the validated
 non-terminating Ally working-set trim when required, samples memory during the
 answer, and unloads the model afterward:
 
 ```powershell
-ollama pull qwen2.5-coder:0.5b
+ollama pull llama3.2:1b
 .\local-ai.cmd ask "Which active product action is supported by our evidence?"
 .\local-ai.cmd supermega ask "What is the verified SuperMega next action?"
 ```
@@ -342,7 +342,7 @@ it does not quote objectives, reports, model responses, paths, or secrets.
 
 The check verifies the installed local model, Ollama, OpenCode, and the governed
 `local-company` MCP profile without loading a model. The normal launcher opens
-only the dedicated OpenCode agent backed by the locally selected Qwen model.
+only the dedicated OpenCode agent backed by the locally selected Llama model.
 
 To get a concrete product experiment instead of an open-ended chat, run this
 zero-model command (it uses the active project), or name a project explicitly:
@@ -517,7 +517,7 @@ No package download is required:
 cd C:\Users\thesw\Projects\local-agent-company
 .\local-company.cmd init
 .\local-company.cmd service start --port 8765
-python .\scripts\check_readiness.py --model qwen3.5:0.8b
+python .\scripts\check_readiness.py --model llama3.2:1b
 .\local-company.cmd run "Design a 30-day launch plan for a local tyre shop"
 ```
 
@@ -541,33 +541,18 @@ C:\Users\thesw\Projects\local-agent-company\local-code.cmd C:\Users\thesw\Projec
 
 The launcher checks that Ollama, OpenCode, the target directory, an installed
 supported model, and current available memory are ready before opening the agent. OpenCode is permanently
-configured in `C:\Users\thesw\.config\opencode\opencode.json` to use the
-loopback Ollama endpoint by default, with a separate loopback LM Studio provider
-for the bounded 4B launcher. Neither provider requires a paid inference API.
+configured in `C:\Users\thesw\.config\opencode\opencode.json` to use only the
+loopback Ollama provider and the admitted Llama 3.2 models. It requires no paid
+inference API.
 Review diffs and focused test output before keeping agent changes.
 Run `local-code.cmd --check C:\path\to\project` for a non-interactive readiness
 check.
 
-The current `qwen3.5:0.8b` model proves the workflow but is weak for large
-repository edits. When the interrupted quality-model download can resume, run
-`ollama pull qwen3.5:4b`. The launcher prefers the installed 4B model only when
-at least 5 GiB of physical memory is currently available; otherwise it keeps the
-0.8B bootstrap model. Set `LOCAL_CODE_MODEL` to request either supported model
-explicitly, but installation and memory gates still apply and cannot be bypassed.
-
-This Ally already has the Qwen 3.5 4B Q4_K_M GGUF in LM Studio, so it can be
-reused without a second multi-gigabyte Ollama download. Check current admission
-without starting a server or loading the model:
-
-```powershell
-local-code.cmd --lmstudio --check C:\path\to\project
-```
-
-When the receipt is `ready`, start the interactive 4B coding agent with:
-
-```powershell
-local-code.cmd --lmstudio C:\path\to\project
-```
+The Ally defaults to `llama3.2:1b` for the lowest practical RAM footprint.
+`llama3.2:3b` is the only optional quality model and is admitted only when it is
+installed and at least 4 GiB of physical memory is currently available. Set
+`LOCAL_CODE_MODEL` to one of those two model names; every other family fails
+closed. The old LM Studio route is disabled.
 
 For the governed SuperMega Vision product tools, use the dedicated quality-model
 agent instead of the three-tool tiny-model starter profile:
@@ -577,22 +562,14 @@ local-code.cmd --vision --check C:\Users\thesw\Projects\supermega-vision
 local-code.cmd --vision C:\Users\thesw\Projects\supermega-vision
 ```
 
-The first command is read-only and starts no listener or model. The second uses
-the same bounded LM Studio 4B lifecycle, then opens OpenCode with the explicit
+The first command is read-only and starts no model. The second uses the same
+memory-gated Ollama Llama selector, then opens OpenCode with the explicit
 `vision-product` agent. That agent can access the separate
 `SUPERMEGA_VISION_MCP_PROFILE=product` server while ordinary OpenCode sessions
 keep the original three-tool `vision` starter profile. Both agents deny file,
 shell, task, web, and external-directory tools; vision operations remain
 available only through their scoped MCP server. Closing OpenCode unloads the
-model and stops the loopback server.
-
-The launcher refuses an active Ollama model, an existing LM Studio server or
-loaded model, an unrecognized OpenCode provider, or less than 5 GiB currently
-available memory. An admitted run starts LM Studio only on `127.0.0.1:1234`
-without CORS, loads one `supermega-qwen35-4b` instance with a 4,096-token context,
-runs OpenCode, and unloads the model and stops the server after OpenCode closes.
-Closing other large applications may be necessary before the memory gate admits
-4B. A blocked check does not start a listener or load a model.
+selected Ollama model. A blocked check does not start a model.
 
 For an already-created Vision evaluation campaign, the tiny Ollama model has a
 separate three-tool route:
@@ -607,7 +584,7 @@ only inspect campaign status, choose the verified next phase, and advance one
 phase-locked local evidence step. It cannot build products, use the general
 filesystem or shell, capture screens, control devices, or bypass rights and
 human-review boundaries. The normal Ollama model selector still requires at
-least 2 GiB available memory for the 0.8B model and starts nothing when blocked.
+least 2.5 GiB available memory for the 1B model and starts nothing when blocked.
 
 Inspect the read-only selection without opening a model:
 
@@ -615,7 +592,7 @@ Inspect the read-only selection without opening a model:
 python .\scripts\select_local_code_model.py
 ```
 
-## Use Bionic and LM Studio
+## Use Bionic separately
 
 Bionic is a separate agent app, not merely another model server. Create a **Code
 Project** and select a local repository when you want a graphical coding agent;
@@ -624,15 +601,10 @@ Choose a local model in the session to keep inference on-device and free of
 per-token charges. Bionic cloud models are optional and consume paid credits, so
 they are not part of this repository's free-local default.
 
-LM Studio remains useful for downloading and comparing models or serving one
-model to local applications. Its optional OpenAI-compatible server normally
-uses `http://127.0.0.1:1234/v1`; the bounded `--lmstudio` launcher manages that
-server automatically for the existing 4B model. Keep
-**Serve on Local Network** disabled. Enable API-token authentication before
-giving a persistent or non-loopback application access. The bounded launcher
-uses an ephemeral loopback-only server with CORS disabled and stops it when
-OpenCode closes. Do not run LM Studio/Bionic inference and Ollama inference at
-the same time on the ROG Ally; unload one model before switching runtimes.
+LM Studio is not part of the current execution path. If it is later used for
+model comparison, select a Llama model explicitly, keep **Serve on Local
+Network** disabled, and stop it before starting Ollama inference. Do not run
+LM Studio/Bionic inference and Ollama inference at the same time on the Ally.
 
 Use Bionic and OpenCode as alternative interfaces over focused tasks, not as two
 agents editing the same checkout simultaneously. The shared `AGENTS.md` gives
@@ -643,17 +615,15 @@ both local and Codex agents the same scope, verification, and approval rules.
 After installing Ollama, download a model once:
 
 ```powershell
-ollama pull qwen3.5:0.8b
+ollama pull llama3.2:1b
 .\local-company.cmd doctor
 .\local-company.cmd benchmark --num-predict 128
-.\local-company.cmd run "Build a practical plan for my objective" --model qwen3.5:0.8b
+.\local-company.cmd run "Build a practical plan for my objective" --model llama3.2:1b
 ```
 
 After the model download, inference is local and does not use a paid API. The
-installed Ollama 0.8B model is the reliable bootstrap model. The separate
-Ollama 4B download remains incomplete, but the existing LM Studio Qwen 3.5 4B
-Q4_K_M file is now the no-duplicate quality path through `local-code.cmd
---lmstudio` whenever the 5 GiB current-memory gate passes.
+installed Ollama 1B model is the reliable bootstrap model. The optional
+`llama3.2:3b` path remains memory-gated and is not required for routine work.
 
 An identical direct mission reuses a report for 24 hours only when the routed team, project, retrieved evidence, evaluator version, stable model identity/configuration, latest passing evaluation, and sealed report SHA-256 all match. Uncacheable models, changed/tampered reports, and failed or legacy evaluations always run fresh. Change the objective or evidence when the work genuinely changed; use the explicit retry command when a failed result needs another attempt.
 
@@ -661,7 +631,7 @@ You may set defaults for the current terminal:
 
 ```powershell
 $env:LOCAL_COMPANY_PROVIDER = "ollama"
-$env:LOCAL_COMPANY_MODEL = "qwen3.5:0.8b"
+$env:LOCAL_COMPANY_MODEL = "llama3.2:1b"
 $env:LOCAL_COMPANY_NUM_CTX = "4096"
 $env:LOCAL_COMPANY_NUM_PREDICT = "512"
 $env:LOCAL_COMPANY_KEEP_ALIVE = "0s"
@@ -939,7 +909,7 @@ python .\scripts\check_live_build.py
 Use the composed readiness gate before accepting a new local mission:
 
 ```powershell
-python .\scripts\check_readiness.py --model qwen3.5:0.8b
+python .\scripts\check_readiness.py --model llama3.2:1b
 ```
 
 It returns exit 0 only when the selected local company home has a valid identity matching the live service, the disk manifest is valid, the live build exactly matches it, local work is idle, the queue worker is enabled, the service is startup-attested to the requested Ollama model on the fixed loopback endpoint, Ollama is reachable, and that exact model is installed. The gate rereads the selected identity immediately before a ready result and fails closed if it changed during the check. Use the same optional `--home` value as the CLI. On Windows, readiness accepts only an existing normal local-drive path and rejects UNC, mapped-remote, device, and reparse-point paths before opening SQLite. A valid store mismatch returns the neutral `align_company_home` action and never switches, initializes, or relaunches either store. Exit 1 reports a bounded, known local action; exit 2 means state, live, or dependency status is unavailable or malformed; exit 3 means the disk manifest or checker itself is indeterminate. Follow the JSON `action`, then rerun the gate. The Ollama tags probe does not generate text, so `generation_tested` remains false; use `benchmark` separately when an inference proof is required.
@@ -981,7 +951,7 @@ python .\scripts\check_runtime_supervisor.py `
   --python-executable "C:\Users\thesw\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
   --ollama-executable "C:\Users\thesw\AppData\Local\Programs\Ollama\ollama.exe" `
   --ollama-sha256 "9648169dfef645752ff8b25fded65d57e4b519fda9b0c9710a938af025cec2a1" `
-  --model qwen3.5:0.8b `
+  --model llama3.2:1b `
   --allow-windows-job-inheritance
 ```
 

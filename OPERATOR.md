@@ -62,7 +62,7 @@ python .\scripts\runtime_guard.py `
   --record-result
 ```
 
-Replace the example paths with absolute fixed-local-drive paths for this machine. Exit `0` means Ollama, the configured model, the checked build, live-build identity, store/runtime attestations, idle work state, worker availability, and exact service identity are ready. Exit `1` names a determinate manual action. Exit `2` means the runtime is indeterminate; the only possible cleanup mutation is reaping the exact Ollama child launched by that guard run. Exit `3` means the arguments are invalid. Inspect the single JSON object's `action`, `blockers`, and `changes`; do not infer success merely because a process exists. Then run `python .\scripts\check_readiness.py --home "COMPANY-HOME" --model qwen3.5:0.8b` independently before accepting work.
+Replace the example paths with absolute fixed-local-drive paths for this machine. Exit `0` means Ollama, the configured model, the checked build, live-build identity, store/runtime attestations, idle work state, worker availability, and exact service identity are ready. Exit `1` names a determinate manual action. Exit `2` means the runtime is indeterminate; the only possible cleanup mutation is reaping the exact Ollama child launched by that guard run. Exit `3` means the arguments are invalid. Inspect the single JSON object's `action`, `blockers`, and `changes`; do not infer success merely because a process exists. Then run `python .\scripts\check_readiness.py --home "COMPANY-HOME" --model llama3.2:1b` independently before accepting work.
 
 With `--record-result`, the exact bounded stdout object is committed atomically to the fixed `<validated-company-home>/runtime-guard-last.json` file before the guard lock is released. A requested write failure returns exit `2` with `result_journal_write_failed`. Invalid-store, invalid-argument, busy-lock, and invalid-lock invocations do not replace an older file. POSIX creates the temporary record as mode `0600`; Windows inherits the validated company home's ACL, which must remain current-user controlled. Treat the file as a possibly stale observation only: check its modification time and Task Scheduler's current result, then rerun authoritative readiness before accepting any mission.
 
@@ -91,7 +91,7 @@ python .\scripts\check_runtime_supervisor.py `
   --python-executable "C:\Users\thesw\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
   --ollama-executable "C:\Users\thesw\AppData\Local\Programs\Ollama\ollama.exe" `
   --ollama-sha256 "9648169dfef645752ff8b25fded65d57e4b519fda9b0c9710a938af025cec2a1" `
-  --model qwen3.5:0.8b `
+  --model llama3.2:1b `
   --allow-windows-job-inheritance
 ```
 

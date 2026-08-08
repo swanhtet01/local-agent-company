@@ -18,6 +18,10 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from local_company.model_policy import (  # noqa: E402
+    DEFAULT_LOCAL_MODEL, is_supported_local_model, require_local_llama_model,
+)
+
 if __package__:
     from .check_readiness import (  # noqa: E402
         READINESS_SCHEMA, CompanyIdentityError, _valid_model_name,
@@ -360,7 +364,9 @@ def render_result(result: object) -> bytes:
         or result.get("status") not in {"ready", "action_required", "indeterminate"}
         or type(result.get("ready")) is not bool
         or result["ready"] is not (result["status"] == "ready")
-        or not (model is None or _valid_model_name(model))
+        or not (
+            model is None or (_valid_model_name(model) and is_supported_local_model(model))
+        )
         or not isinstance(checks, dict)
         or set(checks) != {"scheduled_task", "guard_journal", "ollama_executable", "readiness"}
         or not isinstance(ages, dict) or set(ages) != {"task", "journal"}
@@ -760,6 +766,7 @@ def _prepare_expected(
     if (
         os.name != "nt" or task_name != EXPECTED_TASK_NAME
         or not _valid_model_name(model)
+        or not is_supported_local_model(model)
         or type(ollama_sha256) is not str
         or OLLAMA_SHA256_PATTERN.fullmatch(ollama_sha256) is None
         or type(allow_windows_job_inheritance) is not bool
@@ -777,6 +784,7 @@ def _prepare_expected(
         raise SupervisorUsageError("invalid arguments") from exc
     if trusted_python.suffix.casefold() != ".exe" or trusted_ollama.suffix.casefold() != ".exe":
         raise SupervisorUsageError("invalid arguments")
+    model = require_local_llama_model(model)
     return ExpectedTask(
         task_name, trusted_python, runtime_guard, normalized_home, trusted_ollama,
         ollama_sha256, model, allow_windows_job_inheritance,
@@ -786,7 +794,7 @@ def _prepare_expected(
 def run_supervisor_check(
     home: Path, python_executable: Path, ollama_executable: Path,
     ollama_sha256: str, task_name: str = EXPECTED_TASK_NAME,
-    model: str = "qwen3.5:0.8b", allow_windows_job_inheritance: bool = False,
+    model: str = DEFAULT_LOCAL_MODEL, allow_windows_job_inheritance: bool = False,
 ) -> tuple[dict[str, object], int]:
     expected, identity = _prepare_expected(
         home, python_executable, ollama_executable, ollama_sha256,
@@ -819,7 +827,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ollama-executable", type=Path, required=True)
     result.add_argument("--ollama-sha256", required=True)
     result.add_argument("--task-name", default=EXPECTED_TASK_NAME)
-    result.add_argument("--model", default="qwen3.5:0.8b")
+    result.add_argument("--model", default=DEFAULT_LOCAL_MODEL)
     result.add_argument("--allow-windows-job-inheritance", action="store_true")
     return result
 

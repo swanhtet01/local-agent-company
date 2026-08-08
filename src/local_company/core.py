@@ -27,6 +27,7 @@ from .config import (
     read_validated_company_instance_id, valid_company_instance_id,
 )
 from .focus import enforce_execution_focus, read_execution_focus
+from .model_policy import require_local_llama_model
 from .spreadsheet import SpreadsheetError, profile_xlsx, read_stable_local_file
 
 
@@ -1620,7 +1621,7 @@ class OllamaModel:
             raise ValueError("num_ctx must be between 1024 and 131072")
         if num_predict < 32 or num_predict > 4096:
             raise ValueError("num_predict must be between 32 and 4096")
-        self.model = model
+        self.model = require_local_llama_model(model)
         self.host = host.rstrip("/")
         self.url = f"{self.host}/api/chat"
         self.num_ctx = num_ctx

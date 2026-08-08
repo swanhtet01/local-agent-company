@@ -15,6 +15,7 @@ from .capacity import observe_memory
 from .config import default_company_home
 from .core import Company, MAX_OBJECTIVE_CHARS, MockModel, PLAYBOOKS
 from .focus import enforce_execution_focus, execution_focus_digest, read_execution_focus
+from .model_policy import DEFAULT_LOCAL_MODEL
 
 
 PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
@@ -1131,7 +1132,7 @@ class CompanyTools:
                 [
                     sys.executable, "-m", "local_company.cli", "--home", str(self.company.home),
                     "queue", "run-next", "--queue-id", queue_id,
-                    "--provider", "ollama", "--model", os.getenv("LOCAL_COMPANY_MODEL", "qwen3.5:0.8b"),
+                    "--provider", "ollama", "--model", os.getenv("LOCAL_COMPANY_MODEL", DEFAULT_LOCAL_MODEL),
                     "--num-ctx", "4096", "--num-predict", "512", "--keep-alive", "0s",
                 ],
                 cwd=root, env=environment, stdin=subprocess.DEVNULL,

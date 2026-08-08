@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
 
+from .model_policy import DEFAULT_LOCAL_MODEL, require_local_llama_model
+
 
 SERVICE_STATE_SCHEMA = "local-company.service.v2"
 PROCESS_BIRTH_SCHEMA = "local-company.process-birth.v1"
@@ -627,7 +629,7 @@ def _existing_state_blocks_start(state: dict[str, object]) -> tuple[bool, str]:
 
 
 def start_service(
-    home: Path, port: int = 8765, provider: str = "ollama", model: str = "qwen3.5:0.8b",
+    home: Path, port: int = 8765, provider: str = "ollama", model: str = DEFAULT_LOCAL_MODEL,
     num_ctx: int = 4096, num_predict: int = 2048, keep_alive: str = "30s",
     allow_job_inheritance: bool = False,
 ) -> dict[str, object]:
@@ -636,6 +638,8 @@ def start_service(
         raise ValueError("Service port must be between 1 and 65535")
     if provider not in {"mock", "ollama"}:
         raise ValueError("Service provider must be mock or ollama")
+    if provider == "ollama":
+        model = require_local_llama_model(model)
     if not _valid_int(num_ctx, 1024, 131072):
         raise ValueError("num_ctx must be between 1024 and 131072")
     if not _valid_int(num_predict, 32, 4096):

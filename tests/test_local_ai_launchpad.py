@@ -19,7 +19,7 @@ def accepted_prompt_receipt(actions: list[str]) -> dict[str, object]:
         "autoPermissionsEnabled": False, "externalActionPerformed": False,
         "modelCalled": True, "ok": True, "paidApiUsed": False,
         "reason": "accepted", "status": "accepted", "wallSeconds": 42.5,
-        "model": "qwen3.5:0.8b", "toolActions": actions,
+        "model": "llama3.2:1b", "toolActions": actions,
         "toolCallCount": len(actions), "response": "Grounded local review.",
         "observedCost": 0.0, "modelUnloadedAfterRun": True, "agentExitCode": 0,
         "admissionAvailableBytes": 3 * 1024**3,

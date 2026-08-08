@@ -12,14 +12,13 @@ from scripts.run_lmstudio_code import GIB, MODEL_IDENTIFIER, _validate_opencode_
 
 
 class LmStudioLocalCodeTests(unittest.TestCase):
-    def test_windows_launcher_routes_lmstudio_arguments_exactly(self) -> None:
+    def test_windows_launcher_blocks_lmstudio_and_routes_vision_to_ollama(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-code.cmd").read_text(encoding="utf-8")
-        self.assertIn('if /I "%~1"=="--lmstudio" goto RUN_LMSTUDIO', source)
-        self.assertIn('if /I "%~1"=="--vision" goto RUN_VISION', source)
-        self.assertIn(':RUN_VISION', source)
-        self.assertIn('--agent vision-product', source)
-        self.assertIn(':RUN_LMSTUDIO', source)
-        self.assertIn('python "%~dp0scripts\\run_lmstudio_code.py" %*', source)
+        self.assertIn('if /I "%~1"=="--lmstudio" (', source)
+        self.assertIn('LM Studio is disabled by the Llama-only Ollama policy', source)
+        self.assertIn('set "OPENCODE_AGENT=vision-product"', source)
+        self.assertNotIn(':RUN_VISION', source)
+        self.assertNotIn(':RUN_LMSTUDIO', source)
 
     def _files(self, directory: str) -> tuple[Path, Path, Path, Path]:
         root = Path(directory) / "project"

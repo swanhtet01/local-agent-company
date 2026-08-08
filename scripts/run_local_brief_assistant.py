@@ -30,7 +30,7 @@ except ModuleNotFoundError:  # Direct execution from the scripts directory.
 
 
 SCHEMA = "local-ai.grounded-assistant-result.v1"
-MODEL = "qwen2.5-coder:0.5b"
+MODEL = "llama3.2:1b"
 MIB = 1024**2
 MINIMUM_AVAILABLE_BYTES = 960 * MIB
 MAX_QUESTION_CHARS = 2_000

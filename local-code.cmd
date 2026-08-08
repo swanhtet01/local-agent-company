@@ -10,6 +10,15 @@ if /I "%~1"=="--vision-lite" (
   set "OPENCODE_AGENT=vision-campaign"
   shift
 )
+if /I "%~1"=="--vision" (
+  set "OPENCODE_AGENT=vision-product"
+  shift
+)
+if /I "%~1"=="--lmstudio" (
+  echo ERROR: LM Studio is disabled by the Llama-only Ollama policy.
+  echo Use: local-code.cmd [PROJECT]
+  exit /b 6
+)
 
 set "OPENCODE_EXE=%LOCAL_OPENCODE%"
 if not defined OPENCODE_EXE for %%I in (opencode.cmd) do set "OPENCODE_EXE=%%~$PATH:I"
@@ -21,8 +30,6 @@ if not exist "%OPENCODE_EXE%" (
 )
 
 if /I "%~1"=="--run" goto RUN_HEADLESS
-if /I "%~1"=="--vision" goto RUN_VISION
-if /I "%~1"=="--lmstudio" goto RUN_LMSTUDIO
 
 set "CHECK_ONLY=0"
 set "TARGET_DIR=%CD%"
@@ -75,19 +82,4 @@ exit /b %EXIT_CODE%
 
 :RUN_HEADLESS
 python "%~dp0scripts\run_local_code_agent.py" %*
-exit /b %ERRORLEVEL%
-
-:RUN_VISION
-set "VISION_TARGET=%CD%"
-if /I "%~2"=="--check" (
-  if not "%~3"=="" set "VISION_TARGET=%~f3"
-  python "%~dp0scripts\run_lmstudio_code.py" --check "%VISION_TARGET%" --agent vision-product
-) else (
-  if not "%~2"=="" set "VISION_TARGET=%~f2"
-  python "%~dp0scripts\run_lmstudio_code.py" "%VISION_TARGET%" --agent vision-product
-)
-exit /b %ERRORLEVEL%
-
-:RUN_LMSTUDIO
-python "%~dp0scripts\run_lmstudio_code.py" %*
 exit /b %ERRORLEVEL%

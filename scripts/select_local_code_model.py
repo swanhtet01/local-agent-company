@@ -9,11 +9,20 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = PROJECT_ROOT / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from local_company.model_policy import PREFERRED_LOCAL_MODELS  # noqa: E402
 
 
 SCHEMA = "local-ai.code-model-selection.v1"
 GIB = 1024**3
-SUPPORTED_MODELS = ("llama3.2:3b", "llama3.2:1b")
+SUPPORTED_MODELS = PREFERRED_LOCAL_MODELS
 MINIMUM_AVAILABLE_BYTES = {
     "llama3.2:3b": 4 * GIB,
     # The 1B model occupies about 1.3 GiB on disk. Keep additional headroom for
