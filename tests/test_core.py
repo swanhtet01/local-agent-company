@@ -5425,6 +5425,15 @@ class CompanyTests(unittest.TestCase):
             specialist_system = model.specialist_systems[0]
             self.assertIn("Proposed next action", specialist_system)
             self.assertIn("Missing proof", specialist_system)
+            self.assertIn(
+                "Return exactly one plain-text line and nothing else", specialist_system,
+            )
+            self.assertIn(
+                "Not verified or performed: Proposed next action: review "
+                "[one bounded local gap]. Assumption: [one unverified premise]. "
+                "Missing proof: [one named proof item].",
+                specialist_system,
+            )
             self.assertNotIn("must carry a supplied [EVIDENCE:id]", specialist_system)
             projected = company.job_detail(job_id)["evaluation"]
             self.assertEqual(projected["incomplete_specialist_roles"], ["operations"])
