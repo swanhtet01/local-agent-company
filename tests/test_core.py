@@ -5434,6 +5434,12 @@ class CompanyTests(unittest.TestCase):
                 "Missing proof: [one named proof item].",
                 specialist_system,
             )
+            self.assertIn(
+                "Missing proof must name a concrete unresolved proof", specialist_system,
+            )
+            self.assertIn(
+                "Never include Owner review required in the specialist line", specialist_system,
+            )
             self.assertNotIn("must carry a supplied [EVIDENCE:id]", specialist_system)
             projected = company.job_detail(job_id)["evaluation"]
             self.assertEqual(projected["incomplete_specialist_roles"], ["operations"])
@@ -7090,6 +7096,20 @@ class CompanyTests(unittest.TestCase):
             "evidence does not prove readiness.",
         )
         self.assertNotIn("##", malformed_safe_output)
+
+        empty_proof_output = mark_unverified_advisory(
+            "Proposed next action: inspect. Assumption: The live app is not a managed system "
+            "of record. Missing proof: None, Owner review required.",
+            90,
+        )
+        self.assertIn(
+            "Proposed next action: Review one bounded local evidence gap.", empty_proof_output,
+        )
+        self.assertIn(
+            "Missing proof: Current evidence does not prove readiness.", empty_proof_output,
+        )
+        self.assertNotIn("Owner review required", empty_proof_output)
+        self.assertNotIn("Missing proof: None", empty_proof_output)
 
     def test_structured_compaction_preserves_templates_and_atomic_citations(self):
         evidence = "[EVIDENCE:0123456789abcdef]"

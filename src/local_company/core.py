@@ -219,7 +219,7 @@ MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
 EVALUATOR_VERSION = "local-quality-2026-07-30.19"
-EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.16"
+EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
 STRICT_SPECIALIST_NUM_PREDICT_CAP = 768
@@ -896,7 +896,10 @@ def mark_unverified_advisory(text: str, limit: int = 90) -> str:
             words.pop()
         return " ".join(words).strip(" ,.")
 
-    raw_values = list(match.groups())
+    raw_values = [
+        re.sub(r"\bOwner review required\b.*$", "", value, flags=re.IGNORECASE).strip()
+        for value in match.groups()
+    ]
     if re.match(
         r"\s*(?:execute|deploy|publish|send|pay|purchase|migrate|enable)\b",
         raw_values[0],
@@ -913,6 +916,18 @@ def mark_unverified_advisory(text: str, limit: int = 90) -> str:
             bounded_value(value, clause_limit, fallbacks[index])
             for index, value in enumerate(raw_values)
         ]
+        if not re.match(
+            r"^(?:review|inspect|compare|draft)\s+\S+(?:\s+\S+){2,}$",
+            values[0],
+            flags=re.IGNORECASE,
+        ):
+            values[0] = fallbacks[0]
+        if re.fullmatch(
+            r"(?:none|nothing|complete|n/?a|not applicable|no(?:\s+missing)?\s+proof)",
+            values[2],
+            flags=re.IGNORECASE,
+        ):
+            values[2] = fallbacks[2]
         if not all(values):
             break
         complete = (
@@ -7749,7 +7764,9 @@ class Company:
             "heading, list, explanation, or closing. Copy this exact skeleton and replace only "
             "the bracketed phrases: Not verified or performed: Proposed next action: review "
             "[one bounded local gap]. Assumption: [one unverified premise]. Missing proof: "
-            "[one named proof item]. Keep every action local and owner-gated."
+            "[one named proof item]. Missing proof must name a concrete unresolved proof and "
+            "must never be none, no, complete, or not applicable. Never include Owner review "
+            "required in the specialist line. Keep every action local and owner-gated."
             if strict_evidence_pairs_required else evidence_rule
         )
         current_role: str | None = None
