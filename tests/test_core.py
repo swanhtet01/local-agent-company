@@ -6984,6 +6984,31 @@ class CompanyTests(unittest.TestCase):
         self.assertNotIn("bypass owner approval", unsafe_rendered.lower())
         self.assertNotIn("post results externally", unsafe_rendered.lower())
 
+        wrapped_historical = SourceHit(
+            path="C:/frozen/history.md",
+            excerpt=(
+                "**Historical candidate only — not integration-ready.** The candidate remains\n"
+                "clean at its sealed commit, but it is far behind the current branch."
+            ),
+            score=90,
+            source_id="history",
+            source_sha256="e" * 64,
+            char_start=0,
+            char_end=130,
+            line_start=1,
+            line_end=2,
+            evidence_id="e" * 16,
+        )
+        wrapped_rendered = render_structured_synthesis(
+            payload, labels, 3, [sources[0], wrapped_historical],
+            "Review the historical integration-ready candidate limitation", 177,
+        )
+        self.assertNotIn("The candidate remains", wrapped_rendered)
+        self.assertNotRegex(
+            wrapped_rendered,
+            r"records this frozen limitation:[^\n]*\b(?:and|is|remains|to|with)$",
+        )
+
     def test_bounded_context_keeps_the_header_and_quarantine_prefix_atomic(self):
         latest = (
             "COMPLETED QUALITY WORK\nNot verified or performed: "

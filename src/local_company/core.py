@@ -350,6 +350,13 @@ _COMPLETION_CLAIM_PATTERN = re.compile(
     r"active|completed|connected|wired|working|passed)\b",
     flags=re.IGNORECASE,
 )
+_DANGLING_LIMITATION_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "because", "been", "being",
+    "before", "but", "can", "could", "do", "does", "for", "from", "has",
+    "have", "if", "in", "is", "may", "might", "must", "of", "on", "or",
+    "remain", "remains", "should", "the", "to", "until", "was", "were",
+    "while", "will", "with", "without", "would",
+}
 _GROUNDING_STOPWORDS = {
     "about", "after", "again", "against", "also", "and", "are", "because", "been",
     "before", "being", "between", "but", "can", "check", "could", "current", "daily",
@@ -374,6 +381,21 @@ def _grounding_terms(text: str) -> set[str]:
             continue
         terms.add(term)
     return terms
+
+
+def _source_sentence_fragments(text: str) -> list[str]:
+    """Join visual line wraps before splitting bounded source sentences."""
+    normalized = " ".join(text.split())
+    normalized = re.sub(r"(?<=[.!?])(?:[*_`~]+)(?=\s)", "", normalized)
+    return [
+        fragment for fragment in re.split(r"(?<=[.!?])\s+", normalized)
+        if fragment.strip()
+    ]
+
+
+def _limitation_fragment_is_complete(text: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9_-]+", text.casefold())
+    return bool(words and words[-1] not in _DANGLING_LIMITATION_WORDS)
 
 
 def _is_exact_frozen_source_metadata_claim(
@@ -430,6 +452,7 @@ def _is_exact_frozen_source_limitation_claim(
     return bool(
         expected_source
         and match.group("source").strip().casefold() == expected_source.casefold()
+        and _limitation_fragment_is_complete(limitation)
         and (
             _LIMITATION_PATTERN.search(limitation)
             or re.search(r"\b(?:false|null)\b", limitation, flags=re.IGNORECASE)
@@ -444,7 +467,7 @@ def source_limitation_conflicts(
     """Find completion claims that overlap explicit limitations in retrieved local evidence."""
     limitations: list[tuple[str, str, set[str]]] = []
     for path, content in source_documents:
-        for fragment in re.split(r"(?<=[.!?])\s+|[\r\n]+", content):
+        for fragment in _source_sentence_fragments(content):
             evidence = " ".join(fragment.split()).strip(' \t\"\',')
             if not evidence or not _LIMITATION_PATTERN.search(evidence):
                 continue
@@ -1340,7 +1363,7 @@ def grounded_verified_facts(
     candidates: list[tuple[int, str, str, str]] = []
     source_names = {Path(hit.path).name.lower() for hit in sources}
     for hit in sources:
-        for fragment in re.split(r"(?<=[.!?])\s+|[\r\n]+", hit.excerpt):
+        for fragment in _source_sentence_fragments(hit.excerpt):
             limitation = " ".join(_strip_evidence_tokens(fragment).split()).strip(
                 " ,\"'{}[]"
             )
@@ -1370,7 +1393,7 @@ def grounded_verified_facts(
                 or _SENSITIVE_PROPOSAL_PATTERN.search(limitation)
             ):
                 continue
-            if not limitation or not (
+            if not limitation or not _limitation_fragment_is_complete(limitation) or not (
                 _LIMITATION_PATTERN.search(limitation)
                 or re.search(r"\b(?:false|null)\b", limitation, flags=re.IGNORECASE)
             ):
