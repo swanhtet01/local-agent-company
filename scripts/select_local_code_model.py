@@ -17,12 +17,13 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from local_company.model_policy import PREFERRED_LOCAL_MODELS  # noqa: E402
+from local_company.model_policy import PREFERRED_LOCAL_MODELS, SUPPORTED_LOCAL_MODELS  # noqa: E402
 
 
 SCHEMA = "local-ai.code-model-selection.v1"
 GIB = 1024**3
-SUPPORTED_MODELS = PREFERRED_LOCAL_MODELS
+DEFAULT_MODELS = PREFERRED_LOCAL_MODELS
+SUPPORTED_MODELS = SUPPORTED_LOCAL_MODELS
 MINIMUM_AVAILABLE_BYTES = {
     "llama3.2:3b": 4 * GIB,
     # The 1B model occupies about 1.3 GiB on disk. Keep additional headroom for
@@ -58,13 +59,14 @@ def select_model(
         if available_memory_bytes < required:
             raise ValueError("requested_model_memory_blocked")
         return Selection(requested_model, "explicit_request_admitted", available_memory_bytes, required, requested_model)
-    for model in SUPPORTED_MODELS:
+    for model in DEFAULT_MODELS:
         required = MINIMUM_AVAILABLE_BYTES[model]
         if model in installed_models and available_memory_bytes >= required:
-            reason = "quality_model_admitted" if model == SUPPORTED_MODELS[0] else "bootstrap_model_admitted"
-            return Selection(model, reason, available_memory_bytes, required, None)
-    if any(model in installed_models for model in SUPPORTED_MODELS):
+            return Selection(model, "default_model_admitted", available_memory_bytes, required, None)
+    if any(model in installed_models for model in DEFAULT_MODELS):
         raise ValueError("installed_models_memory_blocked")
+    if any(model in installed_models for model in SUPPORTED_MODELS):
+        raise ValueError("explicit_model_required")
     raise ValueError("supported_model_not_installed")
 
 
@@ -173,11 +175,12 @@ def main(argv: list[str] | None = None) -> int:
                     receipt["memoryShortfallBytes"] = max(0, required - available)
         if available is not None:
             receipt["availableMemoryBytes"] = available
-        receipt["recommendedAction"] = (
-            "close_large_apps_then_rerun_check"
-            if str(error) in {"installed_models_memory_blocked", "requested_model_memory_blocked"}
-            else "inspect_local_model_installation"
-        )
+        if str(error) in {"installed_models_memory_blocked", "requested_model_memory_blocked"}:
+            receipt["recommendedAction"] = "close_large_apps_then_rerun_check"
+        elif str(error) == "explicit_model_required":
+            receipt["recommendedAction"] = "set_local_code_model_explicitly"
+        else:
+            receipt["recommendedAction"] = "inspect_local_model_installation"
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 1
 

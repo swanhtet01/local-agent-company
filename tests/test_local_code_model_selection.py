@@ -38,13 +38,15 @@ class LocalCodeModelSelectionTests(unittest.TestCase):
             source = (root / "scripts" / name).read_text(encoding="utf-8")
             self.assertIsNone(re.search(r"(?i)[a-z]:\\users\\[^\\]+", source))
 
-    def test_prefers_quality_model_only_when_installed_and_memory_admitted(self) -> None:
+    def test_defaults_to_low_memory_model_even_when_larger_llama_is_available(self) -> None:
         selected = select_model({"llama3.2:3b", "llama3.2:1b"}, 5 * GIB)
-        self.assertEqual(selected.model, "llama3.2:3b")
-        self.assertEqual(selected.reason, "quality_model_admitted")
+        self.assertEqual(selected.model, "llama3.2:1b")
+        self.assertEqual(selected.reason, "default_model_admitted")
         constrained = select_model({"llama3.2:3b", "llama3.2:1b"}, 3 * GIB)
         self.assertEqual(constrained.model, "llama3.2:1b")
-        self.assertEqual(constrained.reason, "bootstrap_model_admitted")
+        self.assertEqual(constrained.reason, "default_model_admitted")
+        with self.assertRaisesRegex(ValueError, "explicit_model_required"):
+            select_model({"llama3.2:3b"}, 5 * GIB)
 
     def test_explicit_model_request_still_obeys_installation_and_memory(self) -> None:
         selected = select_model({"llama3.2:3b", "llama3.2:1b"}, 5 * GIB, "llama3.2:3b")

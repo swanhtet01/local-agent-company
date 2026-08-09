@@ -3,7 +3,7 @@ from __future__ import annotations
 
 DEFAULT_LOCAL_MODEL = "llama3.2:1b"
 SUPPORTED_LOCAL_MODELS = frozenset({DEFAULT_LOCAL_MODEL, "llama3.2:3b"})
-PREFERRED_LOCAL_MODELS = ("llama3.2:3b", DEFAULT_LOCAL_MODEL)
+PREFERRED_LOCAL_MODELS = (DEFAULT_LOCAL_MODEL,)
 
 
 def is_supported_local_model(model: object) -> bool:
