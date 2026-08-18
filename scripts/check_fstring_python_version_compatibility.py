@@ -30,6 +30,17 @@ from pathlib import Path
 
 def find_incompatible_fstrings(source: bytes) -> list[tuple[int, str]]:
     hits: list[tuple[int, str]] = []
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    if fstring_start is None:
+        # FSTRING_START/MIDDLE/END were themselves added to the tokenize module in
+        # 3.12 (the same PEP 701 that made the old-illegal nesting legal). On an
+        # interpreter old enough to lack them, an old-style f-string is a single
+        # opaque STRING token -- there is nothing to walk. That is fine, not a
+        # gap: on THIS interpreter, a genuinely bad nested f-string is a
+        # SyntaxError the moment the file is imported, so the interpreter itself
+        # is the enforcement. This scanner exists for the opposite situation --
+        # an interpreter (3.12+) that would silently accept the bad pattern.
+        return hits
     try:
         tokens = list(tokenize.tokenize(io.BytesIO(source).readline))
     except (tokenize.TokenizeError, SyntaxError, UnicodeDecodeError, IndentationError):
@@ -38,12 +49,12 @@ def find_incompatible_fstrings(source: bytes) -> list[tuple[int, str]]:
         return hits
     open_fstring_quotes: list[str] = []
     for tok in tokens:
-        if tok.type == tokenize.FSTRING_START:
+        if tok.type == fstring_start:
             quote = tok.string[-1]
             if open_fstring_quotes and quote == open_fstring_quotes[-1]:
                 hits.append((tok.start[0], f"nested f-string reuses its enclosing quote {quote!r}"))
             open_fstring_quotes.append(quote)
-        elif tok.type == tokenize.FSTRING_END:
+        elif tok.type == getattr(tokenize, "FSTRING_END", None):
             if open_fstring_quotes:
                 open_fstring_quotes.pop()
         elif tok.type == tokenize.STRING and open_fstring_quotes:

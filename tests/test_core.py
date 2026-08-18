@@ -411,22 +411,33 @@ class CompanyTests(unittest.TestCase):
 
     def test_startup_lock_survives_a_platform_without_fchmod(self):
         # os.fchmod does not exist in the os module on Windows on every standard
-        # CPython build except a small number of unusually recent ones (this repo's
-        # own dev machine has one -- which is exactly why this went unnoticed until
-        # a fresh GitHub Actions Windows runner hit it for real). The lock already
-        # treats a chmod failure as best-effort via "except OSError: pass"; an absent
-        # attribute must be caught the same way, not propagate as an AttributeError
-        # that a caller's broad "except Exception" then reports as an opaque
-        # internal error instead of the real, specific outcome.
+        # CPython build except a small number of unusually recent ones. The lock
+        # already treats a chmod failure as best-effort via "except OSError: pass";
+        # an absent attribute must be caught the same way, not propagate as an
+        # AttributeError that a caller's broad "except Exception" then reports as
+        # an opaque internal error instead of the real, specific outcome.
+        #
+        # This must work on BOTH kinds of machine. This repo's own dev machine has
+        # an unusually recent Python build where fchmod exists -- which is exactly
+        # why the bug went unnoticed here until a real GitHub Actions Windows
+        # runner hit it -- so on THIS machine the attribute is stashed and deleted
+        # to simulate absence. On a machine where it is genuinely absent already
+        # (every standard Windows CPython build), `real_fchmod = os.fchmod` would
+        # itself raise AttributeError before the simulation even began -- an
+        # earlier version of this test did exactly that and failed on real CI for
+        # a reason that had nothing to do with the fix it was meant to prove.
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            real_fchmod = os.fchmod
-            del os.fchmod
+            had_fchmod = hasattr(os, "fchmod")
+            if had_fchmod:
+                real_fchmod = os.fchmod
+                del os.fchmod
             try:
                 with _startup_lock(home):
                     self.assertTrue((home / "service.start.lock").is_file())
             finally:
-                os.fchmod = real_fchmod
+                if had_fchmod:
+                    os.fchmod = real_fchmod
 
     def test_process_birth_fingerprint_is_stable_for_current_process(self):
         first = _observe_process(os.getpid())

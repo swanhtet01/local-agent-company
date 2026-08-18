@@ -1618,15 +1618,25 @@ raise SystemExit(guard.main([
         # which this module's own broad "except Exception" then reported as an
         # opaque internal_guard_error instead of the guard's real outcome -- this
         # is what happened on the project's first real GitHub Actions Windows run.
+        #
+        # Must work on both kinds of machine: where fchmod exists (this repo's own
+        # dev box -- why the bug went unnoticed here) it is stashed, deleted, and
+        # restored to simulate absence; where it is genuinely absent already
+        # (every standard Windows CPython build, including the real CI runner),
+        # `real_fchmod = os.fchmod` would itself raise before the simulation even
+        # began, which is exactly what happened to an earlier version of this test.
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            real_fchmod = os.fchmod
-            del os.fchmod
+            had_fchmod = hasattr(os, "fchmod")
+            if had_fchmod:
+                real_fchmod = os.fchmod
+                del os.fchmod
             try:
                 with guard._runtime_guard_lock(home):
                     self.assertTrue((home / "runtime.guard.lock").is_file())
             finally:
-                os.fchmod = real_fchmod
+                if had_fchmod:
+                    os.fchmod = real_fchmod
 
 
 if __name__ == "__main__":

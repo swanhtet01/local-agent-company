@@ -40,7 +40,19 @@ class FstringPythonVersionCompatibilityTests(unittest.TestCase):
         # expression reuses that same single quote via a dict subscript.
         source = b"""item = {"queue_id": "q1"}\nx = f"{f' (queue {item['queue_id']})' if item['queue_id'] else ''}"\n"""
         hits = find_incompatible_fstrings(source)
-        self.assertTrue(hits, "the detector must flag the known-bad pattern, or it is not testing anything")
+        if sys.version_info >= (3, 12):
+            # tokenize.FSTRING_START exists only from 3.12 (the same PEP 701 that
+            # makes this pattern legal there), so this is where the scanner does
+            # real work and must be proven to catch something.
+            self.assertTrue(hits, "the detector must flag the known-bad pattern, or it is not testing anything")
+        else:
+            # Below 3.12 the pattern above is a SyntaxError the moment Python
+            # itself tries to import the file -- the interpreter is the real
+            # enforcement here, not this scanner. Confirm that directly: it is
+            # why an empty result is the CORRECT answer, not a silent gap.
+            with self.assertRaises(SyntaxError):
+                compile(source, "<bad-fstring>", "exec")
+            self.assertEqual(hits, [])
 
 
 if __name__ == "__main__":
