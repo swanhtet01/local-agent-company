@@ -24,32 +24,10 @@ jobs:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
 
-    # ---------------------------------------------------------------------
-    # TEMPORARY SCAFFOLDING - REMOVE WHEN LINUX IS GREEN
-    #
-    # This project was Windows-only until 2026-08-17. A just-landed fix made
-    # src/local_company/computer_use.py *importable* on Linux (it wraps
-    # `from ctypes import wintypes` in try/except and sets `wintypes = None`),
-    # so all 28 test modules now import there. Whether the 486 tests actually
-    # PASS on Linux at runtime has never been observed - this workflow is the
-    # first real Linux verification the project has ever had.
-    #
-    # So the ubuntu legs are allowed to fail WITHOUT failing the workflow.
-    # They still run, still report, and still show red-with-a-warning on the
-    # PR; they simply do not block. The windows legs are NOT excused, and the
-    # `required` job below turns "all windows legs passed" into the single
-    # status check to protect the branch with.
-    #
-    # DELETE this `continue-on-error` line (and the `required` job's comment
-    # about it) the moment ubuntu-latest goes green on all three Python
-    # versions. Leaving it in place after that point silently converts real
-    # Linux regressions into warnings nobody reads.
-    # ---------------------------------------------------------------------
-    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
-
     strategy:
-      # A Linux failure must not cancel the Windows legs - Windows is the
-      # leg that actually gates the merge.
+      # One matrix leg failing shouldn't cancel the others - every leg's
+      # result is meaningful on its own and the `required` job below needs
+      # to see all of them.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -147,36 +125,30 @@ jobs:
   required:
     # ---------------------------------------------------------------------
     # This is the job to mark as the required status check in branch
-    # protection. It always runs, and it is green only when the `test` job
-    # is green.
-    #
-    # Because the ubuntu legs carry `continue-on-error: true`, a failing
-    # ubuntu leg does not contribute failure to `needs.test.result`. A
-    # failing WINDOWS leg does. So `needs.test.result == 'success'` means
-    # exactly "every windows-latest leg passed" for as long as the temporary
-    # Linux excusal is in place - and it tightens automatically to "every
-    # leg passed" the moment that `continue-on-error` line is deleted.
+    # protection. It always runs, and it is green only when every leg of
+    # the `test` matrix passed - ubuntu-latest and windows-latest, all three
+    # Python versions each. (Linux used to run with `continue-on-error` as
+    # an unproven port; it went green on all three Python versions in run
+    # 32181858375 on 2026-08-19, so the excusal was removed and this gate
+    # now covers the full matrix.)
     # ---------------------------------------------------------------------
-    name: Required (Windows must pass)
+    name: Required (all matrix legs must pass)
     needs: [test]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Gate on the non-excused matrix legs
+      - name: Gate on the full matrix
         run: |
           result="${{ needs.test.result }}"
           echo "test job result: ${result}"
           if [ "${result}" != "success" ]; then
-            echo "::error title=Required CI leg failed::The windows-latest test matrix did not pass (test job result: ${result}). Open the failing leg's job summary for the JSON receipt."
+            echo "::error title=Required CI leg failed::The test matrix did not pass (test job result: ${result}). Open the failing leg's job summary for the JSON receipt."
             exit 1
           fi
-          echo "Every required (windows-latest) leg passed."
+          echo "Every matrix leg passed."
           {
             echo "## Required gate: pass"
             echo ""
-            echo "Every \`windows-latest\` leg of the test matrix passed."
-            echo ""
-            echo "> Note: \`ubuntu-latest\` legs are currently advisory"
-            echo "> (\`continue-on-error: true\`) while the Linux port is unproven."
-            echo "> Check their job summaries before assuming Linux is healthy."
+            echo "Every leg of the test matrix passed (ubuntu-latest and"
+            echo "windows-latest, Python 3.11/3.12/3.13)."
           } >> "$GITHUB_STEP_SUMMARY"
