@@ -403,7 +403,10 @@ def _runtime_guard_lock(home: Path):
     try:
         try:
             os.fchmod(descriptor, 0o600)
-        except OSError:
+        except (OSError, AttributeError):
+            # AttributeError: fchmod is absent on Windows on every standard
+            # CPython build except a small number of unusually recent ones --
+            # already best-effort, so treat its absence the same as its failure.
             pass
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:

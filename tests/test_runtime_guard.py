@@ -1611,6 +1611,23 @@ raise SystemExit(guard.main([
         self.assertNotIn("SENTINEL", stdout.getvalue())
         self.assertLess(len(stdout.getvalue().encode("utf-8")), 2048)
 
+    def test_runtime_guard_lock_survives_a_platform_without_fchmod(self):
+        # os.fchmod does not exist in the os module on Windows on every standard
+        # CPython build except a small number of unusually recent ones. Its absence
+        # was previously an uncaught AttributeError from inside _runtime_guard_lock,
+        # which this module's own broad "except Exception" then reported as an
+        # opaque internal_guard_error instead of the guard's real outcome -- this
+        # is what happened on the project's first real GitHub Actions Windows run.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            real_fchmod = os.fchmod
+            del os.fchmod
+            try:
+                with guard._runtime_guard_lock(home):
+                    self.assertTrue((home / "runtime.guard.lock").is_file())
+            finally:
+                os.fchmod = real_fchmod
+
 
 if __name__ == "__main__":
     unittest.main()

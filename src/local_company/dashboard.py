@@ -1296,12 +1296,18 @@ def render_dashboard(
     notice_html = f'<p class="notice">{cell(notice)}</p>' if notice else ""
     completion_html = ""
     if completion_items:
-        completion_rows = "".join(
-            f"<li>{mission_link(item['job_id'])}: {cell(completion_label(item['state']))}"
-            f"{f' (queue {cell(item['queue_id'])})' if item['queue_id'] else ''} "
-            f"since {cell(item['since'])}</li>"
-            for item in completion_items
-        )
+        completion_row_parts = []
+        for item in completion_items:
+            # Built as a separate statement, not nested inside the row f-string:
+            # a same-quote nested f-string (an f-string inside another f-string's
+            # braces reusing its enclosing quote character) is a SyntaxError before
+            # Python 3.12 (PEP 701). This file targets 3.11+.
+            queue_suffix = f" (queue {cell(item['queue_id'])})" if item['queue_id'] else ''
+            completion_row_parts.append(
+                f"<li>{mission_link(item['job_id'])}: {cell(completion_label(item['state']))}"
+                f"{queue_suffix} since {cell(item['since'])}</li>"
+            )
+        completion_rows = "".join(completion_row_parts)
         completion_html = (
             '<section class="completion-banner"><h2>Mission completion pending</h2>'
             '<p>The durable local state is preserved. No external action is involved. '
@@ -2647,6 +2653,7 @@ def render_vision_capture_fixture(state: str, variant: int) -> str:
             f'<article class="{card_class}"><span>{label}</span>'
             f'<strong>{value}</strong><small>{detail}</small></article>'
         )
+    cards_markup = "".join(cards)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SuperMega controlled Vision fixture</title><style>
@@ -2676,7 +2683,7 @@ footer {{ margin-top:24px; color:#7e91ad; font:11px ui-monospace,monospace; }}
 @media(max-width:760px) {{ .shell {{ grid-template-columns:1fr; }} aside {{ display:none; }} .grid {{ grid-template-columns:1fr 1fr; }} }}
 </style></head><body><div class="shell"><aside><div class="brand">SUPERMEGA</div><span class="fixture">CONTROLLED VISION FIXTURE</span><nav><span>Overview</span><span>Release</span><span>Evidence</span><span>Recovery</span></nav></aside><main>
 <header><div><p class="meta">OWNED LOCAL FIXTURE / {state.upper()} / V{variant:02d}</p><h1>Release operations</h1></div><p class="meta">No customer or operator data</p></header>
-{status_markup}<section class="grid">{"".join(cards)}</section>
+{status_markup}<section class="grid">{cards_markup}</section>
 <footer>Observation only - deterministic controlled training material - not production evidence</footer>
 </main></div></body></html>"""
 
