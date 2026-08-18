@@ -41,11 +41,18 @@ class BuildManifestTests(unittest.TestCase):
         package = root / "src" / "local_company"
         package.mkdir(parents=True)
         self._write_lifecycle_scripts(root)
+        # newline="" on every write_text call in this fixture: its default (None)
+        # applies universal-newline translation on WRITE, not just on read, so a
+        # bare "\n" in these literals becomes "\r\n" on Windows and stays "\n" on
+        # Linux/Mac. The fixture would then be byte-DIFFERENT per platform despite
+        # every character being written by an identical line of Python, which is
+        # exactly what made the release digest below platform-dependent for a
+        # value that exists specifically to prove reproducibility.
         (root / "pyproject.toml").write_text(
-            '[project]\nname = "fixture"\nversion = "0.1.0"\n', encoding="utf-8",
+            '[project]\nname = "fixture"\nversion = "0.1.0"\n', encoding="utf-8", newline="",
         )
         (package / "__init__.py").write_text(
-            '__version__ = "0.1.0"\n', encoding="utf-8",
+            '__version__ = "0.1.0"\n', encoding="utf-8", newline="",
         )
         (package / "worker.py").write_bytes(b"def run():\n    return 1\n")
         if source_hash is None:
@@ -56,7 +63,7 @@ class BuildManifestTests(unittest.TestCase):
                 build_id=build_id,
                 source_hash=source_hash,
             ),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         return package
 
@@ -140,9 +147,23 @@ class BuildManifestTests(unittest.TestCase):
 
             release = calculate_release_digest(root)
             self.assertEqual(release.sha256, expected.hexdigest())
+            # A hardcoded golden digest is only meaningful if the fixture that
+            # produces it is genuinely platform-invariant. write_text's default
+            # newline handling is NOT: it applies universal-newline translation
+            # on WRITE, turning "\n" into "\r\n" on Windows while leaving it
+            # alone on Linux/Mac, which silently made this exact assertion
+            # platform-dependent once before. Prove the precondition directly
+            # rather than trust it: no covered file may contain a bare CR.
+            for path in covered:
+                self.assertNotIn(
+                    b"\r", path.read_bytes(),
+                    f"{path.relative_to(root).as_posix()} contains a carriage return -- "
+                    "the golden digest below is only valid if every fixture write is "
+                    "either write_bytes or write_text(..., newline=\"\")",
+                )
             self.assertEqual(
                 release.sha256,
-                "1cc3547fb89e1e458ef4a08f43aad1d9cd12d640d2fdd929426c2ceedcb8f628",
+                "5cc75dc4985ecc62409f32e857d19f23a1033807af09a8057834b3ed900d347c",
             )
             self.assertEqual(release.file_count, len(covered))
             self.assertEqual(release.total_bytes, expected_bytes)

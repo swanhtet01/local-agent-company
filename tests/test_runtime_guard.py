@@ -1202,7 +1202,10 @@ class RuntimeGuardTests(unittest.TestCase):
         self.assertNotIn("start_new_session", kwargs)
 
         with patch.object(guard.os, "name", "nt"), patch.object(
-            guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", None,
+            # create=True: this constant does not exist on the subprocess
+            # module at all outside Windows, so patch.object must be told to
+            # create it rather than assume it can stash an existing value.
+            guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", None, create=True,
         ), patch(
             "scripts.runtime_guard.subprocess.Popen",
         ) as unavailable_popen:
@@ -1238,7 +1241,19 @@ class RuntimeGuardTests(unittest.TestCase):
 
         denied_again = PermissionError(13, "scheduler denied breakaway")
         denied_again.winerror = 5
-        with patch.object(guard.os, "name", "nt"), patch(
+        with patch.object(guard.os, "name", "nt"), patch.object(
+            # create=True on all three: _spawn_ollama reads these directly off
+            # the real subprocess module when it thinks it is on Windows (via
+            # the os.name patch above), and none of them exist there outside
+            # Windows. Every other block in this test patches them; this one
+            # previously did not, and so only ever ran the real Windows branch
+            # on a machine where the OS already provided real values for free.
+            guard.subprocess, "DETACHED_PROCESS", 0x01, create=True,
+        ), patch.object(
+            guard.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x02, create=True,
+        ), patch.object(
+            guard.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x04, create=True,
+        ), patch(
             "scripts.runtime_guard._verified_executable_sha256",
             return_value=contextlib.nullcontext(signature),
         ), patch(

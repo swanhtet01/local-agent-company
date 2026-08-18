@@ -64,7 +64,7 @@ from local_company.service import (
     PROCESS_BIRTH_SCHEMA, SERVICE_STATE_SCHEMA, _ProcessObservation,
     _SERVICE_PROBE_TIMEOUT_SECONDS, _STARTUP_HEALTH_ATTEMPTS,
     _STARTUP_HEALTH_DEADLINE_SECONDS, _observe_process, _probe, _read_state,
-    _startup_lock, _write_state, service_status,
+    _service_python_executable, _startup_lock, _write_state, service_status,
     start_service, stop_service,
 )
 from scripts.local_ai import translate
@@ -438,6 +438,30 @@ class CompanyTests(unittest.TestCase):
             finally:
                 if had_fchmod:
                     os.fchmod = real_fchmod
+
+    def test_service_executable_trust_check_accepts_a_symlinked_interpreter(self):
+        # sys.executable being a symlink is not a rare edge case on Linux, it is
+        # the norm: GitHub Actions' own hosted Python (bin/python -> a versioned
+        # binary) is a symlink, and so is virtually every pyenv, Homebrew, or
+        # Linux-distro-packaged Python. This is exactly what failed on the
+        # project's first real Linux CI run, and it would have failed for real
+        # end users on real Linux and Mac machines the same way -- this was
+        # never only a CI quirk.
+        #
+        # This machine cannot create a real symlink without elevated privilege
+        # (Developer Mode / Admin), so the symlink is simulated by patching
+        # Path.is_symlink to report True for a real regular file -- proving the
+        # function's logic no longer depends on that answer being False, which
+        # is the actual property that matters, independent of whether this
+        # specific machine can construct a literal symlink to exercise it.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_interpreter = Path(tmp) / "python3"
+            fake_interpreter.write_bytes(b"not a real interpreter, just a regular file")
+            with patch.object(sys, "executable", str(fake_interpreter)), patch.object(
+                sys, "_base_executable", str(fake_interpreter), create=True,
+            ), patch.object(Path, "is_symlink", return_value=True):
+                resolved = _service_python_executable()
+            self.assertEqual(Path(resolved), fake_interpreter.resolve())
 
     def test_process_birth_fingerprint_is_stable_for_current_process(self):
         first = _observe_process(os.getpid())
@@ -1176,7 +1200,15 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(model.seed, 42)
 
     def test_default_company_home_is_stable_and_environment_is_user_anchored(self):
-        fixed_home = Path("C:/Users/tester")
+        # Must be genuinely absolute on the platform actually running this test,
+        # not just shaped like an absolute path on Windows. "C:/Users/tester" has
+        # no leading "/", so pathlib treats it as RELATIVE on POSIX -- and
+        # default_company_home() would then anchor it under Path.home() a second
+        # time, silently doubling the path instead of testing what an absolute
+        # LOCAL_COMPANY_HOME actually does. Windows needs a drive letter to be
+        # absolute at all, so the fixture must pick per platform, not share one
+        # literal.
+        fixed_home = Path("C:/Users/tester") if os.name == "nt" else Path("/home/tester")
         with patch("local_company.config.Path.home", return_value=fixed_home):
             with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": ""}):
                 self.assertEqual(default_company_home(), fixed_home / ".local-company")

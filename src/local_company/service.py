@@ -467,12 +467,22 @@ def _service_python_executable() -> str:
     # directly so the captured child PID is also the serving PID.
     raw = getattr(sys, "_base_executable", sys.executable) if os.name == "nt" else sys.executable
     candidate = Path(raw)
-    if not candidate.is_absolute() or candidate.is_symlink():
+    if not candidate.is_absolute():
         raise RuntimeError("Service Python executable is not a trusted regular file")
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
         raise RuntimeError("Service Python executable is unavailable") from exc
+    # Deliberately no candidate.is_symlink() rejection: that check ran BEFORE
+    # resolution and rejected sys.executable outright on any interpreter
+    # reached through a symlink -- which is not a rare edge case on Linux, it
+    # is the norm. GitHub Actions' own hosted Python (bin/python -> a
+    # versioned binary) is a symlink, and so is virtually every pyenv,
+    # Homebrew, or Linux-distro-packaged Python. Resolving the FULL chain to
+    # its real target with strict=True and then validating THAT target below
+    # is the safe way to trust a possibly-symlinked path; rejecting the
+    # symlink before ever resolving it added no safety the resolution does
+    # not already provide, while breaking the common case outright.
     if not resolved.is_file():
         raise RuntimeError("Service Python executable is not a trusted regular file")
     return str(resolved)
