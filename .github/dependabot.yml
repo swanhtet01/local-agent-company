@@ -1,0 +1,32 @@
+version: 2
+
+# github-actions only, on purpose.
+#
+# There is no `pip` / `uv` / `poetry` ecosystem entry because the project
+# declares `dependencies = []` in pyproject.toml and runs entirely on the
+# standard library. Adding a Python ecosystem here would give Dependabot
+# nothing to update while implying a dependency surface that does not exist.
+#
+# The GitHub Actions used by .github/workflows/ are the only third-party
+# code in this repository, so they are the only thing worth watching.
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      # One PR per week for routine action bumps instead of five.
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

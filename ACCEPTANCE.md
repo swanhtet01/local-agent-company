@@ -1,10 +1,32 @@
 # Local Runtime Acceptance Record
 
+> **Historical record — superseded in part. Read this first.**
+>
+> This file is preserved unchanged as the acceptance evidence captured on the
+> dates below. It is deliberately not rewritten, because an evidence record
+> that gets edited after the fact is not evidence. Three things have since
+> moved, so do not read the measurements below as current:
+>
+> - **The validated model no longer exists in this project.** `qwen3.5:0.8b`
+>   was the model measured here. `src/local_company/model_policy.py` now
+>   allowlists only `llama3.2:1b` and `llama3.2:3b` and would *reject* the
+>   model named below. Every throughput number here was produced by a model
+>   the code will no longer load.
+> - **The test count has moved on**, from the 259 recorded here to roughly 490
+>   at the time of writing. Run `python scripts/run_tests.py` for the real
+>   figure rather than quoting any document.
+> - **Every measurement here is single-machine**, taken on the founder's ROG
+>   Ally. Nothing in this file has been reproduced on a second machine, and
+>   the Linux legs of CI have never run.
+>
+> A fresh acceptance pass is required before any of these numbers are used in a
+> customer-facing claim.
+
 Date: 2026-07-26  
 Current source verification: 2026-07-28
 Machine: AMD Ryzen Z1 Extreme, approximately 11.7 GB shared memory  
 Ollama: 0.32.4  
-Validated model: `qwen3.5:0.8b`
+Validated model: `qwen3.5:0.8b` (no longer permitted by `model_policy.py`; see the note above)
 
 ## Evidence
 

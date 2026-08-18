@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import subprocess
@@ -639,6 +640,111 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertFalse(receipt["stateMutated"])
             self.assertFalse(receipt["externalActionPerformed"])
             self.assertNotIn(str(home), str(receipt))
+
+    def test_human_brief_renders_next_action_without_leaking_paths(self) -> None:
+        from scripts.local_ai import _render_brief_text
+
+        payload = {
+            "schema": "local-ai.company-brief.v1", "status": "ready",
+            "autonomy": {"status": "not_installed"},
+            "queue": {"status": "blocked", "blockers": ["knowledge_changed"]},
+            "product": {
+                "projectName": "Future Lab", "offerStatus": "evidence_required",
+                "offerMissingProof": ["tenMeasuredCrossCategoryReviews"],
+                "pendingExperimentCount": 2,
+            },
+            "resources": {
+                "availableMemoryBytes": 784187392,
+                "minimumExecutionMemoryBytes": 2 * 1024**3,
+                "memoryAdmissionReady": False,
+                "memoryShortfallBytes": 1363296256,
+            },
+            "nextAction": "repair_autopilot",
+            "command": "local-ai.cmd autopilot repair",
+        }
+        text = _render_brief_text(payload)
+        self.assertIn("Repair the autopilot task", text)
+        self.assertIn("local-ai.cmd autopilot repair", text)
+        self.assertIn("Future Lab", text)
+        self.assertIn("0.7 GiB free", text)
+        self.assertIn("1.3 GiB short", text)
+        self.assertIn("ten measured cross category reviews", text)
+        self.assertIn("2 experiments waiting for your review", text)
+        # Raw identifiers are the machine contract, not the human display.
+        self.assertNotIn("repair_autopilot", text)
+        self.assertNotIn("availableMemoryBytes", text)
+        # A queue blocker must sit under Queue, never under the Offer row.
+        queue_line = text.index("Queue")
+        self.assertLess(queue_line, text.index("blocked by"))
+        self.assertLess(text.index("blocked by"), text.index("Offer"))
+
+    def test_human_brief_degrades_on_unknown_values_instead_of_failing(self) -> None:
+        from scripts.local_ai import _render_brief_text
+
+        text = _render_brief_text({
+            "autonomy": {"status": "someBrandNewState"},
+            "queue": {"status": None, "blockers": "not-a-list"},
+            "product": {},
+            "resources": {},
+            "nextAction": "an_unmapped_next_action",
+            "command": "",
+        })
+        self.assertIn("some brand new state", text)
+        self.assertIn("An unmapped next action", text)
+        self.assertIn("cannot be measured", text)
+        self.assertIn("Local company", text)
+
+    def test_suggested_commands_name_a_launcher_that_exists_on_this_platform(self) -> None:
+        import scripts.local_ai as launchpad
+
+        root = Path(__file__).resolve().parents[1]
+        # Both launchers must ship, or one platform gets told to run a file
+        # that is not there.
+        self.assertTrue((root / "local-ai.cmd").is_file())
+        self.assertTrue((root / "local-ai").is_file())
+
+        original = launchpad.LAUNCHER
+        try:
+            launchpad.LAUNCHER = "./local-ai"
+            self.assertEqual(
+                launchpad._localize_command("local-ai.cmd autopilot repair"),
+                "./local-ai autopilot repair",
+            )
+            self.assertNotIn("local-ai.cmd", launchpad._localize_command(launchpad.HELP))
+            self.assertIsNone(launchpad._localize_command(None))
+            launchpad.LAUNCHER = "local-ai.cmd"
+            self.assertEqual(
+                launchpad._localize_command("local-ai.cmd brief"), "local-ai.cmd brief",
+            )
+        finally:
+            launchpad.LAUNCHER = original
+
+    def test_posix_launchers_are_executable_shell_scripts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for name, module in (
+            ("local-ai", "scripts/local_ai.py"),
+            ("local-company", "local_company.cli"),
+            ("company-mcp", "local_company.mcp_server"),
+        ):
+            with self.subTest(launcher=name):
+                source = (root / name).read_text(encoding="utf-8")
+                self.assertTrue(source.startswith("#!/bin/sh"))
+                self.assertIn(module, source)
+                # A caller's PYTHONPATH must survive, and the venv is preferred.
+                self.assertIn(".venv/bin/python", source)
+                self.assertNotIn("\r\n", source)
+
+    def test_brief_defaults_to_json_for_programmatic_callers(self) -> None:
+        # run_local_brief_assistant parses this receipt; the human renderer
+        # must never become the default for in-process callers.
+        from scripts.local_ai import run_company_brief
+
+        signature = inspect.signature(run_company_brief)
+        self.assertEqual(signature.parameters["render"].default, "json")
+        self.assertEqual(translate(["brief"]).command, ())
+        self.assertEqual(translate(["brief", "--json"]).command, ("--json",))
+        with self.assertRaises(ValueError):
+            translate(["brief", "--pretty"])
 
     def test_windows_wrapper_routes_everything_through_argument_safe_python_launcher(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "local-ai.cmd").read_text(encoding="utf-8")

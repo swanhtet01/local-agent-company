@@ -12,7 +12,18 @@ import subprocess
 import sys
 import tempfile
 import time
-from ctypes import wintypes
+try:
+    from ctypes import wintypes
+except (ImportError, ValueError):
+    # ctypes.wintypes declares Windows-only format codes (VARIANT_BOOL uses "v",
+    # which CPython registers only on Windows) and raises on other platforms.
+    # Importing this module must still succeed there: cli.py and workflow_pilot
+    # import it unconditionally, and mcp_server executes missions by shelling
+    # out to `python -m local_company.cli`, so a hard failure here takes the
+    # whole coordinator down on Linux rather than just the desktop workcell.
+    # Every consumer of wintypes below sits behind an os.name check that fails
+    # closed with computer_use_requires_windows.
+    wintypes = None  # type: ignore[assignment]
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable

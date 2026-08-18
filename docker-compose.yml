@@ -1,0 +1,194 @@
+# SuperMega Local Workcell - single-box deployment.
+#
+# Sized for an 8 GB VPS (Hetzner CX32 / Contabo VPS S). The memory limits below
+# are load-bearing, not decoration: capacity.observe_cgroup_memory() reads
+# /sys/fs/cgroup/memory.max inside the container and takes the MINIMUM of the
+# cgroup ceiling and the host /proc/meminfo reading. Without a limit the
+# coordinator would see the whole host and the admission gate would let work in
+# that the box cannot actually run.
+#
+#   coordinator  2g   (stdlib Python; the real cost is the subprocess CLI run)
+#   ollama       5g   (llama3.2:3b q4 needs ~3.5g resident; 1b needs ~1.5g)
+#   ~1g left for the host, sshd, and page cache.
+#
+# Bring up with:  docker compose up -d --build
+
+name: local-workcell
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local-workcell/coordinator:0.1.0
+    hostname: coordinator
+    environment:
+      LOCAL_COMPANY_HOME: /state
+      LOCAL_COMPANY_MODEL: llama3.2:1b
+      # The coordinator reaches inference by SERVICE NAME on the bridge
+      # network, not by loopback: core.OllamaModel's loopback default resolves
+      # to the coordinator container itself. Read by core.default_ollama_host(),
+      # which validates scheme, host and port and rejects paths and embedded
+      # credentials - "http://ollama:11434" satisfies it.
+      #
+      # CAVEAT: dashboard.runtime_model_identity() still labels anything other
+      # than LOOPBACK_OLLAMA_HOST as "nonlocal", which check_readiness turns
+      # into a service_runtime_endpoint_mismatch blocker. The stack will reach
+      # the model and still fail readiness until that is reconciled. See
+      # deploy/README.md, "Known gaps", item 3.
+      LOCAL_COMPANY_OLLAMA_HOST: http://ollama:11434
+      TMPDIR: /tmp
+    volumes:
+      - company-state:/state
+    tmpfs:
+      # /app is read-only to uid 10001; tests and exports need a writable TMPDIR.
+      - /tmp:size=512m,mode=1777
+    networks:
+      - workcell
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # NO `ports:` STANZA, DELIBERATELY. The dashboard binds 127.0.0.1 inside
+    # this container's own netns, so publishing achieves nothing, and the
+    # dashboard has no authentication of any kind. Access it over an SSH
+    # tunnel or Tailscale - see deploy/README.md.
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2.0
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  ollama:
+    # Pin a digest before you call this production:
+    #   image: ollama/ollama@sha256:<digest>
+    image: ollama/ollama:latest
+    hostname: ollama
+    environment:
+      # Bind all interfaces INSIDE the container so `ollama:11434` is reachable
+      # from the coordinator. This is safe only because no port is published
+      # and the network is not routable from outside the host.
+      OLLAMA_HOST: 0.0.0.0:11434
+      # Mirror the single-runtime discipline in AGENTS.md: one model resident,
+      # one request in flight, scale to zero quickly.
+      OLLAMA_KEEP_ALIVE: 30s
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - workcell
+    # NO `ports:` STANZA, DELIBERATELY. AGENTS.md: never expose a local model
+    # server to the network. Model pulls are outbound only.
+    mem_limit: 5g
+    memswap_limit: 5g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL REVERSE PROXY - COMMENTED OUT ON PURPOSE. READ THIS FIRST.
+  # ---------------------------------------------------------------------------
+  #
+  # !!! WARNING !!!
+  # The dashboard has NO USER AUTHENTICATION. Its only defences are (a) binding
+  # 127.0.0.1 and (b) a Host-header allowlist that accepts exactly
+  # "127.0.0.1:<port>" and "localhost:<port>". Its mutation token is embedded
+  # in the rendered HTML, so ANY reader of the page is also a writer whenever
+  # LOCAL_COMPANY_SERVICE_TOKEN is set. Terminating TLS and basic auth in front
+  # of it does NOT make it multi-tenant, does NOT make it auditable per user,
+  # and does NOT make write mode safe.
+  #
+  # If you enable this at all, enable it READ-ONLY: start the coordinator
+  # WITHOUT LOCAL_COMPANY_SERVICE_TOKEN, so no LocalQueueWorker is constructed
+  # and every mutating route answers 405 "Dashboard is read-only".
+  # NEVER expose the dashboard publicly in write mode. The default and
+  # recommended access path remains `ssh -L` or Tailscale - see deploy/README.md.
+  #
+  # Two mechanical obstacles this block has to solve:
+  #   1. The dashboard listens on the COORDINATOR's loopback. A proxy in its own
+  #      netns cannot reach it. `network_mode: "service:coordinator"` puts the
+  #      proxy in the coordinator's namespace so 127.0.0.1:8765 resolves. Note
+  #      that this also means the proxy can no longer be attached to `networks:`
+  #      and inherits the coordinator's (absent) published ports - so the
+  #      `ports:` stanza has to move onto the COORDINATOR service.
+  #   2. The Host-header allowlist rejects "workcell.example.com". The proxy
+  #      must rewrite Host to "localhost:8765" on the way through, and must NOT
+  #      pass an Origin header that the allowlist will reject.
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   network_mode: "service:coordinator"   # shares the coordinator's loopback
+  #   depends_on:
+  #     - coordinator
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   mem_limit: 256m
+  #   restart: unless-stopped
+  #
+  # ...and add to the COORDINATOR service (because caddy shares its netns):
+  #   ports:
+  #     - "443:443"
+  #     - "80:80"
+  #
+  # Caddyfile:
+  #
+  #   workcell.example.com {
+  #       encode zstd gzip
+  #       basicauth {
+  #           # caddy hash-password --plaintext '<long random>'
+  #           founder $2a$14$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH
+  #       }
+  #       # Refuse anything that is not a plain read.
+  #       @mutating not method GET HEAD
+  #       respond @mutating "Dashboard is read-only behind this proxy" 405
+  #       reverse_proxy 127.0.0.1:8765 {
+  #           header_up Host localhost:8765
+  #           header_up -Origin
+  #           header_up -Sec-Fetch-Site
+  #       }
+  #   }
+  #
+  # Even with all of the above: prefer the SSH tunnel. A proxy you have to
+  # configure this carefully is a proxy that will eventually be misconfigured.
+
+networks:
+  workcell:
+    driver: bridge
+    # Not `internal: true`: the ollama service needs outbound egress to pull
+    # model blobs from the registry. Inbound protection is ufw's job on the
+    # host (see deploy/README.md, "First boot hardening"), not this network's.
+    internal: false
+
+volumes:
+  company-state:
+    # company.db + outputs/. THIS is the volume you back up. Losing it loses
+    # every mission, receipt, approval, and quality record.
+    driver: local
+  ollama-models:
+    # Model blobs. Reproducible from `ollama pull`; back up only to save
+    # bandwidth, never because the data is precious.
+    driver: local
+  # caddy-data:
+  # caddy-config:

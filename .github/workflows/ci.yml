@@ -1,0 +1,182 @@
+name: CI
+
+# Local Agent Company has zero third-party dependencies (pyproject.toml:
+# `dependencies = []`). There is deliberately NO pip install step in this
+# workflow: adding one would succeed silently and hide the fact that the
+# project must keep running on a bare stdlib interpreter.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+
+    # ---------------------------------------------------------------------
+    # TEMPORARY SCAFFOLDING - REMOVE WHEN LINUX IS GREEN
+    #
+    # This project was Windows-only until 2026-08-17. A just-landed fix made
+    # src/local_company/computer_use.py *importable* on Linux (it wraps
+    # `from ctypes import wintypes` in try/except and sets `wintypes = None`),
+    # so all 28 test modules now import there. Whether the 486 tests actually
+    # PASS on Linux at runtime has never been observed - this workflow is the
+    # first real Linux verification the project has ever had.
+    #
+    # So the ubuntu legs are allowed to fail WITHOUT failing the workflow.
+    # They still run, still report, and still show red-with-a-warning on the
+    # PR; they simply do not block. The windows legs are NOT excused, and the
+    # `required` job below turns "all windows legs passed" into the single
+    # status check to protect the branch with.
+    #
+    # DELETE this `continue-on-error` line (and the `required` job's comment
+    # about it) the moment ubuntu-latest goes green on all three Python
+    # versions. Leaving it in place after that point silently converts real
+    # Linux regressions into warnings nobody reads.
+    # ---------------------------------------------------------------------
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
+
+    strategy:
+      # A Linux failure must not cancel the Windows legs - Windows is the
+      # leg that actually gates the merge.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    defaults:
+      run:
+        # bash on both runners so one step definition serves Linux and
+        # Windows. Git Bash ships on windows-latest.
+        shell: bash
+
+    steps:
+      # scripts/stamp_build_manifest.py hashes the RAW BYTES of every
+      # operational source file, so a CRLF checkout on windows-latest would
+      # fail the manifest gate for a reason that has nothing to do with the
+      # contributor's change.
+      #
+      # .gitattributes already normalises the tree to LF (`* text=auto
+      # eol=lf`), which is the real fix. This step is defence in depth: Git
+      # for Windows ships with `core.autocrlf=true`, so if the attributes
+      # file is ever narrowed or a path slips out of its coverage, the
+      # failure would surface as an inscrutable hash mismatch on Windows
+      # only. Pinning the runner's git makes the digest platform-independent
+      # regardless.
+      - name: Pin checkout line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Report the interpreter
+        run: |
+          python -VV
+          python -c "import sys; print('executable:', sys.executable)"
+
+      # Gate 1. The manifest is a SHA-256 over every .py in
+      # src/local_company/ (except build_info.py) plus 12 allowlisted
+      # scripts/ lifecycle files. A PR that edits operational source without
+      # re-stamping fails here, by design.
+      - name: Verify the build manifest
+        id: manifest
+        run: |
+          set -o pipefail
+          # --check prints its receipt on stdout when green and on stderr
+          # when stale, so merge the streams into one receipt file.
+          if python scripts/stamp_build_manifest.py --check 2>&1 | tee manifest-receipt.json; then
+            echo "Build manifest is current."
+          else
+            echo "::error title=Build manifest is stale::Operational source changed without a re-stamp. Run: python scripts/stamp_build_manifest.py --write --build-id local-build-YYYYMMDD.N"
+            echo ""
+            echo "The embedded SHA-256 in src/local_company/build_info.py no longer"
+            echo "matches the operational source it is supposed to cover."
+            echo ""
+            echo "Coverage: every .py under src/local_company/ except build_info.py,"
+            echo "plus the 12 allowlisted lifecycle files under scripts/."
+            echo ""
+            echo "Fix it locally and commit src/local_company/build_info.py:"
+            echo ""
+            echo "  python scripts/stamp_build_manifest.py --write --build-id local-build-YYYYMMDD.N"
+            echo ""
+            echo "The build ID is not allowed to move backward, so pick one at or"
+            echo "after the ID currently embedded in the manifest:"
+            echo ""
+            echo "  currently embedded: $(grep -o 'local-build-[0-9]\{8\}\.[0-9]\{1,4\}' src/local_company/build_info.py || echo '(could not read BUILD_ID)')"
+            echo ""
+            echo "Same calendar day is fine - bump the .N revision instead."
+            exit 1
+          fi
+
+      # Gate 2. Stdlib unittest via the project runner, which turns warnings
+      # into errors and emits a JSON receipt on stdout. The unittest report
+      # itself goes to stderr and stays in the log.
+      - name: Run the test suite
+        id: tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          python scripts/run_tests.py | tee test-receipt.json
+
+      - name: Publish receipts to the job summary
+        if: always()
+        run: |
+          python .github/scripts/ci_summary.py \
+            --label "${{ matrix.os }} / Python ${{ matrix.python-version }}" \
+            --manifest-receipt manifest-receipt.json \
+            --test-receipt test-receipt.json
+
+  required:
+    # ---------------------------------------------------------------------
+    # This is the job to mark as the required status check in branch
+    # protection. It always runs, and it is green only when the `test` job
+    # is green.
+    #
+    # Because the ubuntu legs carry `continue-on-error: true`, a failing
+    # ubuntu leg does not contribute failure to `needs.test.result`. A
+    # failing WINDOWS leg does. So `needs.test.result == 'success'` means
+    # exactly "every windows-latest leg passed" for as long as the temporary
+    # Linux excusal is in place - and it tightens automatically to "every
+    # leg passed" the moment that `continue-on-error` line is deleted.
+    # ---------------------------------------------------------------------
+    name: Required (Windows must pass)
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the non-excused matrix legs
+        run: |
+          result="${{ needs.test.result }}"
+          echo "test job result: ${result}"
+          if [ "${result}" != "success" ]; then
+            echo "::error title=Required CI leg failed::The windows-latest test matrix did not pass (test job result: ${result}). Open the failing leg's job summary for the JSON receipt."
+            exit 1
+          fi
+          echo "Every required (windows-latest) leg passed."
+          {
+            echo "## Required gate: pass"
+            echo ""
+            echo "Every \`windows-latest\` leg of the test matrix passed."
+            echo ""
+            echo "> Note: \`ubuntu-latest\` legs are currently advisory"
+            echo "> (\`continue-on-error: true\`) while the Linux port is unproven."
+            echo "> Check their job summaries before assuming Linux is healthy."
+          } >> "$GITHUB_STEP_SUMMARY"

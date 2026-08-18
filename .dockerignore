@@ -1,0 +1,115 @@
+# Build context exclusions for the SuperMega Local Workcell coordinator image.
+#
+# Rule of thumb: the image carries SOURCE only. Every byte of state
+# (company.db, outputs, receipts, sealed workflows, model blobs) belongs in a
+# volume mounted at /state, never in a layer. Anything listed here that still
+# needs to reach the container must arrive as a bind mount or a volume.
+
+# --- Local state: never bake into an image ---------------------------------
+.local-company/
+.local-company-*/
+outputs/
+**/outputs/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+company.db*
+
+# --- Virtualenvs, caches, build artifacts ----------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- VCS and tooling metadata ----------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+.claude/
+.vscode/
+.idea/
+
+# --- Node payloads for the Windows-only browser QA lane --------------------
+# agent-browser is installed under .local-company-tools and is a win32 binary;
+# it is useless in a Linux image and is excluded by the .local-company-*/ rule
+# above. These are belt-and-braces for a differently-rooted install.
+node_modules/
+**/node_modules/
+package-lock.json
+
+# --- Pilot bundles and exported evidence -----------------------------------
+# build_pilot_bundle.py output is owner-review material, not image content.
+pilot-bundle/
+pilot-bundles/
+*-pilot-bundle/
+*.bundle.json
+bundle-manifest.json
+BUNDLE-README.txt
+export/
+exports/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# --- Windows launchers and host-only scripts -------------------------------
+# .cmd shims and the PowerShell scheduler cannot run in the container.
+*.cmd
+*.bat
+*.ps1
+*.lnk
+
+# --- OneDrive / Windows Explorer junk --------------------------------------
+desktop.ini
+Thumbs.db
+ehthumbs.db
+$RECYCLE.BIN/
+System Volume Information/
+~$*
+*.tmp
+*.temp
+*.swp
+*.bak
+*.orig
+*.rej
+*~
+* - Copy*
+*-conflicted copy*
+
+# --- Secrets and per-host configuration ------------------------------------
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.crt
+secrets/
+.netrc
+
+# --- Container assets that must not recurse into the context ---------------
+.dockerignore
+docker-compose.override.yml
+docker-compose.*.yml
+Caddyfile
+caddy-data/
+caddy-config/
+
+# NOTE: deploy/, scripts/, src/, tests/, examples/ and pyproject.toml are
+# deliberately NOT ignored. The image copies scripts/ and tests/ so the suite
+# and the readiness/manifest tooling can run in the container, and deploy/ so
+# verify_linux_port.py is available at /app/deploy.

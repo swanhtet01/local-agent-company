@@ -1,0 +1,22 @@
+#!/bin/sh
+# Full coordinator CLI. POSIX counterpart of local-company.cmd.
+#
+# Usage: ./local-company doctor
+#        ./local-company queue list
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    PYTHON="python"
+fi
+
+# Prepend rather than overwrite so a caller's own PYTHONPATH survives.
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+exec "$PYTHON" -m local_company.cli "$@"

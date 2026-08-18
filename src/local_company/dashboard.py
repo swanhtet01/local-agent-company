@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 from . import __version__
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
-    Company, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
+    Company, LOOPBACK_OLLAMA_HOST, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
     QUEUE_RETRY_PREFLIGHT_SCHEMA,
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECHECK_PREVIEW_SCHEMA,
     QUALITY_SUPERSESSION_LIST_SCHEMA,
@@ -33,6 +33,313 @@ from .supermega import (
 MAX_FORM_BYTES = 16 * 1024
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PRODUCT_PAID_SETUP_SIGNALS = ("unknown", "no", "yes")
+
+# Single shared stylesheet for every operator-facing dashboard page.
+#
+# This is a PLAIN string, never an f-string: the page templates below are
+# f-strings, so any CSS written inline there must escape every brace as
+# {{ / }}. Keeping the stylesheet out of the f-string and interpolating it
+# through one {_STYLESHEET} placeholder means the CSS body needs no escaping
+# at all. Do not convert this constant to an f-string.
+#
+# Colours are declared once as custom properties on :root and are re-declared
+# (tokens only) under prefers-color-scheme: light. No raw hex appears outside
+# those two token blocks. Everything stays inline - the dashboard is served
+# over loopback under a strict CSP with no external font, image or CSS URL.
+_STYLESHEET = """
+:root {
+  color-scheme: light dark;
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --ground: #0b1020;
+  --well: #0b1020;
+  --panel: #121a2d;
+  --line: #26324a;
+  --line-strong: #3a4864;
+  --pill: #26324a;
+
+  --text: #e8ecf4;
+  --text-soft: #cbd5e1;
+  --muted: #9aa7bd;
+  --faint: #7b89a0;
+
+  --accent: #8bd5ff;
+  --accent-ink: #07111f;
+  --focus: #8bd5ff;
+
+  --ok: #87e6a8;
+  --danger: #ff9b9b;
+  --warn: #ffd479;
+
+  --info-bg: #111f35;
+  --info-line: #31527a;
+  --warn-bg: #2b2615;
+  --warn-line: #67582b;
+  --ok-bg: #143520;
+  --ok-line: #27693d;
+  --ok-text: #a7f3bd;
+  --danger-bg: #5a1f2a;
+  --danger-text: #ffd7d7;
+
+  font-family: var(--font);
+  background: var(--ground);
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --ground: #f3f6fb;
+    --well: #e9eef7;
+    --panel: #ffffff;
+    --line: #d2dae8;
+    --line-strong: #aab6c9;
+    --pill: #e2e8f3;
+
+    --text: #131a28;
+    --text-soft: #333f57;
+    --muted: #55627a;
+    --faint: #626e87;
+
+    --accent: #0a5c8f;
+    --accent-ink: #ffffff;
+    --focus: #0a5c8f;
+
+    --ok: #1a6a3d;
+    --danger: #a3202f;
+    --warn: #7d5205;
+
+    --info-bg: #e6effa;
+    --info-line: #9cbcdf;
+    --warn-bg: #fdf3da;
+    --warn-line: #cfa953;
+    --ok-bg: #e2f6e8;
+    --ok-line: #7fc79a;
+    --ok-text: #12542d;
+    --danger-bg: #fce4e6;
+    --danger-text: #8b1a26;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 20px 60px;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.5;
+}
+
+/* Keep long prose to a readable measure without capping tables or grids. */
+body > p { max-width: 80ch; }
+
+h1 { margin: 0 0 10px; font-size: clamp(22px, 3vw, 28px); line-height: 1.2; }
+h2 { font-size: 19px; line-height: 1.25; }
+h3 { font-size: 16px; line-height: 1.3; }
+section { margin-top: 26px; }
+
+a { color: var(--accent); }
+a:hover { text-decoration-thickness: 2px; }
+
+/* Keyboard focus was previously invisible everywhere. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+a, button, input, select, textarea {
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* This dashboard is full of SHA-256 digests: give them a real mono stack. */
+code, pre, samp, kbd, .quote, .digest code, .build-hash code, td code {
+  font-family: var(--mono);
+}
+code { color: var(--accent); overflow-wrap: anywhere; }
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+  background: var(--well);
+  border: 1px solid var(--line);
+  padding: 14px;
+  border-radius: var(--radius-sm);
+}
+.quote {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 520px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  line-height: 1.5;
+}
+
+ul { padding-left: 18px; }
+td ul, th ul { margin: 0; }
+
+/* Layout: one auto-fitting grid replaces the per-page 2 / 3 / 5 column rules. */
+.grid, .form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: 16px;
+  margin: 18px 0;
+}
+.metrics { display: flex; gap: 28px; flex-wrap: wrap; }
+
+.card, .grid > div, .panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.panel { padding: 20px; border-color: var(--info-line); }
+.grid > div > strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.grid > div > span { color: var(--muted); }
+
+.metric {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.outcome { font-size: 20px; font-weight: 800; }
+.label, .meta, .muted, .hint, .sub, .readonly { color: var(--muted); }
+.label { font-size: 13px; }
+.sub { margin: 6px 0 28px; }
+.hint { margin-top: -6px; }
+.refresh { margin-left: 10px; }
+.empty { color: var(--faint); text-align: center; }
+
+/* Semantic state colours, legible on both grounds. */
+.complete, .clear, .pass, .verified, .input_fingerprint_bound { color: var(--ok); }
+.failed, .interrupted, .unavailable, .fail,
+.review_required, .legacy_reason_only, .malformed { color: var(--danger); }
+.running, .review, .gate, .completion-pending, .successor_proof_bound { color: var(--warn); }
+
+span.status { padding: 3px 8px; border-radius: 999px; background: var(--pill); }
+p.status { font-size: 28px; font-weight: 800; color: var(--warn); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+th, td {
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+th {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+td { font-size: 14px; font-variant-numeric: tabular-nums; }
+/* Key/value proof tables use row headers rather than a thead. */
+tbody th { width: 34%; font-size: 14px; text-transform: none; letter-spacing: normal; }
+.table-wrap { overflow-x: auto; border-radius: 10px; }
+
+/* Callout panels. */
+.boundary, .build-banner, .product-review-banner {
+  padding: 12px 16px;
+  border: 1px solid var(--info-line);
+  background: var(--info-bg);
+  border-radius: 9px;
+}
+div.boundary, .completion-banner, .vision-banner, .warning, .conflict {
+  padding: 12px 16px;
+  border: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  border-radius: 9px;
+  color: var(--text);
+}
+.notice {
+  padding: 12px 14px;
+  background: var(--ok-bg);
+  border: 1px solid var(--ok-line);
+  border-radius: 9px;
+  color: var(--ok-text);
+}
+.build-banner h2, .product-review-banner h2, .vision-banner h2 { margin-bottom: 8px; }
+.build-banner p, .product-review-banner p, .vision-banner p { margin: 6px 0; }
+
+/* Forms. */
+label { display: block; color: var(--text-soft); font-size: 13px; }
+input, select, textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  min-height: 44px;
+  font: inherit;
+  color: var(--text);
+  background: var(--well);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+textarea { min-height: 108px; resize: vertical; }
+button {
+  margin-top: 14px;
+  padding: 11px 16px;
+  min-height: 44px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+button.danger { color: var(--danger-text); background: var(--danger-bg); }
+button:disabled { cursor: not-allowed; opacity: .45; }
+form.inline, .inline { display: inline; }
+/* In-table action buttons must not inherit the standalone form spacing. */
+.inline button { margin-top: 0; min-height: 34px; padding: 6px 10px; }
+
+@media (max-width: 800px) {
+  body { padding: 18px 12px 40px; }
+  .grid, .form-grid { grid-template-columns: 1fr; }
+  /* Wide tables scroll inside themselves so the page never pans sideways. */
+  table { display: block; overflow-x: auto; overflow-y: hidden; }
+  tbody th { width: auto; }
+  .inline button { min-height: 44px; padding: 10px 14px; }
+}
+"""
 
 
 def _utc_now() -> str:
@@ -63,7 +370,7 @@ def runtime_model_identity(company: Company) -> dict[str, object]:
             ),
             "endpoint": (
                 "loopback_default"
-                if company.model.host == "http://127.0.0.1:11434"
+                if company.model.host == LOOPBACK_OLLAMA_HOST
                 else "nonlocal"
             ),
         }
@@ -650,18 +957,7 @@ local append-only review; it calls no model, sends nothing, spends nothing, and 
 no deployment or publication authority.</div>{form}</section>"""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Human product evidence review</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:980px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.panel {{ background:#121a2d; border:1px solid #31527a; border-radius:12px; padding:20px; }}
-.grid,.form-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:18px 0; }}
-.grid div {{ background:#0b1020; border-radius:8px; padding:12px; }} .grid strong {{ display:block; font-size:24px; }}
-.grid span,.readonly {{ color:#9aa7bd; }} pre {{ white-space:pre-wrap; overflow-wrap:anywhere; background:#0b1020; padding:14px; border-radius:8px; }}
-.digest code {{ overflow-wrap:anywhere; }} .boundary {{ border:1px solid #67582b; background:#2b2615; border-radius:8px; padding:12px; margin:18px 0; }}
-label {{ display:block; color:#cbd5e1; font-size:13px; }} input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
-button {{ margin-top:14px; padding:10px 15px; color:#07111f; background:#8bd5ff; border:0; border-radius:8px; font-weight:700; cursor:pointer; }}
-@media(max-width:760px) {{ .grid,.form-grid {{ grid-template-columns:1fr; }} body {{ padding:18px 12px 40px; }} }}
-</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<title>Human product evidence review</title><style>{_STYLESHEET}</style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Human product evidence review</h1><p>Active scope: <strong>{cell(project_name)}</strong>. This page performs no inference.</p>
 {progress_html}{content}</body></html>"""
 
@@ -1033,37 +1329,7 @@ def render_dashboard(
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Local Agent Company</title>
-<style>
-:root {{ color-scheme: dark; font-family: Inter, system-ui, sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1200px; margin:0 auto; padding:32px 20px 60px; }}
-h1 {{ margin:0; font-size:28px; }} .sub {{ color:#9aa7bd; margin:6px 0 28px; }}
-.grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:24px; }}
-.card {{ background:#121a2d; border:1px solid #26324a; border-radius:12px; padding:18px; }}
-.metric {{ font-size:28px; font-weight:700; }} .label {{ color:#9aa7bd; font-size:13px; }}
-section {{ margin-top:26px; }} table {{ width:100%; border-collapse:collapse; background:#121a2d; border-radius:12px; overflow:hidden; }}
-th,td {{ padding:11px 13px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ font-size:14px; }}
-code {{ color:#8bd5ff; }} a {{ color:#8bd5ff; }} .refresh {{ margin-left:10px; }}
-.status {{ padding:3px 8px; border-radius:999px; background:#26324a; }}
-    .complete,.clear {{ color:#87e6a8; }} .failed,.interrupted,.unavailable {{ color:#ff9b9b; }} .running,.review {{ color:#ffd479; }}
-.empty {{ color:#6f7d95; text-align:center; }} .gate,.completion-pending {{ color:#ffd479; }}
-.notice {{ padding:12px 14px; background:#143520; border:1px solid #27693d; border-radius:9px; color:#a7f3bd; }}
-.completion-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
-.build-banner {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.build-banner h2 {{ margin-bottom:8px; }} .build-banner p {{ margin:6px 0; }}
-.vision-banner {{ padding:12px 16px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
-.vision-banner h2 {{ margin-bottom:8px; }} .vision-banner p {{ margin:6px 0; }}
-.product-review-banner {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.product-review-banner h2 {{ margin-bottom:8px; }} .product-review-banner p {{ margin:6px 0; }}
-.build-hash code {{ overflow-wrap:anywhere; }}
-.hint {{ color:#9aa7bd; margin-top:-6px; }} label {{ display:block; color:#cbd5e1; font-size:13px; }}
-textarea,input,select {{ box-sizing:border-box; width:100%; margin-top:6px; padding:10px; color:#e8ecf4; background:#0b1020; border:1px solid #3a4864; border-radius:8px; }}
-textarea {{ min-height:108px; resize:vertical; }} .form-grid {{ display:grid; grid-template-columns:2fr 2fr 1fr; gap:12px; margin:12px 0; }}
-button {{ padding:9px 14px; color:#07111f; background:#8bd5ff; border:0; border-radius:8px; font-weight:700; cursor:pointer; }}
-button.danger {{ padding:6px 10px; color:#ffd7d7; background:#5a1f2a; }} form.inline {{ display:inline; }}
-button:disabled {{ cursor:not-allowed; opacity:.45; }}
-@media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} th:nth-child(4),td:nth-child(4) {{ display:none; }} }}
-</style></head><body>
+<style>{_STYLESHEET}</style></head><body>
 <h1>Local Agent Company</h1><p class="sub">Owner-controlled task intake &middot; localhost only <a class="refresh" href="/">Refresh</a><br>Scores are automated format, safety, and evidence-consistency checks—not factual or production verification.</p>
 {notice_html}{completion_html}{build_html}{product_review_html}{vision_product_html}{intake}
 <div class="grid">
@@ -1295,18 +1561,7 @@ def render_quality_failure_overview(company: Company) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Quality failure recovery</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1280px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
-.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:repeat(5,1fr); gap:18px; }} section {{ margin-top:26px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
-.empty {{ color:#6f7d95; text-align:center; }} .table-wrap {{ overflow-x:auto; border-radius:10px; }}
-@media(max-width:800px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
-</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<title>Quality failure recovery</title><style>{_STYLESHEET}</style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Quality failure recovery</h1>
 <p><a href="/quality-supersessions">Review retired failure proofs</a></p>
 <div class="grid"><div><p class="metric">{count}</p><p class="meta">active stored failures</p></div><div><p class="metric">{current_failed_count}</p><p class="meta">currently failing</p></div><div><p class="metric">{current_passed_count}</p><p class="meta">currently passing, review only</p></div><div><p class="metric">{changed_count}</p><p class="meta">evaluator or result changed</p></div><div><p class="metric">{strict_retry_count}</p><p class="meta">strictly grounded on retry</p></div></div>
@@ -1403,15 +1658,7 @@ def render_queue_retry_preflight(company: Company, queue_id: str) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Queue retry preflight</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:920px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.muted,.meta {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
-.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; width:34%; }} ul {{ margin:0; padding-left:18px; }}
-</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
+<title>Queue retry preflight</title><style>{_STYLESHEET}</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
 <h1>Queue retry preflight</h1>
 <p class="metric">{cell(preflight['status'])}</p>
 <p class="boundary">This is a read-only proof over the still-{cell(preflight['queue_status'])} queue item. It did not reset or claim the queue, create a job, call a model, mutate state, or start work. Objectives, source paths, source text, and prior report content are withheld.</p>
@@ -1520,17 +1767,7 @@ def render_quality_recheck_preview(company: Company, job_id: str) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Current quality preview</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1050px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
-.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
-@media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
-</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a> &middot; <a href="/missions/{cell(job_id)}">Mission</a></p>
+<title>Current quality preview</title><style>{_STYLESHEET}</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a> &middot; <a href="/missions/{cell(job_id)}">Mission</a></p>
 <h1>Current quality preview</h1>
 <p class="metric">{cell(current.get('quality_status', 'unavailable'))} &middot; {cell(current_score)}/100</p>
 <p class="boundary">The stored report inputs were checked with the current deterministic evaluator inside a disposable local clone. No evaluation was appended, no model was called, no queue item changed, and no work started. Objectives, reports, paths, source text, and claim text are withheld.</p>
@@ -1673,17 +1910,7 @@ def render_quality_supersession_preview(company: Company, queue_id: str) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Quality supersession proof</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:960px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.muted {{ color:#9aa7bd; }} .metric {{ font-size:30px; font-weight:800; color:#ffd479; }}
-.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} code {{ overflow-wrap:anywhere; }}
-@media(max-width:760px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
-</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
+<title>Quality supersession proof</title><style>{_STYLESHEET}</style></head><body><p><a href="/quality-failures">&larr; Quality failures</a></p>
 <h1>Quality supersession proof</h1>
 <p class="metric">{cell(eligibility)}</p>
 <p class="boundary">Read-only local proof. It changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reports, paths, source text, and claim text are withheld.</p>
@@ -1928,17 +2155,7 @@ def render_quality_supersession_overview(company: Company) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Retired failure proof review</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1240px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.muted {{ color:#9aa7bd; }} .metrics {{ display:flex; gap:28px; flex-wrap:wrap; }}
-.metric {{ font-size:30px; font-weight:800; color:#ffd479; }} .verified,.input_fingerprint_bound {{ color:#87e6a8; }}
-.successor_proof_bound {{ color:#ffd479; }} .review_required,.legacy_reason_only,.malformed {{ color:#ffb3b3; }} .boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; margin-top:24px; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} ul {{ margin:0; padding-left:18px; }}
-td code {{ overflow-wrap:anywhere; }} .empty {{ color:#6f7d95; text-align:center; }} .table-wrap {{ overflow-x:auto; }}
-</style></head><body><p><a href="/">&larr; Dashboard</a> &middot; <a href="/quality-failures">Active failures</a></p>
+<title>Retired failure proof review</title><style>{_STYLESHEET}</style></head><body><p><a href="/">&larr; Dashboard</a> &middot; <a href="/quality-failures">Active failures</a></p>
 <h1>Retired failure proof review</h1>
 <div class="metrics"><div><div class="metric">{cell(count)}</div><div class="meta">retired</div></div><div><div class="metric verified">{cell(verified_count)}</div><div class="meta">currently verified</div></div><div><div class="metric review_required">{cell(review_count)}</div><div class="meta">current-proof review</div></div><div><div class="metric verified">{cell(audit_counts['input_fingerprint_bound'] + audit_counts['successor_proof_bound'])}</div><div class="meta">retirement proof-bound</div></div><div><div class="metric review_required">{cell(audit_review_count)}</div><div class="meta">retirement-audit review</div></div></div>
 <p class="boundary">Read-only current and historical proof review. Current proof answers whether the successor still verifies now; retirement audit states whether the original event was reason-only, successor-proof-bound, or input-fingerprint-bound. This view changes no database row or queue item, appends no evaluation, calls no model, and starts no work. Objectives, projects, reasons, reports, paths, source text, evidence text, and claims are withheld. A current warning does not rewrite the historical audit record.</p>
@@ -2048,17 +2265,7 @@ def render_operator_brief(company: Company, project: str) -> str:
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Project operator brief</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1120px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.status {{ font-size:28px; font-weight:800; color:#ffd479; }} .meta {{ color:#9aa7bd; }}
-.boundary {{ padding:12px 16px; border:1px solid #31527a; background:#111f35; border-radius:9px; }}
-.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} section {{ margin-top:26px; }}
-table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} .empty {{ color:#6f7d95; text-align:center; }}
-@media(max-width:800px) {{ .grid {{ grid-template-columns:1fr; }} body {{ padding:20px 12px 40px; }} }}
-</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<title>Project operator brief</title><style>{_STYLESHEET}</style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Project operator brief</h1><p class="status">{cell(brief['status'])}</p>
 <p class="meta">Project <code>{cell(brief['project_id'])}</code> &middot; observed {cell(brief['observed_at'])}</p>
 <p class="boundary">Deterministic local metadata only. Objectives, project names, reports, source paths, evidence text, claims, and model output are withheld. This view changes no database, queue item, or work state and calls no model.</p>
@@ -2284,15 +2491,7 @@ Grain assumption: {cell(profile.get('grain_assumption', 'not recorded'))}</p></s
     quality_class = "review" if quality_status == "review" else "clear" if ready else "fail"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dataset {cell(detail['id'])}</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1200px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.muted {{ color:#9aa7bd; }} .review,.warning {{ color:#ffd479; }} .clear {{ color:#87e6a8; }} .fail {{ color:#ff9b9b; }}
-.warning {{ padding:12px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
-section {{ margin-top:26px; }} table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-th {{ color:#9aa7bd; font-size:12px; text-transform:uppercase; }} td {{ overflow-wrap:anywhere; }}
-</style></head><body><p><a href="/">&larr; Dashboard</a></p>
+<title>Dataset {cell(detail['id'])}</title><style>{_STYLESHEET}</style></head><body><p><a href="/">&larr; Dashboard</a></p>
 <h1>Dataset <code>{cell(detail['id'])}</code></h1>
 <p class="meta">Project: {cell(detail['project'])} &middot; Format: {cell(detail['format'])} &middot;
 Rows: {count(detail['row_count'])} &middot; Columns: {count(detail['column_count'])} &middot;
@@ -2383,16 +2582,7 @@ def render_mission_detail(company: Company, job_id: str) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mission {cell(job[0])}</title><style>
-:root {{ color-scheme:dark; font-family:Inter,system-ui,sans-serif; background:#0b1020; color:#e8ecf4; }}
-body {{ max-width:1100px; margin:0 auto; padding:28px 20px 60px; }} a,code {{ color:#8bd5ff; }}
-.meta,.warning,.muted {{ color:#9aa7bd; }} .outcome {{ font-size:20px; font-weight:800; }}
-.pass {{ color:#87e6a8; }} .fail {{ color:#ff9b9b; }} .warning,.conflict {{ padding:12px; border:1px solid #67582b; background:#2b2615; border-radius:9px; }}
-section {{ margin-top:26px; }} table {{ width:100%; border-collapse:collapse; background:#121a2d; }}
-th,td {{ padding:10px 12px; border-bottom:1px solid #26324a; text-align:left; vertical-align:top; }}
-.report {{ white-space:pre-wrap; overflow-wrap:anywhere; padding:18px; background:#121a2d; border:1px solid #26324a; border-radius:10px; line-height:1.5; }}
-.quote {{ white-space:pre-wrap; overflow-wrap:anywhere; max-width:520px; margin:0; font:12px/1.4 ui-monospace,monospace; }}
-</style></head><body><p><a href="/">← Dashboard</a></p>
+<title>Mission {cell(job[0])}</title><style>{_STYLESHEET}</style></head><body><p><a href="/">← Dashboard</a></p>
 <h1>Mission <code>{cell(job[0])}</code></h1>
 <p class="meta">Report state: {cell(job[2])} · Project: {cell(job[6] or 'unscoped')} · Created UTC: {cell(job[3])}</p>
 <p>{cell(job[1])}</p>
@@ -2460,7 +2650,7 @@ def render_vision_capture_fixture(state: str, variant: int) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SuperMega controlled Vision fixture</title><style>
-:root {{ color-scheme:dark; font-family:Inter,Segoe UI,system-ui,sans-serif; background:{background}; color:#eef5ff; }}
+:root {{ color-scheme:dark; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:{background}; color:#eef5ff; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; min-height:100vh; background:radial-gradient(circle at {20 + variant % 60}% 8%,{panel},transparent 42%),{background}; }}
 .shell {{ min-height:100vh; display:grid; grid-template-columns:{rail}px 1fr; }}
 aside {{ padding:24px 18px; border-right:1px solid {accent}55; background:#050a13bb; }}

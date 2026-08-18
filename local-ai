@@ -1,0 +1,20 @@
+#!/bin/sh
+# Friendly launchpad. POSIX counterpart of local-ai.cmd.
+#
+# Usage: ./local-ai brief
+#        ./local-ai ask "What is usable now?"
+#
+# The launchpad puts src/ on sys.path itself, so no PYTHONPATH is needed here.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    PYTHON="python"
+fi
+
+exec "$PYTHON" "$ROOT/scripts/local_ai.py" "$@"

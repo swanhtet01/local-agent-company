@@ -1,6 +1,30 @@
-/src/local_company/**/*.py text eol=lf
-/scripts/check_live_build.py text eol=lf
-/scripts/check_readiness.py text eol=lf
-/scripts/check_runtime_supervisor.py text eol=lf
-/scripts/runtime_guard.py text eol=lf
-/scripts/stamp_build_manifest.py text eol=lf
+# Line endings are load-bearing in this repository.
+#
+# scripts/stamp_build_manifest.py records a SHA-256 over the raw bytes of every
+# operational source file (src/local_company/**.py plus a fixed list of
+# scripts/). check_live_build.py and the test suite then compare that hash
+# against what is on disk. If a file checks out with CRLF on one platform and
+# LF on another, its bytes differ, the manifest hash differs, and the build
+# gate fails on that platform for a reason that looks like nothing at all.
+#
+# Normalising the whole tree to LF is therefore the safe default, rather than
+# maintaining a list that must be kept in sync with the manifest by hand.
+* text=auto eol=lf
+
+# Windows batch launchers are the deliberate exception: keep CRLF so cmd.exe
+# parses them reliably.
+*.cmd text eol=crlf
+
+# POSIX launchers have no file extension. They must keep LF, or the shebang
+# reads as "#!/bin/sh\r" and the shell reports "bad interpreter".
+/local-ai text eol=lf
+/local-company text eol=lf
+/company-mcp text eol=lf
+
+# Never normalise binary payloads.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.onnx binary
+*.db binary

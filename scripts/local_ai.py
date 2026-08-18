@@ -60,6 +60,19 @@ class LaunchAction:
     external_action_allowed: bool = False
 
 
+# Suggested commands are copied and pasted by the reader, so they must name a
+# launcher that exists on their platform. The .cmd wrapper is Windows-only;
+# POSIX hosts get the ./local-ai shell script beside it.
+LAUNCHER = "local-ai.cmd" if os.name == "nt" else "./local-ai"
+
+
+def _localize_command(command: object) -> object:
+    """Rewrite a suggested command to the launcher this platform actually has."""
+    if not isinstance(command, str) or LAUNCHER == "local-ai.cmd":
+        return command
+    return command.replace("local-ai.cmd", LAUNCHER)
+
+
 HELP = r"""Local AI Launchpad
 
 Use one command for local coding, business teams, research, planning, and queued work.
@@ -478,9 +491,9 @@ def translate(argv: list[str]) -> LaunchAction | None:
     if name == "status":
         return LaunchAction(("health", *tail), "status", "Show bounded local runtime, queue, and model health.", False, False)
     if name == "brief":
-        if tail:
-            raise ValueError("brief_accepts_no_arguments")
-        return LaunchAction((), "brief", "Combine local autonomy, queue, evidence, and offer gates into one next action.", False, False)
+        if tail and tail != ["--json"]:
+            raise ValueError("brief_accepts_only_json_flag")
+        return LaunchAction(tuple(tail), "brief", "Combine local autonomy, queue, evidence, and offer gates into one next action.", False, False)
     if name == "jobs":
         return LaunchAction(("status", *tail), "jobs", "List local mission history.", False, False)
     if name == "new":
@@ -2158,7 +2171,126 @@ def _brief_next_action(
     return "await_or_run_next_measured_product_experiment", "local-ai.cmd experiment"
 
 
-def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
+_NEXT_ACTION_LABELS = {
+    "repair_autopilot": "Repair the autopilot task",
+    "wait_for_idle_or_cycle_completion": "Wait - a cycle is running, or waiting for the machine to go idle",
+    "review_queued_mission_owner_gate": "Review a queued mission that needs your approval",
+    "review_changed_project_knowledge": "Review project knowledge that changed",
+    "inspect_blocked_queued_mission": "Inspect the blocked mission in the queue",
+    "review_pending_product_experiment": "Review a product experiment waiting for your decision",
+    "inspect_memory_before_ready_mission": "Check memory before running the ready mission",
+    "free_memory_then_run_ready_mission": "Free memory, then run the ready mission",
+    "run_ready_mission_now_or_await_autopilot": "Run the ready mission now, or let autopilot take it",
+    "owner_review_sellable_offer": "Review the offer that is ready for packaging",
+    "select_active_product_project": "Choose which project to work on",
+    "await_or_run_next_measured_product_experiment": "Run the next measured product experiment",
+}
+
+_STATUS_LABELS = {
+    "no_due_mission": "no mission due",
+    "owner_gate_required": "waiting for your approval",
+    "blocked": "blocked",
+    "ready": "ready to run",
+    "not_installed": "not installed",
+    "evidence_required": "evidence required",
+    "ready_for_owner_packaging": "ready for you to package",
+    "project_focus_required": "no project selected yet",
+    "unavailable": "cannot be read",
+    "idle": "idle",
+    "knowledge_changed": "project knowledge changed",
+}
+
+
+def _humanize(value: object) -> str:
+    """Turn a snake_case or camelCase identifier into readable words.
+
+    Unknown values must still render: the brief is a status display, so an
+    unrecognised token degrades to spaced words rather than failing.
+    """
+    if not isinstance(value, str) or not value:
+        return "unknown"
+    known = _STATUS_LABELS.get(value)
+    if known:
+        return known
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value).replace("_", " ")
+    return spaced.strip().lower() or "unknown"
+
+
+def _format_bytes(value: object) -> str:
+    if not isinstance(value, int) or value < 0:
+        return "unknown"
+    return f"{value / (1024 ** 3):.1f} GiB"
+
+
+def _render_brief_text(payload: dict[str, object]) -> str:
+    autonomy = payload.get("autonomy") if isinstance(payload.get("autonomy"), dict) else {}
+    queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
+    product = payload.get("product") if isinstance(payload.get("product"), dict) else {}
+    resources = payload.get("resources") if isinstance(payload.get("resources"), dict) else {}
+
+    next_action = payload.get("nextAction")
+    headline = _NEXT_ACTION_LABELS.get(
+        next_action if isinstance(next_action, str) else "",
+        _humanize(next_action).capitalize(),
+    )
+    project = product.get("projectName")
+    title = project if isinstance(project, str) and project else "Local company"
+
+    lines = ["", f"  {title} - brief", ""]
+    lines.append(f"  NEXT   {headline}")
+    command = payload.get("command")
+    if isinstance(command, str) and command:
+        lines.append(f"         {command}")
+    lines.append("")
+
+    available = resources.get("availableMemoryBytes")
+    minimum = resources.get("minimumExecutionMemoryBytes")
+    shortfall = resources.get("memoryShortfallBytes")
+    if resources.get("memoryAdmissionReady") is True:
+        memory = f"{_format_bytes(available)} free - above the {_format_bytes(minimum)} floor"
+    elif isinstance(shortfall, int) and shortfall > 0:
+        memory = (
+            f"{_format_bytes(available)} free - {_format_bytes(shortfall)} short "
+            f"of the {_format_bytes(minimum)} floor  [blocked]"
+        )
+    else:
+        memory = "cannot be measured  [blocked]"
+
+    # Each row carries its own detail lines so a queue blocker can never be
+    # read as belonging to the offer row below it.
+    queue_detail: list[str] = []
+    blockers = queue.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        queue_detail.append("blocked by: " + ", ".join(_humanize(item) for item in blockers))
+
+    offer_detail: list[str] = []
+    missing = product.get("offerMissingProof")
+    if isinstance(missing, list) and missing:
+        offer_detail.append("still needs:")
+        offer_detail.extend(f"  - {_humanize(item)}" for item in missing)
+
+    pending = product.get("pendingExperimentCount")
+    if isinstance(pending, int) and pending > 0:
+        noun = "experiment" if pending == 1 else "experiments"
+        offer_detail.append(f"{pending} {noun} waiting for your review")
+
+    rows: list[tuple[str, str, list[str]]] = [
+        ("Memory", memory, []),
+        ("Queue", _humanize(queue.get("status")), queue_detail),
+        ("Autopilot", _humanize(autonomy.get("status")), []),
+        ("Offer", _humanize(product.get("offerStatus")), offer_detail),
+    ]
+    for label, value, detail in rows:
+        lines.append(f"  {label:<11}{value}")
+        lines.extend(f"  {'':<11}{item}" for item in detail)
+
+    lines.append("")
+    lines.append("  No model was called. Nothing was changed. Add --json for the full receipt.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_company_brief(action: LaunchAction, root: Path | None = None, *, render: str = "json") -> int:
     del action
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     source = str(project_root / "src")
@@ -2212,7 +2344,7 @@ def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
         and isinstance(focus.get("projectId"), str)
     ):
         command = f'local-ai.cmd knowledge audit --project {focus["projectId"]}'
-    print(json.dumps({
+    payload: dict[str, object] = {
         "schema": COMPANY_BRIEF_SCHEMA, "status": "ready",
         "autonomy": autonomy,
         "queue": {
@@ -2237,10 +2369,14 @@ def run_company_brief(action: LaunchAction, root: Path | None = None) -> int:
                 if available_memory is not None else None
             ),
         },
-        "nextAction": next_action, "command": command,
+        "nextAction": next_action, "command": _localize_command(command),
         "modelCalled": False, "stateMutated": False,
         "externalActionPerformed": False,
-    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    }
+    if render == "text":
+        print(_render_brief_text(payload))
+    else:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0
 
 
@@ -2554,7 +2690,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         action = translate(args)
         if action is None:
-            print(HELP)
+            print(_localize_command(HELP))
             return 0
         if action.mode == "supermega-status":
             return run_supermega_status(action)
@@ -2569,7 +2705,11 @@ def main(argv: list[str] | None = None) -> int:
         if action.mode == "autopilot":
             return run_autopilot(action)
         if action.mode == "brief":
-            return run_company_brief(action)
+            # Humans reading the terminal get prose; --json and every
+            # programmatic caller keep the exact machine receipt.
+            return run_company_brief(
+                action, render="json" if "--json" in action.command else "text",
+            )
         if action.mode == "use":
             return switch_project(action)
         if action.mode == "experiment":

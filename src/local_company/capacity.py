@@ -19,6 +19,11 @@ LISTENER_PORTS = (5173, 8765, 8788, 11434)
 MIN_AVAILABLE_MEMORY_BYTES = 1024 * 1024 * 1024
 _MAX_NETSTAT_BYTES = 256 * 1024
 _MAX_OLLAMA_RESPONSE_BYTES = 32 * 1024
+_MAX_MEMINFO_BYTES = 64 * 1024
+_MAX_CGROUP_VALUE_BYTES = 64
+# cgroup v1 writes a near-2^63 sentinel instead of an explicit "max" for
+# "no limit"; anything at or above this is treated as unlimited.
+_CGROUP_UNLIMITED_FLOOR = 1 << 62
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -100,9 +105,104 @@ def observe_loaded_models(ollama_listener_count: int | None) -> dict[str, object
     return {"status": "ready", "loaded_count": len(models)}
 
 
+def parse_meminfo(output: str) -> dict[str, object]:
+    """Read MemTotal/MemAvailable out of a Linux /proc/meminfo body.
+
+    MemAvailable is the POSIX analogue of the Windows ullAvailPhys reading: it
+    counts reclaimable page cache, which SC_AVPHYS_PAGES omits. Kernels before
+    3.14 do not publish it, and no estimate is substituted for it here.
+    """
+    if type(output) is not str or len(output.encode("utf-8")) > _MAX_MEMINFO_BYTES:
+        return {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+    readings: dict[str, int] = {}
+    for line in output.splitlines():
+        label, separator, remainder = line.partition(":")
+        if not separator or label not in ("MemTotal", "MemAvailable"):
+            continue
+        fields = remainder.split()
+        if len(fields) != 2 or fields[1] != "kB":
+            continue
+        try:
+            kilobytes = int(fields[0])
+        except ValueError:
+            continue
+        if kilobytes < 0:
+            continue
+        readings[label] = kilobytes * 1024
+    total = readings.get("MemTotal")
+    available = readings.get("MemAvailable")
+    if type(total) is not int or type(available) is not int:
+        return {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+    if total <= 0 or available > total:
+        return {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+    return {"status": "ready", "total_bytes": total, "available_bytes": available}
+
+
+def _read_cgroup_value(path: Path) -> int | None:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > _MAX_CGROUP_VALUE_BYTES:
+        return None
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if text == "max":
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    if value < 0 or value >= _CGROUP_UNLIMITED_FLOOR:
+        return None
+    return value
+
+
+def observe_cgroup_memory(root: Path = Path("/sys/fs/cgroup")) -> dict[str, object]:
+    """Observe the container memory ceiling, when one is imposed.
+
+    Inside Docker or systemd the host totals in /proc/meminfo describe the
+    machine rather than this process's real ceiling, so an unlimited cgroup is
+    reported as "unavailable" and the caller falls back to the host reading.
+    """
+    for limit_name, usage_name in (
+        ("memory.max", "memory.current"),
+        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes"),
+    ):
+        limit = _read_cgroup_value(root / limit_name)
+        usage = _read_cgroup_value(root / usage_name)
+        if type(limit) is not int or type(usage) is not int:
+            continue
+        if limit <= 0 or usage > limit:
+            continue
+        return {"status": "ready", "total_bytes": limit, "available_bytes": limit - usage}
+    return {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+
+
+def _observe_posix_memory() -> dict[str, object]:
+    try:
+        raw = Path("/proc/meminfo").read_bytes()[: _MAX_MEMINFO_BYTES + 1]
+        host = parse_meminfo(raw.decode("utf-8", errors="replace"))
+    except OSError:
+        host = {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+    cgroup = observe_cgroup_memory()
+    if host.get("status") != "ready":
+        return cgroup
+    if cgroup.get("status") != "ready":
+        return host
+    # Both readings are real ceilings; the process cannot exceed either one.
+    return {
+        "status": "ready",
+        "total_bytes": min(int(host["total_bytes"]), int(cgroup["total_bytes"])),  # type: ignore[arg-type]
+        "available_bytes": min(int(host["available_bytes"]), int(cgroup["available_bytes"])),  # type: ignore[arg-type]
+    }
+
+
 def observe_memory() -> dict[str, object]:
     if os.name != "nt":
-        return {"status": "unavailable", "total_bytes": None, "available_bytes": None}
+        return _observe_posix_memory()
 
     class MemoryStatusEx(ctypes.Structure):
         _fields_ = [

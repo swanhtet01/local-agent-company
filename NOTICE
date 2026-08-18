@@ -1,0 +1,23 @@
+SuperMega Local Workcell (local-agent-company)
+Copyright 2026 Swan Htet
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+This product contains no third-party source code. It is written against the
+Python standard library only and vendors no dependencies.
+
+At run time it can talk to software that is installed and licensed separately,
+and that is not distributed with this product:
+
+  - Ollama and the local model weights it serves (for example Llama 3.2),
+    each under its own licence and model terms.
+  - The agent-browser CLI, installed on demand by "local-ai.cmd web install"
+    into an ignored local tool directory, under its own licence.
+  - Microsoft Edge, reused from the host system by the browser QA lane, under
+    its own licence.
+  - OpenCode, used as the optional interactive coding harness, under its own
+    licence.
+
+Installing or using any of the above is your responsibility, and their licences
+are not covered by this NOTICE.

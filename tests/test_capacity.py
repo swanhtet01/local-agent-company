@@ -9,7 +9,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from local_company.capacity import build_capacity_snapshot, parse_windows_listeners
+from local_company.capacity import (
+    build_capacity_snapshot,
+    observe_cgroup_memory,
+    parse_meminfo,
+    parse_windows_listeners,
+)
 from local_company.cli import main
 from local_company.core import Company, MockModel
 
@@ -132,6 +137,80 @@ class CapacityTests(unittest.TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+
+class PosixMemoryObservationTests(unittest.TestCase):
+    def test_meminfo_parser_reports_available_not_free(self) -> None:
+        observed = parse_meminfo(
+            "MemTotal:        8039084 kB\n"
+            "MemFree:          204112 kB\n"
+            "MemAvailable:    6120044 kB\n"
+            "Buffers:           82304 kB\n"
+        )
+        self.assertEqual(observed["status"], "ready")
+        self.assertEqual(observed["total_bytes"], 8039084 * 1024)
+        # MemAvailable, not the far smaller MemFree, is the admission reading.
+        self.assertEqual(observed["available_bytes"], 6120044 * 1024)
+
+    def test_meminfo_without_available_field_fails_closed(self) -> None:
+        observed = parse_meminfo("MemTotal:        8039084 kB\nMemFree:          204112 kB\n")
+        self.assertEqual(
+            observed,
+            {"status": "unavailable", "total_bytes": None, "available_bytes": None},
+        )
+
+    def test_malformed_and_oversized_meminfo_fail_closed(self) -> None:
+        for output in (
+            "MemTotal:        notanumber kB\nMemAvailable:    6120044 kB\n",
+            "MemTotal:        8039084 kB\nMemAvailable:    9999999 kB\n",
+            "MemTotal:              0 kB\nMemAvailable:          0 kB\n",
+            "MemTotal: 8039084 pages\nMemAvailable: 6120044 pages\n",
+            "x" * (64 * 1024 + 1),
+        ):
+            with self.subTest(output=output[:40]):
+                self.assertEqual(parse_meminfo(output)["status"], "unavailable")
+
+    def test_cgroup_v2_limit_is_observed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "memory.max").write_text("2147483648", encoding="utf-8")
+            (root / "memory.current").write_text("536870912", encoding="utf-8")
+            self.assertEqual(
+                observe_cgroup_memory(root),
+                {"status": "ready", "total_bytes": 2147483648, "available_bytes": 1610612736},
+            )
+
+    def test_cgroup_v1_limit_is_observed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "memory").mkdir()
+            (root / "memory" / "memory.limit_in_bytes").write_text("4294967296", encoding="utf-8")
+            (root / "memory" / "memory.usage_in_bytes").write_text("1073741824", encoding="utf-8")
+            self.assertEqual(
+                observe_cgroup_memory(root),
+                {"status": "ready", "total_bytes": 4294967296, "available_bytes": 3221225472},
+            )
+
+    def test_unlimited_or_absent_cgroup_defers_to_host_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(observe_cgroup_memory(root)["status"], "unavailable")
+            (root / "memory.max").write_text("max", encoding="utf-8")
+            (root / "memory.current").write_text("536870912", encoding="utf-8")
+            self.assertEqual(observe_cgroup_memory(root)["status"], "unavailable")
+            # cgroup v1 encodes "no limit" as a near-2^63 sentinel.
+            (root / "memory.max").write_text("9223372036854771712", encoding="utf-8")
+            self.assertEqual(observe_cgroup_memory(root)["status"], "unavailable")
+
+    def test_corrupt_cgroup_values_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "memory.max").write_text("2147483648", encoding="utf-8")
+            (root / "memory.current").write_text("4294967296", encoding="utf-8")
+            # Usage above the limit is impossible; refuse rather than report a negative.
+            self.assertEqual(observe_cgroup_memory(root)["status"], "unavailable")
+            (root / "memory.current").write_text("not-a-number", encoding="utf-8")
+            self.assertEqual(observe_cgroup_memory(root)["status"], "unavailable")
 
 
 if __name__ == "__main__":

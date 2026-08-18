@@ -1,0 +1,21 @@
+#!/bin/sh
+# Governed MCP server over stdio. POSIX counterpart of company-mcp.cmd.
+#
+# Point an MCP client at this file directly; it speaks JSON-RPC on stdin and
+# stdout, so it must never print anything else to stdout.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    PYTHON="python"
+fi
+
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+exec "$PYTHON" -m local_company.mcp_server "$@"

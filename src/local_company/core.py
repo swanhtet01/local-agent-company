@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import closing
@@ -1646,11 +1647,49 @@ class MockModel:
         )
 
 
+LOOPBACK_OLLAMA_HOST = "http://127.0.0.1:11434"
+
+
+def default_ollama_host() -> str:
+    """Resolve the Ollama endpoint, allowing a container sidecar to be named.
+
+    Loopback stays the default so existing single-machine behaviour is
+    unchanged. LOCAL_COMPANY_OLLAMA_HOST exists for compose-style deployments
+    where Ollama runs in a sibling container on a private network; it is a
+    deliberate, opt-in relaxation of the loopback-only assumption, so the value
+    is validated strictly and a bad one fails closed rather than silently
+    falling back to loopback.
+    """
+    configured = os.getenv("LOCAL_COMPANY_OLLAMA_HOST")
+    if not configured:
+        return LOOPBACK_OLLAMA_HOST
+    candidate = configured.strip().rstrip("/")
+    if not 1 <= len(candidate) <= 255:
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must be between 1 and 255 characters")
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must use http or https")
+    if parsed.path or parsed.query or parsed.fragment:
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must not include a path, query, or fragment")
+    if parsed.username or parsed.password:
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must not embed credentials")
+    if not parsed.hostname or not re.fullmatch(r"[A-Za-z0-9._\-\[\]:]{1,255}", parsed.netloc):
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must name a valid host")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must use a valid port") from None
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("LOCAL_COMPANY_OLLAMA_HOST must use a valid port")
+    return candidate
+
+
 class OllamaModel:
     def __init__(
-        self, model: str, host: str = "http://127.0.0.1:11434",
+        self, model: str, host: str | None = None,
         num_ctx: int = 4096, num_predict: int = 512, keep_alive: str = "30s",
     ) -> None:
+        host = default_ollama_host() if host is None else host
         if num_ctx < 1024 or num_ctx > 131072:
             raise ValueError("num_ctx must be between 1024 and 131072")
         if num_predict < 32 or num_predict > 4096:

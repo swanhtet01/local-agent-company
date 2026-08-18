@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -32,6 +33,16 @@ def event_stream(*, action: str = "status", response: str = "Company ready.", co
 
 
 class LocalCompanyPromptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # --requested-model defaults to the LOCAL_CODE_MODEL environment
+        # variable, so an operator machine that sets it would otherwise steer
+        # these tests down the explicit-request branch and change the receipt
+        # they assert on. Model admission is supplied by the mocks below.
+        patcher = patch.dict("os.environ", {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("LOCAL_CODE_MODEL", None)
+
     def test_windows_launcher_exposes_bounded_headless_mode(self) -> None:
         source = (
             Path(__file__).resolve().parents[1] / "local-company-agent.cmd"

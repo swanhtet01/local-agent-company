@@ -1,0 +1,1107 @@
+# Local Agent Company
+
+> **Full operator reference.** This page is the complete original operator
+> documentation for this project, preserved word for word from the repository
+> README. It is written for someone already running the system. If you are new,
+> start with the [README](../README.md) first.
+
+## Set up this Windows user
+
+From a repository checkout or an extracted private pilot bundle, run the
+read-only preview first, apply the local configuration once, and verify it:
+
+```powershell
+.\setup-local-ai.cmd --preview
+.\setup-local-ai.cmd --apply
+.\setup-local-ai.cmd --check
+```
+
+The setup command merges only the owned `local-company` MCP/agent settings into
+the current user's OpenCode configuration, preserves unrelated settings, and
+creates a content-addressed backup before changing an existing file. It also
+initializes a private local company store with a generic starter project and,
+unless `--no-desktop` is supplied, creates the two managed desktop launchers.
+It refuses remote Ollama endpoints, conflicting managed settings, unsafe state
+paths, and unmanaged launcher overwrites. It never downloads an application or
+model, calls a paid API, exposes a listener, sends externally, or grants deploy,
+payment, credential, or publication authority. If Python, Ollama, OpenCode, or a
+required local model is missing, its JSON `actions` list gives the next local
+setup action; rerun `--check` after completing those actions.
+
+`--check` also starts the bundled `company-mcp.cmd` against an ephemeral home,
+after verifying both the exact launcher contract and stamped operational source.
+It negotiates the MCP protocol over stdio, pings it, and requires the compact
+profile to expose exactly one `company` router with the 25 governed actions.
+The child must exit cleanly without creating company state. This proof loads no
+model, opens no network listener, returns no credential values, and mutates no
+persistent state. Run the same bounded proof independently with:
+
+```powershell
+python .\scripts\check_company_mcp.py
+```
+
+## One-command launchpad
+
+Do not start with the forty-command coordinator. Start with an outcome:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+.\local-ai.cmd web install
+.\local-ai.cmd web template .\customer-suite.json
+.\local-ai.cmd web suite .\customer-suite.json
+.\local-ai.cmd web supermega
+.\local-ai.cmd web https://your-site.example --expect-text "Expected heading"
+.\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+.\local-ai.cmd code C:\path\to\any-project
+.\local-ai.cmd help
+```
+
+The first two commands perform real read-only website QA jobs. The third proves
+local Windows input and verification in a safe owned app. The fourth opens the
+existing free local coding specialist. `help` contains the planning, queue,
+data, evidence, and advanced company commands when a specific job needs them.
+
+## Read-only browser QA with evidence
+
+This is the first useful browser product path. It does not ask a model to guess
+what happened: it drives the installed Edge runtime through pinned
+`agent-browser` 0.33.2 and checks observable page state.
+
+For a fresh checkout, one command installs the pinned local CLI into the
+already-ignored tool directory and performs a live `about:blank` launch. The
+installer disables package scripts so `agent-browser` cannot download its own
+Chrome; the workcell reuses system Edge. It requires npm network access for the
+free package, but no model, browser download, account, or paid API:
+
+```powershell
+.\local-ai.cmd web install
+.\local-ai.cmd web doctor
+```
+
+Run a proof against any explicit public or localhost HTTP(S) URL:
+
+```powershell
+.\local-ai.cmd web https://supermega.dev `
+  --expect-title SuperMega `
+  --expect-text SuperMega
+```
+
+SuperMega's first business-specific pack checks the Shop, Plant, Website, and
+Ecommerce setup pages with strong product-specific assertions:
+
+```powershell
+.\local-ai.cmd web supermega
+.\local-ai.cmd web supermega --runs 10
+```
+
+The first command is a fast release baseline. The second is the promotion gate:
+all 40 fresh-browser page checks must pass. The verified 2026-08-05 run passed
+40/40 in 275.44 seconds and returned `release_check_ready`; every page had HTTP
+200, its exact setup and working-sample content, zero page/console errors, and
+zero axe accessibility violations. This evidence covers public read-only setup
+pages only, not authenticated workflows or production writes.
+
+The command starts a fresh unauthenticated browser session, performs no clicks
+or form submissions, and closes the session. It verifies the document status,
+title, visible text, accessibility snapshot, uncaught page errors, and
+screenshot. It also records console messages, an axe accessibility audit, and
+Core Web Vitals. `--fail-on-console-errors` and `--max-a11y-violations N` can
+promote those findings to release gates.
+
+Every run returns `passed` or `failed` and writes `receipt.json`, a full-page
+PNG, sanitized network status, page text, accessibility evidence, error logs,
+and performance data under `<company-home>\browser-proofs\<proof-id>`. The
+receipt includes SHA-256 and byte length for every evidence file. URL query and
+fragment values and request headers are not stored. The current verified
+SuperMega homepage proof completed in 6.43 seconds with HTTP 200, zero page or
+console errors, zero axe violations, and no model or paid API.
+
+### Reusable 1-20 page release suites
+
+Create and immediately run a sealed example suite:
+
+```powershell
+.\local-ai.cmd web template .\customer-suite.json
+.\local-ai.cmd web suite .\customer-suite.json
+```
+
+To adapt it, edit the manifest's `name`, `requiredRuns`, and `pages`, then write
+a new approved file and run it. The seal command never overwrites either input
+or an existing output:
+
+```powershell
+.\local-ai.cmd web seal .\customer-suite.json `
+  --output .\customer-suite.approved.json
+.\local-ai.cmd web suite .\customer-suite.approved.json
+.\local-ai.cmd web suite .\customer-suite.approved.json --runs 10
+```
+
+Each manifest accepts 1-20 unique pages and 1-10 required passing runs. Every
+page must have an HTTP(S) URL and at least one title or visible-text assertion;
+console-error and accessibility limits are explicit gates:
+
+```json
+{
+  "schema": "supermega.browser-suite-manifest.v1",
+  "name": "Customer public release",
+  "requiredRuns": 10,
+  "pages": [
+    {
+      "id": "home",
+      "url": "https://customer.example/",
+      "expectTitle": "Customer",
+      "expectText": ["Expected heading", "Contact"],
+      "failOnConsoleErrors": true,
+      "maxA11yViolations": 0
+    }
+  ]
+}
+```
+
+The runner validates the seal before creating suite output or opening a
+browser. An edited, unsealed, oversized, unknown-field, duplicate-ID, or
+credential-bearing manifest fails closed. The SHA-256 seal detects accidental
+or unreviewed changes; it is not a digital signature and does not identify who
+approved the file. Never put passwords, tokens, or signed query strings in a
+manifest URL.
+
+Every suite writes a local `suite-receipt.json` with child receipt paths and
+hashes, plus a path-free `portable-summary.json` and `.sha256` sidecars. The
+portable file is the shareable customer report; keep the full receipt and
+screenshots private unless their visible contents have been reviewed.
+
+#### Supervised pilot runbook
+
+1. Run `web install`, then require `web doctor` to report `ready`.
+2. Create a template, define only public or staging pages, and seal the reviewed
+   manifest to a new file.
+3. Run one baseline. Inspect every failed child receipt; do not weaken an
+   assertion merely to obtain a pass.
+4. Deliberately add one impossible text assertion and require status `failed`,
+   exit code 1, and the corresponding `failedCheckNames` entry.
+5. Restore and reseal the approved manifest, then run its required acceptance
+   count. `releaseGatePassed` must be true before delivering the report.
+6. Verify both `.sha256` sidecars and review screenshots for private data before
+   sharing `portable-summary.json`.
+
+This pack is read-only and unauthenticated. Logins, form submissions, purchases,
+deployments, customer contact, and hosted writes require a separately designed
+and explicitly authorized workflow.
+
+## Actual local computer use
+
+The product is now organized as **SuperMega Local Workcell**: teach a bounded
+task once, preview it without input, replay it locally, and verify the result.
+The fastest way to establish that the Windows execution engine really works is
+the built-in visible proof:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+.\local-ai.cmd automate doctor
+.\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
+```
+
+`prove` launches a no-file/no-network practice app, clicks and types into it,
+checks that the app reached its verified state, captures only that app's client
+area, writes a receipt containing evidence hashes under the private company
+home, and closes the
+process it started. It loads no model and uses no paid API. A `status` of
+`passed`, three completed steps, and `labClosedAfterProof: true` are the
+end-to-end acceptance receipt.
+
+To teach your own local Windows workflow:
+
+```powershell
+.\local-ai.cmd automate lab
+.\local-ai.cmd automate learn my-first-workflow --seconds 60 `
+  --expect-window-title "Verified locally"
+# Demonstrate the clicks and typing, then press F8.
+.\local-ai.cmd automate preview my-first-workflow
+.\local-ai.cmd automate run my-first-workflow `
+  --confirm "RUN LOCAL COMPUTER WORKFLOW"
+```
+
+Learning records click targets, safe keys, timing, and `TEXT_1`, `TEXT_2`, ...
+placeholders; it does not store the characters typed during the demonstration.
+At run time those values are requested privately and replace the currently
+focused field. Training screenshots are off by default. `--screenshots` adds
+post-demonstration app-window references and should be used only when visible
+content is safe to retain. Run evidence can also contain visible field values,
+so use `--no-evidence` when that tradeoff is unacceptable.
+
+The preflight checks the workflow seal, application identity, UI Automation
+targets, fallback coordinates, required values, and policy blockers without
+moving the mouse or typing. Known browser, messaging, and shell processes are
+blocked unless their explicit advanced flags are supplied. The engine halts on
+window drift or failed final checks and records the failure stage instead of
+claiming success.
+
+Current scope is honest: Windows teach/preview/replay and read-only browser QA
+work now; arbitrary browser form operation, a local OmniParser-style visual
+fallback, workflow editing/repair, and Android support do not. The research
+comparison, product thesis, new goals, acceptance gates, and
+build-versus-integrate decisions are in [PRODUCT.md](../PRODUCT.md).
+
+For the pathless SuperMega workflow, double-click **SuperMega AI Workbench** or
+use these aliases. The proof commands reuse the same receipt validation and
+human-review contracts as the general product workflow:
+
+```powershell
+.\local-ai.cmd supermega
+.\local-ai.cmd supermega ask "What should I do next?"
+.\local-ai.cmd supermega proof
+.\local-ai.cmd supermega prove
+.\local-ai.cmd supermega pending
+.\local-ai.cmd supermega review
+.\local-ai.cmd supermega mission-candidate
+.\local-ai.cmd supermega mission-review
+.\local-ai.cmd supermega dossier
+```
+
+`supermega proof` previews the next category-balanced test without loading a
+model. `supermega prove` performs one memory-gated local run, requires the
+planned MCP actions, zero paid cost, measured runtime and memory, and model
+unload before saving a pending receipt. `supermega review` can show only
+SuperMega receipts and records nothing until a human supplies the decision,
+correction count, paid-setup observation, and exact `REVIEW` confirmation.
+The workbench exposes counts and the next category but never prints a pending
+response in its status receipt. Workbench option **G** handles existing team
+missions: `supermega mission-candidate` shows one unreviewed sealed result
+read-only, while `supermega mission-review` displays that full result and asks
+for the actual category, acceptance, corrections, paid-setup signal, and
+optional measured peak memory. It rechecks the exact job and both SHA-256 seals
+immediately before recording. Neither command calls a model or performs an
+external action, and automated quality never counts as human acceptance.
+When a sealed candidate exists and no newer experiment receipt is waiting,
+plain `supermega` surfaces `supermega mission-review` as the exact next action,
+even when the Ally does not have enough memory for inference.
+
+### Low-memory grounded assistant
+
+`ask` is the usable read-only path while the larger agent model is blocked by
+desktop memory pressure. It uses the installed `llama3.2:1b` model only
+on Ollama's loopback endpoint, automatically applies the validated
+non-terminating Ally working-set trim when required, samples memory during the
+answer, and unloads the model afterward:
+
+```powershell
+ollama pull llama3.2:1b
+.\local-ai.cmd ask "Which active product action is supported by our evidence?"
+.\local-ai.cmd supermega ask "What is the verified SuperMega next action?"
+```
+
+The host—not the small model—collects the company brief, project overview, and
+playbook context through read-only code. The model receives that bounded JSON
+and may summarize it, but cannot select a tool or execute an action. Every
+result reports its context hash, named sources, memory measurement, zero paid
+API use, and clean unload status. Treat the answer as a private grounded draft;
+use the exact deterministic command in the cited context for any next action.
+The existing 0.8B/4B coding and governed-company agent gates are unchanged.
+Add `--json` immediately after `ask` when another local tool needs the complete
+machine-readable receipt instead of the human-readable answer.
+
+For the dedicated conversational company interface, double-click **SuperMega
+Local Company** on the Windows desktop or run:
+
+```powershell
+.\local-company-agent.cmd
+.\local-company-agent.cmd --check
+```
+
+For the complete one-click control panel, double-click **SuperMega Local AI
+Lab** on the desktop. Its fixed choices open company chat, show one bounded
+company brief, plan or run a measured product experiment, inspect and
+explicitly review a saved result, inspect and human-review an existing sealed
+mission, check whether evidence supports a sellable offer, launch a coding
+agent for a chosen folder, check readiness, run one ready company mission with
+safe memory recovery, start the loopback dashboard, or exit. The menu itself
+loads no model and grants no external authority.
+
+## Build a private pilot bundle
+
+Create a deterministic transfer ZIP without company databases, reports,
+knowledge, credentials, model weights, Git history, or generated product
+evidence:
+
+```powershell
+python .\scripts\build_pilot_bundle.py --output-dir "C:\path\to\private-export"
+python .\scripts\verify_pilot_bundle.py "C:\path\to\private-export\supermega-local-ai-pilot-BUILD-ID-BUNDLE-ID.zip"
+```
+
+The archive contains the dependency-free application source, Windows
+launchers, operator/product documentation, tests, a machine-readable file
+manifest, and its own non-extracting verifier. File order, timestamps,
+permissions, compression settings, and manifest framing are fixed so rebuilding
+the same inputs reuses identical bytes. A companion SHA-256 file is emitted.
+The builder reads only a code-owned allowlist and explicitly reports that
+private state, credentials, model weights, and external publication authority
+are absent. Until the owner chooses licensing and signs/releases a distribution,
+the bundle is a private evaluation artifact and grants no redistribution rights.
+
+`local-ai.cmd brief` is the zero-model operating view. It combines the verified
+Windows task state and journal freshness with queue priority, the active
+project, pending experiment reviews, current memory admission, and the
+commercial evidence gate. Its
+code-owned priority order returns exactly one next action and one safe command;
+it does not quote objectives, reports, model responses, paths, or secrets.
+
+The check verifies the installed local model, Ollama, OpenCode, and the governed
+`local-company` MCP profile without loading a model. The normal launcher opens
+only the dedicated OpenCode agent backed by the locally selected Llama model.
+
+To get a concrete product experiment instead of an open-ended chat, run this
+zero-model command (it uses the active project), or name a project explicitly:
+
+```powershell
+.\local-ai.cmd experiment
+.\local-ai.cmd experiment "Local AI Product Lab"
+.\local-ai.cmd experiment-run "Local AI Product Lab" --recover-memory
+```
+
+The same planner is accessible conversationally by asking the company agent:
+
+```text
+Call product_experiment_next for Local AI Product Lab and show me the runner invocation.
+```
+
+It deterministically selects the least-tested validation category, returns a
+bounded prompt for `local-company-agent.cmd --run`, and lists the machine and
+human acceptance checks. Planning is read-only: it does not load a model,
+change company state, claim customer demand, or record a review. After the run,
+record only measurements and judgments that actually occurred.
+
+`experiment-run` removes the copy/paste step: it obtains the current balanced
+plan, invokes the receipt-bound local-company agent, and verifies that every
+planned tool action actually occurred. A fully reviewable accepted receipt is
+saved locally under a content-derived pending ID, but no human judgment is
+invented. Use `experiment-pending` to inspect the model response and measured
+runtime or memory, then `experiment-review-interactive` to enter the actual
+accept/reject decision, a structured outcome reason, correction count, and
+paid-setup signal. Rejections must be classified as inaccurate, incomplete,
+not actionable, too slow, too resource-heavy, unsafe, tool failure, or other;
+accepted results use `none`. When the pending inbox is empty, the same review
+flow lists archived receipts for explicit re-review so older unclassified
+outcomes can be repaired without rerunning the model. Validation dossiers show
+these diagnostic counts and each reviewed run's reason. Low memory,
+runner failure, or a skipped action returns a fail-closed receipt for a later
+retry and creates no pending evidence.
+
+Completed ordinary team missions can also become measured product evidence
+without rerunning inference. Use `mission-candidate [PROJECT]` for a pathless,
+read-only preview and `mission-review [PROJECT]` for the local human-review
+prompts. The workflow accepts only a current completed job whose full synthesis,
+project, roles, quality result, report seal, evidence-manifest seal, and clean
+model unload all agree. It then requires the literal confirmation `RECORD HUMAN
+PRODUCT EVIDENCE REVIEW` and rechecks the candidate identity before writing.
+Cancellation or changed evidence writes nothing. Enter only observations that
+actually happened; the tool does not infer customer acceptance or willingness
+to pay.
+
+`offer-pack` uses the conservative product-offer gate and writes nothing while
+proof is incomplete. Once the gate passes, it atomically creates a deterministic
+Markdown owner-review pack in the private company state directory. The pack
+contains only the measured workflow, bounded package, supported claims,
+prohibited claims, and remaining owner decisions. Its receipt includes a
+content hash and explicitly withholds publication authority; reruns reuse the
+identical pack instead of creating conflicting drafts. Desktop Lab option **6**
+provides the same check-and-package flow without loading a model.
+
+`validation-pack` creates the private work-in-progress dossier available as
+desktop Lab option **3**. It combines current integrity-checked review counts,
+category coverage, human outcomes, paid-setup observations, correction and
+resource measurements, commercial gate failures, and the exact next experiment
+into one deterministic Markdown file with a content-hashed receipt. Unlike an
+offer pack, it is useful before the milestone passes and clearly states that it
+is not a sales claim or publication-ready paper.
+
+Add `--recover-memory` when Codex or another desktop app has filled RAM. Only
+after an initial zero-model memory block, the command invokes the existing
+verified Ally working-set trim, requires evidence of zero process termination,
+zero file changes, and zero network requests, waits three seconds, and retries
+the exact prompt once. Invalid recovery evidence prevents the retry.
+
+Use `new` to create a project and `use` to select its one bounded execution slot. A project switch uses the existing idle-only, digest-bound focus handoff instead of bypassing the active project. Use `plan` first for a zero-model preview, `work` for one immediate local team run, `later` to queue a mission, `next` to inspect the exact next mission, and `run-next` to execute at most one reviewed queue item. `cycle` is the bounded autonomy entrypoint: it materializes due schedules, performs an exact ID-bound preflight, and runs at most one mission only when focus, evidence, resources, and owner gates pass. With no due work or an owner gate, it exits without calling a model. It never loops, sends externally, spends money, deploys, or retries a failed result. A Windows scheduled task may invoke one cycle periodically, but registering that task remains an explicit owner action. `explain` reports whether a command can call a model or change local state without running it:
+
+Immediately before queue execution, `cycle` rechecks current physical memory
+and requires at least 2 GiB available. A lower or unavailable reading returns a
+blocked receipt with zero model calls and leaves the reviewed queue item intact
+for a later cycle. Add `--recover-memory`—or choose **Run one ready company
+mission** in the desktop Lab—to apply the same verified non-terminating Codex
+working-set trim used by autopilot, recheck memory once, and run only if the
+hard 2 GiB floor is then satisfied. The control flag is never forwarded to the
+mission runner, and the receipt reports the validated recovery result.
+
+`autopilot install` registers the fixed `SuperMega Local Product Cycle` task for
+the current interactive user. It invokes one bounded cycle every six hours with
+limited privilege, ignores overlapping starts, and retains the same focus,
+evidence, owner-gate, one-mission, and 2 GiB memory checks. `autopilot status`
+verifies the exact action, working directory, cadence, account mode, privilege,
+overlap policy, and execution limit without changing the task. `autopilot
+remove` deletes only a definition that still matches that complete contract.
+Each scheduled run atomically replaces a bounded
+`autopilot-cycle-result.json` journal in the local company state directory.
+`autopilot status` exposes only its last status, reason, exit code, mission
+count, and model-call flag. It also distinguishes Windows idle-wait or active
+execution from an idle task and reports whether the bounded journal belongs to
+the latest trigger, so a stale prior result is never presented as the current
+run. Raw process output, prompts, reports, secrets, and local paths are never
+written to this journal.
+The scheduled-task action also stores SHA-256 pins for both
+`run_scheduled_cycle.py` and `local_ai.py`. A task-resident PowerShell preflight
+rehashes both files before Python starts; runner drift returns task result `90`
+and launcher drift returns `91`, with no queue claim or model call. Deliberate
+source updates therefore require refreshing the task pins after tests pass.
+If only those pinned source digests become stale after a verified local update,
+`autopilot repair` decodes the existing task action and requires its complete
+command template, paths, cadence, idle policy, user scope, privilege, overlap
+policy, and execution limit to remain exact. It then replaces and re-verifies
+that same task with current pins. Any other mismatch is refused; `repair` cannot
+adopt or overwrite an arbitrary scheduled task.
+The task also pins the existing SuperMega non-terminating Codex working-set
+optimizer. When—and only when—the first cycle is blocked for insufficient
+memory, the runner applies that verified trim once, validates its zero-
+termination/zero-file/zero-network receipt, waits three seconds, and retries
+the cycle exactly once. Invalid recovery evidence stops the task without a
+queue claim or model call.
+When a verified cycle has no due mission, the same serial task checks the
+pending product-experiment inbox. It runs at most one measured headless
+experiment only when that inbox is empty; otherwise it waits for human review
+without loading a model. A mission always has priority. The bounded task
+journal records experiment status and the opaque pending ID but never stores
+the prompt, model response, or full runner receipt.
+Scheduled starts now wait for ten minutes of Windows idle time, for up to six
+hours after each trigger. This targets the window where Codex and desktop UI
+working sets are least likely to refill immediately after trimming. Once an
+admitted mission starts, returning to the PC does not terminate it; the fixed
+two-hour execution limit and one-worker guard still apply.
+
+```powershell
+.\local-ai.cmd explain work "Research a new product"
+```
+
+The dashboard is available on `http://127.0.0.1:8765` after a successful start. The advanced `local-company.cmd` interface remains available, and `local-ai.cmd company ...` forwards to it for capabilities not yet given a friendly alias.
+
+`vision-lite` defaults to the installed `supermega-vision` project and exposes
+only the campaign navigator and one-step phase advance to the tiny Ollama model.
+`vision` defaults to the same project but uses the bounded LM Studio 4B product
+agent. Add `--check` to either command to test admission without loading a model.
+
+`work` does not equate model completion with useful output. It reads the sealed job evaluation after every run, prints a `local-ai.work-result.v1` receipt, and exits nonzero when quality fails or the evaluation cannot be verified. Review the report, tighten the task or knowledge, or use a measured stronger local model before retrying.
+
+See `PRODUCT.md` for what can be built, packaged, and sold from this foundation.
+
+A zero-subscription, local-first AI company for general work—not only development. It recruits role-based specialists, lets later specialists build on earlier work, retrieves local reference files, keeps an audit trail in SQLite, and writes reviewable Markdown reports.
+
+Measured machine-specific results and current limitations are recorded in `ACCEPTANCE.md`.
+
+This is an owner-controlled foundation. It plans and drafts locally; it does not autonomously message people, spend money, use credentials, browse, publish, deploy, or delete data.
+
+## Verify locally
+
+Run the complete dependency-free suite from any working directory with the
+repository-anchored runner:
+
+```powershell
+python C:\Users\thesw\Projects\local-agent-company\scripts\run_tests.py
+```
+
+The runner supplies the repository and `src` import roots, treats warnings as
+errors, and does not require an activated environment or a `PYTHONPATH` value.
+It does not initialize or mutate company state, start a service, or call a
+model. Use `--pattern test_readiness.py` only for a focused development check;
+the command without a pattern is the release suite. Passing runs are concise by
+default; add `--verbose` when individual test names are needed for diagnosis.
+An unmatched `--pattern` fails closed with exit 2 instead of treating zero
+discovered tests as a successful verification.
+
+## Start immediately
+
+No package download is required:
+
+```powershell
+cd C:\Users\thesw\Projects\local-agent-company
+.\local-company.cmd init
+.\local-company.cmd service start --port 8765
+python .\scripts\check_readiness.py --model llama3.2:1b
+.\local-company.cmd run "Design a 30-day launch plan for a local tyre shop"
+```
+
+The default provider is now the installed local Ollama runtime. Use `--provider mock` only when you intentionally want a fast workflow simulation without real model reasoning.
+The readiness command is the authoritative release gate for accepting a new local mission. `doctor` checks only the local Python/Ollama/model dependency: exit 0 means that dependency is ready, exit 1 names a known setup action, and exit 2 is an invalid or indeterminate diagnostic. It does not check build identity, company work state, or the queue worker.
+The company home no longer depends on the current directory. An explicit `--home` wins, then `LOCAL_COMPANY_HOME`, then the fixed per-user `~\.local-company` default. A relative environment value is anchored under the user home; root-relative, drive-relative, and parent-traversal environment values are rejected. A relative explicit `--home` remains relative to the invoking directory for compatibility.
+
+## Use the local coding agent
+
+OpenCode is the interactive coding harness and Ollama is its local model
+runtime. Start it in the current repository, or pass one explicit project
+directory:
+
+```powershell
+cd C:\Users\thesw\Projects\supermega-platform
+C:\Users\thesw\Projects\local-agent-company\local-code.cmd
+
+# Or start it from anywhere:
+C:\Users\thesw\Projects\local-agent-company\local-code.cmd C:\Users\thesw\Projects\supermega-vision
+```
+
+The launcher checks that Ollama, OpenCode, the target directory, an installed
+supported model, and current available memory are ready before opening the agent. OpenCode is permanently
+configured in `C:\Users\thesw\.config\opencode\opencode.json` to use only the
+loopback Ollama provider and the admitted Llama 3.2 models. It requires no paid
+inference API.
+Review diffs and focused test output before keeping agent changes.
+Run `local-code.cmd --check C:\path\to\project` for a non-interactive readiness
+check.
+
+The Ally defaults to `llama3.2:1b` for the lowest practical RAM footprint.
+`llama3.2:3b` is the only optional quality model and is admitted only when it is
+installed and at least 4 GiB of physical memory is currently available. Set
+`LOCAL_CODE_MODEL` to one of those two model names; every other family fails
+closed. The old LM Studio route is disabled.
+
+For the governed SuperMega Vision product tools, use the dedicated quality-model
+agent instead of the three-tool tiny-model starter profile:
+
+```powershell
+local-code.cmd --vision --check C:\Users\thesw\Projects\supermega-vision
+local-code.cmd --vision C:\Users\thesw\Projects\supermega-vision
+```
+
+The first command is read-only and starts no model. The second uses the same
+memory-gated Ollama Llama selector, then opens OpenCode with the explicit
+`vision-product` agent. That agent can access the separate
+`SUPERMEGA_VISION_MCP_PROFILE=product` server while ordinary OpenCode sessions
+keep the original three-tool `vision` starter profile. Both agents deny file,
+shell, task, web, and external-directory tools; vision operations remain
+available only through their scoped MCP server. Closing OpenCode unloads the
+selected Ollama model. A blocked check does not start a model.
+
+For an already-created Vision evaluation campaign, the tiny Ollama model has a
+separate three-tool route:
+
+```powershell
+local-code.cmd --vision-lite --check C:\Users\thesw\Projects\supermega-vision
+local-code.cmd --vision-lite C:\Users\thesw\Projects\supermega-vision
+```
+
+This selects the `vision-campaign` agent and the campaign MCP profile. It can
+only inspect campaign status, choose the verified next phase, and advance one
+phase-locked local evidence step. It cannot build products, use the general
+filesystem or shell, capture screens, control devices, or bypass rights and
+human-review boundaries. The normal Ollama model selector still requires at
+least 2.5 GiB available memory for the 1B model and starts nothing when blocked.
+
+Inspect the read-only selection without opening a model:
+
+```powershell
+python .\scripts\select_local_code_model.py
+```
+
+## Use Bionic separately
+
+Bionic is a separate agent app, not merely another model server. Create a **Code
+Project** and select a local repository when you want a graphical coding agent;
+create a **Work Project** for documents, research, analysis, slides, or sheets.
+Choose a local model in the session to keep inference on-device and free of
+per-token charges. Bionic cloud models are optional and consume paid credits, so
+they are not part of this repository's free-local default.
+
+LM Studio is not part of the current execution path. If it is later used for
+model comparison, select a Llama model explicitly, keep **Serve on Local
+Network** disabled, and stop it before starting Ollama inference. Do not run
+LM Studio/Bionic inference and Ollama inference at the same time on the Ally.
+
+Use Bionic and OpenCode as alternative interfaces over focused tasks, not as two
+agents editing the same checkout simultaneously. The shared `AGENTS.md` gives
+both local and Codex agents the same scope, verification, and approval rules.
+
+## Use a real local model
+
+After installing Ollama, download a model once:
+
+```powershell
+ollama pull llama3.2:1b
+.\local-company.cmd doctor
+.\local-company.cmd benchmark --num-predict 128
+.\local-company.cmd run "Build a practical plan for my objective" --model llama3.2:1b
+```
+
+After the model download, inference is local and does not use a paid API. The
+installed Ollama 1B model is the reliable bootstrap model. The optional
+`llama3.2:3b` path remains memory-gated and is not required for routine work.
+
+An identical direct mission reuses a report for 24 hours only when the routed team, project, retrieved evidence, evaluator version, stable model identity/configuration, latest passing evaluation, and sealed report SHA-256 all match. Uncacheable models, changed/tampered reports, and failed or legacy evaluations always run fresh. Change the objective or evidence when the work genuinely changed; use the explicit retry command when a failed result needs another attempt.
+
+You may set defaults for the current terminal:
+
+```powershell
+$env:LOCAL_COMPANY_PROVIDER = "ollama"
+$env:LOCAL_COMPANY_MODEL = "llama3.2:1b"
+$env:LOCAL_COMPANY_NUM_CTX = "4096"
+$env:LOCAL_COMPANY_NUM_PREDICT = "512"
+$env:LOCAL_COMPANY_KEEP_ALIVE = "0s"
+```
+
+## Create a project workspace
+
+Projects keep missions and source retrieval separated:
+
+```powershell
+.\local-company.cmd projects create "Yangon Tyre" --description "Local operations and growth work"
+.\local-company.cmd projects list
+.\local-company.cmd projects show "Yangon Tyre"
+```
+
+## Give the company knowledge
+
+Only the file explicitly named is imported. Supported formats are Markdown, text, CSV, JSON, YAML, Python, PowerShell, JavaScript, and TypeScript; each file is capped at 2 MB.
+
+```powershell
+.\local-company.cmd knowledge add "C:\path\to\business-notes.md" --project "Yangon Tyre"
+.\local-company.cmd knowledge add-dir "C:\path\to\approved-notes" --project "Yangon Tyre"
+.\local-company.cmd knowledge list --project "Yangon Tyre"
+.\local-company.cmd knowledge audit --project "Yangon Tyre"
+.\local-company.cmd knowledge refresh --project "Yangon Tyre"
+.\local-company.cmd knowledge search "customer pricing" --project "Yangon Tyre"
+```
+
+Directory reads are non-recursive unless `--recursive` is explicitly supplied, capped at 100 supported files by default, and skip hidden paths, symlinks, dependency folders, unsupported types, and files over 2 MB. Relevant excerpts are included in agent prompts and source paths are recorded in the final report. Imported text is treated as reference material, not executable instructions.
+
+`knowledge audit` is a bounded, read-only freshness check over at most 64 registered sources. Its JSON reports only source IDs, statuses, and current byte counts; it withholds paths, content, and digests, starts no work, and calls no model. `knowledge refresh` requires exactly one project and rereads all of that project's registered sources twice before opening one database transaction. A missing, unavailable, unsafe, over-limit, or changing source refuses the entire refresh. A successful refresh updates only changed index records and never writes to source files.
+
+Every model-backed direct, queued, or retry execution now checks the complete retrieval scope before reading indexed excerpts and again under the job transaction. A known stale queue item remains queued and unclaimed; no job or model call starts. Unprojected missions check every globally searchable source. Resume additionally requires its frozen evidence manifest to still match the safe current source and index; when it does not, use `retry` to create a new job with new frozen evidence. The error is pathless and directs the operator to audit and deliberately refresh or re-add the affected source. A source changing after the first scan still fails before job creation, cache reuse, or fresh model work.
+
+## Run teams
+
+Preview the automatically selected team before spending any local inference
+time or creating company state:
+
+```powershell
+.\local-company.cmd route "Improve supplier controls, inventory flow, and customer retention metrics"
+.\local-company.cmd route "Compare supplier options" --playbook procurement-review
+.\local-company.cmd preflight "Compare supplier options" --project "Yangon Tyre" --playbook procurement-review
+```
+
+The versioned JSON preview shows the fixed chair and quality roles, at most four
+automatically selected specialists, each exact matched signal, any matched
+departments omitted by the automatic cap, and explicit `model_called`,
+`state_mutated`, and `work_started` false effects. A named playbook previews its
+exact fixed team instead of applying the automatic cap. The preview also reports
+sensitive-action categories that require an owner gate before execution.
+Matching uses normalized whole words and phrases, so text such as `approval`
+cannot accidentally match the engineering signal `app`. The preview does not
+call Ollama, initialize a store, queue work, approve a gate, or authorize an
+action.
+
+`preflight` adds the selected initialized store's aggregate evidence readiness
+to that deterministic routing result. Its pathless
+`local-company.mission-preflight.v1` JSON withholds the objective, project name,
+source IDs, paths, contents, and digests. It reports only the opaque project ID,
+team roles, owner-gate categories, fixed blocker tokens, aggregate source/status
+counts, queueing eligibility, model-execution readiness, and false effect flags.
+Known drift blocks model readiness before queue creation while still permitting
+record-only queueing; owner-gated wording skips evidence reads because it cannot
+reach model execution. The private dashboard's **Preview team (no model)** step
+shows the same readiness result and keeps the draft objective, project,
+playbook, and priority ready for review. Neither preflight starts work or calls
+Ollama, and `/health.json` remains unchanged.
+
+Automatic routing:
+
+```powershell
+.\local-company.cmd run "Find ways to improve our shop profit and customer retention" --project "Yangon Tyre"
+```
+
+Explicit team:
+
+```powershell
+.\local-company.cmd run "Plan next quarter" --roles chief-of-staff,finance,marketing,operations,quality --provider ollama
+```
+
+Available functions:
+
+```text
+chief-of-staff  research  operations  finance  marketing
+sales           product   engineering legal-risk analytics
+customer-success people-ops procurement strategy quality
+```
+
+## Reusable playbooks and mission queue
+
+Inspect the built-in cross-functional teams:
+
+```powershell
+.\local-company.cmd playbooks list
+.\local-company.cmd playbooks show operations-improvement
+```
+
+Queue work without executing it, then manually run the highest-priority mission whose scheduled time has arrived:
+
+```powershell
+.\local-company.cmd queue add "Improve our daily stock process" --project "Yangon Tyre" --playbook operations-improvement --priority 80
+.\local-company.cmd queue list --status queued
+.\local-company.cmd queue preflight --queue-id REVIEWED_QUEUE_ID
+.\local-company.cmd queue retry-preflight FAILED_QUEUE_ID
+.\local-company.cmd queue run-next --queue-id REVIEWED_QUEUE_ID --num-predict 128
+
+# Preserve an incompatible unstarted mission without deleting it
+.\local-company.cmd queue park QUEUE_ID --reason "Preserve this mission while another project remains the active execution focus."
+.\local-company.cmd queue list --status parked
+.\local-company.cmd queue unpark QUEUE_ID --reason "Restore this mission to its original executable queue position."
+```
+
+Priorities range from 0 to 100. `--scheduled-at` accepts an ISO-8601 timestamp; values without a timezone are treated as UTC. There is no autonomous daemon: queue execution is an explicit local operator command. Before running, `queue preflight` returns the pathless `local-company.queue-preflight.v1` contract for the canonical next-due mission. It confirms the exact reviewed ID, selected team, current knowledge counts, owner-gate categories, and whether submission and model execution are ready without exposing the objective, source paths, source contents, or digests. It starts no model, job, or queue claim and does not mutate state. A `blocked` result must be corrected and reviewed again; `owner_gate_required` remains eligible only to create a local approval request and never starts model work.
+
+Before resetting a `failed`, `quality_failed`, or `superseded` item, `queue retry-preflight QUEUE_ID` returns `local-company.queue-retry-preflight.v1` over the still-failed record. It proves reset eligibility, current knowledge status, routed team, retry policy, owner gates, execution-slot readiness, and exactly one next action without exposing the objective or evidence. The CLI and dashboard retry-preflight page never reset or claim the queue, create a job, call a model, mutate state, or start work. Only after reviewing a `ready` result should an operator use `queue reset QUEUE_ID`; the ordinary next-due preflight still runs again before execution.
+
+`--queue-id` is optional in the CLI for compatibility, but when supplied it fails without mutation unless that exact reviewed ID is still the canonical highest-priority due mission. The dashboard displays the same preflight, disables model submission on blockers, and leaves the owner-review request available for gated work. It always supplies the displayed ID and claims it synchronously before acknowledging the POST. A changed queue order returns a conflict and runs nothing. Sensitive objectives become `needs_approval` and are not executed. When execution begins, the queue claim and job ID are linked in the same database transaction before the first model response and share a revocable execution lease, so interrupted work remains attributable and a superseded worker cannot persist a late result.
+
+`queue park` is the reversible alternative to cancellation when a valid mission belongs to a project that is not currently active. It accepts only an unstarted `queued` record and a 20-to-240-character audit reason, changes only its lifecycle status to `parked`, and preserves the original objective, project, priority, due time, and record. Parked missions are excluded from selection until `queue unpark` restores the exact record to `queued`. Both transitions append local audit events, call no model, start no work, delete no history, and fail closed if the lifecycle changes concurrently. The SuperMega workbench can use `supermega park-next` only when the exact due head is blocked solely by an execution-focus mismatch. The MCP tools `queue_park` and `queue_unpark` require the exact confirmation `CHANGE LOCAL QUEUE LIFECYCLE` and expose no external action.
+
+Available playbooks are `business-launch`, `decision-brief`,
+`operations-improvement`, `product-build`, `growth-plan`,
+`customer-retention`, `people-operations`, `procurement-review`, and
+`metrics-review`, and `strategy-review`. The new departments remain planning and review functions:
+customer-success never contacts customers, people operations does not make
+employment decisions, procurement never places orders or commits spend, and
+analytics never invents missing data; strategy never presents forecasts or
+assumptions as facts.
+
+## SuperMega local capabilities
+
+The coordinator can run the fixed, offline Vision sales worker without loading a model:
+
+```powershell
+.\local-company.cmd supermega vision-sales-intake --interactive
+.\local-company.cmd supermega vision-sales-intake --input C:\local\vision-prospect.json
+.\local-company.cmd supermega vision-prospect-import --input C:\local\vision-prospect-shortlist.csv
+.\local-company.cmd supermega vision-prospect-drafts
+.\local-company.cmd supermega vision-founding-pilot-packages
+.\local-company.cmd supermega vision-sales
+.\local-company.cmd supermega vision-sales-status
+.\local-company.cmd supermega vision-product-status
+.\local-company.cmd supermega vision-commercial-status
+```
+
+Product status recomputes both canonical artifact identities and invokes the
+fixed local SuperMega Vision verifier to regenerate the collection plan from its
+bound dataset and readiness specification. Coordinated JSON edits and identity
+rehashes therefore fail closed instead of becoming product evidence. Verification
+is local, read-only, fixed-command, timeout-bounded, and performs no network
+request or device action.
+
+Commercial status combines that verified product gate with the integrity-checked
+local sales inventory. It identifies the only supportable current offer as an
+owner-reviewed founding pilot for buyer-approved data collection and held-out
+evaluation. It explicitly prohibits current accuracy, production-readiness,
+autonomous consequential-action, and revenue claims; existing drafts remain
+unsent and receive claim-review attention while product evidence is incomplete.
+Vision product evidence may be advanced without overwriting prior receipts by a
+canonical `active-product-evidence.json` selector. The selector binds exact
+root-relative dataset, readiness, and collection-plan files with a recomputed
+identity. Absolute paths, traversal, links, missing files, coordinated selector
+rehashes, or failed source replay all fail closed; the dashboard exposes only
+aggregate verified counts and evidence identities.
+The founding-pilot-packages command derives deterministic, integrity-receipted internal packages from verified research and outreach evidence. Each package explicitly says that current accuracy and production readiness are unproven, proposes buyer-owned local collection plus held-out evaluation, keeps actions disabled, and leaves scope, timing, and price uncommitted. It never rewrites the source drafts or research. The command never creates a lead, edits a draft, commits pricing, sends outreach,
+accepts payment, or counts pipeline value as revenue.
+
+The interactive intake prompts locally for one prospect at a time, so names and contact details do not appear in command arguments or shell history. The file intake validates one local prospect JSON file. Both modes atomically queue the same deterministic, idempotent Vision contact event. Required fields are `name`, `email`, `company`, `goal`, `platform`, `state_count`, `weekly_runs`, `minutes_per_run`, `screenshot_rights`, `human_fallback`, and `observation_only`; `labor_hourly_usd` is optional. Intake does not modify a source file, call a model, use the network, send a message, or accept payment. The prospect-import command validates the fixed shortlist CSV contract, rejects duplicate ranks or organizations, requires HTTPS evidence sources, and stores deterministic research artifacts separately from leads. Imported research remains explicitly unsent and unqualified, contributes no proposal value, and cannot become a lead without a separate factual intake. The prospect-drafts command renders deterministic local outreach drafts from those exact research artifacts, binds each draft to an integrity receipt, and still performs zero model calls, network requests, sends, payments, lead qualifications, or research mutations. The sales command reads contact-event JSON files from the local Vision sales inbox and produces owner-review proposals, reply drafts, receipts, and rejection evidence. It runs serially, accepts no arbitrary executable or shell text, pins a domain-separated SHA-256 over both approved worker files, verifies the bundle again after execution, validates the worker contract, and rejects any result that claims network requests, external sends, payments, or input mutations. The sales-status command is read-only: it verifies research, outreach draft, proposal, and reply integrity; counts researched, review-ready, pending, qualified, blocked, and rejected items; labels draft pipeline value as neither booked nor collected revenue; and returns one next action without exposing local paths. `vision-product-status` independently cross-checks the local Vision dataset-readiness receipt and collection plan, reports only aggregate sample/gate counts and evidence identities, and holds all commercial claims until the dataset is ready and separate held-out model evidence exists. Missing, malformed, inconsistent, path-linked, pixel-bearing, or annotation-bearing evidence fails closed to `unavailable`. Override the checked roots only when testing or moving the local workspace:
+
+Copy `examples/vision-prospect.example.json`, replace every example value with one real prospect's answers, then run the three commands above. Do not treat the example company or its draft value as a real lead.
+
+```powershell
+.\local-company.cmd supermega vision-sales --platform-root C:\Users\you\Projects\supermega-platform --sales-root C:\local\vision-sales
+.\local-company.cmd supermega vision-product-status --product-root C:\local\vision-product
+```
+
+Before inference, every new mission freezes a versioned evidence manifest containing each retrieved source ID/path/hash, exact excerpt, character and line span, evidence ID, capture time, and a canonical manifest SHA-256. Prompts expose only those frozen `[EVIDENCE:id]` references. For objectives that request verified facts from imported evidence, a filename alone is insufficient: verification wording must carry a valid frozen evidence ID in the same sentence. A changed source, forged manifest, altered quote, invalid digest, or missing evidence citation fails closed. The dashboard shows the exact frozen excerpts for owner inspection.
+
+Project retrieval uses deterministic term frequency by default. When two current files carry different authority (for example, a sealed release handoff superseding an older operating note), set an explicit bounded project-scoped score adjustment with `knowledge authority SOURCE_ID --project PROJECT --level -100..100`. Explicitly named filenames still rank first; otherwise retrieval ranks by term score plus the authority adjustment, so strongly relevant evidence can still outrank a preferred but weak match. Level `0` removes the override. Search previews and frozen evidence expose the term, authority, and combined rank scores, and this command never calls a model or changes a source file.
+
+After every completed mission, deterministic gates verify that all assignments completed and that the report contains a substantive synthesis, team plan, owner gate, intact report seal, and valid evidence manifest binding. A new queued mission is evaluated exactly once after sealing and before its token-fenced queue claim is finalized; a safely reused report is rechecked without repeating model inference. When the objective names them, the evaluator also enforces specialist and synthesis word limits, explicit verified-fact/assumption separation, requested operating concepts, exact source-filename and evidence-ID citations, naturally stopped model output, labeled percentage claims, and absence of unsupported deployment or scheduling claims. A source-limitation gate rejects completion claims whose specific terms overlap retrieved evidence that says the capability is pending, unavailable, incomplete, or not ready. These are conservative provenance and contradiction screens—not general fact verification. For objectives that explicitly require matching supplied evidence IDs, synthesis is schema-first and fail-closed: code owns verified facts, filename/ID pairs, labels, numbering, word budget, and the required ending; malformed, unsafe, over-budget, or unavailable structured output cannot fall back to a free-text editor. The same strict path recognizes the exact five-part daily operating-control contract—current verified state, highest-value internal next action, measurable acceptance check, missing proof, and assumptions—when it also requires exact source filenames and supplied evidence IDs. That variant is fully code-owned after freezing evidence, so truncated or malformed specialist prose cannot alter its claims, structure, citations, or owner gate. Ollama specialist drafts in strict mode use a request-local ceiling of 768 generated tokens (or the lower configured limit), without changing the service-wide model setting or the structured executive budget. A cap hit is stored only as an explicit incomplete-output sentinel. Specialist drafts remain visibly unverified, whole source limitations are preserved atomically, and unsafe proposed actions are withheld. Legacy free-text missions retain section-aware compaction for overlong output:
+
+The deterministic renderer also owns the success criterion, so model-generated past-tense
+completion wording cannot define acceptance.
+Daily briefs that lead with current limitations and require at least two current sources use
+the same code-owned path; the evaluator counts distinct valid frozen evidence IDs in the final
+synthesis and rejects a one-source result even when its formatting is otherwise correct.
+Strict proposal fields reject serialized-object fragments and source/evidence metadata keys;
+malformed task text receives the same single local retry and then fails closed.
+Task templates must begin with a listed action verb. In strict grounded runs, failure-mode prose is
+code-owned and deterministically rendered instead of accepted from the model. The evaluator keeps a
+conservative semantic check for legacy and non-structured reports.
+Retry and final-rejection audit events record only stable code-owned validation codes, never
+the rejected model payload. Persisted model metrics use a fixed key, type, range, and enum
+allowlist.
+
+```powershell
+.\local-company.cmd quality JOB_ID
+.\local-company.cmd quality JOB_ID --summary
+.\local-company.cmd quality JOB_ID --preview
+.\local-company.cmd quality --failed
+.\local-company.cmd queue supersession-list
+.\local-company.cmd queue supersession-preview QUEUE_ID
+.\local-company.cmd queue supersede QUEUE_ID --successor-job RETRY_JOB_ID --reason "Exact current retry accepted; preserve the historical failure for audit."
+```
+
+A report is written through a same-directory atomic replacement and sealed with SHA-256 before evaluation. Every recheck appends a versioned evaluation-history record; the latest result remains the dashboard projection. The evaluator reads and scans the exact sealed report bytes, so edits, moved paths, symlinks, and appended action claims fail closed. A queue item becomes `quality_failed` instead of `complete` when these gates fail. `quality JOB_ID --summary` is a bounded, pathless read of the latest stored result: it lists exact failed-check tokens, grouped repair actions, source-conflict count, queue linkage, and explicit zero-effect flags without appending an evaluation, calling a model, or changing queue state. `quality JOB_ID --preview` uses `local-company.quality-recheck-preview.v2` to run the exact current evaluator against a disposable clone of the sealed report and database, compare it with the stored result, then delete the clone. It reports evaluator, outcome, score, and failed-gate changes without changing the real database, report, queue, or history and refuses the result if the database, report, or frozen source files change during observation. Invalid sealed-report or frozen-evidence integrity directs the operator to preserve history and retry with current evidence; content-only failures retain repair-before-retry guidance. `quality --failed` uses `local-company.quality-recovery-list.v4` for every active failure in priority order. Each item keeps its stored result as history, runs an individually race-checked disposable current preview, exposes score and gate deltas, and derives displayed repair actions and common-gate counts from the current evaluator rather than stale checks. The aggregate double-snapshots the full database and fails closed on malformed preview output or crossing store changes. A current pass remains review-only and does not change the queue or append an evaluation. Use **Recheck** or `quality JOB_ID` only when you intend to append the reviewed result. After correcting the cause, use the dashboard **Retry** control or `queue reset QUEUE_ID`.
+
+`queue supersession-preview QUEUE_ID` and the dashboard **Supersession proof** link perform a second mutation-free check before any failure can be retired. They require a completed descendant in the original retry lineage with the exact objective and project, current passing evaluation history, unchanged report seal, and valid report-bound evidence manifest. The output withholds objectives, reports, paths, source text, and claims and includes a SHA-256 binding for the selected successor. `queue supersession-list` and the dashboard **Retired failure proofs** page use `local-company.quality-supersession-list.v2`, repeat that current proof twice for every bounded retired record, and fail closed if the database, report, manifest, source, or audit inputs cross during observation. They separately classify the original retirement event as `input_fingerprint_bound`, `successor_proof_bound`, `legacy_reason_only`, or `malformed` without exposing its reason. Unrelated-job history is excluded before the bounded scan, while an unreadable or invalidly routed record for the same failed job invalidates the audit binding instead of being skipped in favor of older proof. Thus a currently valid successor does not disguise weak or corrupted historical evidence, and a stale or legacy record remains preserved but receives explicit review attention. `queue supersede` requires the exact eligible successor through `--successor-job`; schema `local-company.queue-supersede.v2` revalidates lineage, evaluation, seals, manifest, and proof inside the mutation transaction, then double-fingerprints the report and manifest source files around final validation. A crossing filesystem write rolls back the queue change and appends no supersession event. A reason alone cannot hide an unresolved failure. Supersession changes only the queue lifecycle and appends its proof plus the opaque input fingerprint to the audit event; it deletes no report, evaluation, queue record, or history and remains reversible with `queue reset`. Queued items can be stopped with `queue cancel QUEUE_ID`.
+
+## Project operator brief
+
+Start each local review with one deterministic project summary:
+
+```powershell
+.\local-company.cmd brief --project "PROJECT"
+```
+
+The `local-company.operator-brief.v1` result combines project-scoped knowledge
+freshness, mission and completion state, owner approvals, due schedules, failed
+quality gates, and aggregate dataset-quality signals. It emits an ordered
+attention queue and exactly one `next_action`. The brief withholds objectives,
+project names, reports, paths, evidence text, claims, and model output; it calls
+no model and changes no database, queue item, schedule, or work state. It scans
+registered source freshness and double-snapshots every database input, returning
+an error instead of mixing states when either side changes during observation.
+
+Each project row on the localhost dashboard has a **Brief** link to the same
+bounded view. That page is no-store, accepts only one exact project ID, returns
+404 for malformed or extra routes, and returns a sanitized conflict response if
+the local state changes while it is rendered.
+
+## Recurring local schedules
+
+Schedules do not run autonomously. They create queue items only when the operator invokes `tick`:
+
+```powershell
+.\local-company.cmd schedules create "Morning health" "Review local runtime health and identify exceptions" --every-days 1 --next-run "2026-07-27T01:00:00+00:00" --project "Acceptance Lab" --playbook operations-improvement --priority 70
+.\local-company.cmd schedules list
+.\local-company.cmd schedules tick
+```
+
+Each due schedule produces at most one occurrence per tick and advances beyond the current time, preventing an overdue schedule from flooding the queue. Use `schedules disable SCHEDULE_ID` or `schedules enable SCHEDULE_ID` to control future materialization.
+
+## Health and recoverable audit export
+
+```powershell
+.\local-company.cmd health
+.\local-company.cmd export "C:\path\to\approved-export-directory"
+```
+
+CLI health reports local disk, database, reports, Ollama model storage, active work, queue depth, approvals, and metadata-only pending-completion phases. The dashboard's `/health.json` uses schema `local-company.health.v1` and exposes only its PID and optional listener instance, startup-cached build and opaque company-store identities, allowlisted resource/work counters, Ollama reachability and installed-model count, and worker status. It excludes projects, objectives, queue rows, schedules, evaluations, approval descriptions, dataset records, model names, pending item IDs, paths, secrets, and worker output. Its size therefore does not grow with business-record or worker-output history. The embedded release identity contains package version, build ID, and one release-validated SHA-256. That digest uses versioned framing over every operational package Python file plus the fixed health, readiness, runtime-guard, launchpad, product-prompt, scheduled-cycle, scheduled-task-manager, and manifest scripts, all labeled by canonical project-relative paths. Only the generated `src/local_company/build_info.py` manifest is excluded to avoid self-reference. `/build-status.json` and the compatibility URL `/health.json?view=build-status` return only that identity, the service PID, direct SQLite work counters, worker status, a bounded startup runtime attestation, and an opaque company-store identity. The store object contains only schema `local-company.store.v1` and a random UUID; no home path, database filename, token, or environment value is exposed. Runtime build identity performs no filesystem, environment, Git reads, or process launches; unavailable `git_commit` and `source_dirty` values deliberately remain `null` instead of being guessed. `pending_report_finalizations` and `pending_evaluations` identify durable work between report preparation, sealing, evaluation, and queue reconciliation without exposing lease tokens, paths, report bytes, or item IDs. Export writes a version-3 timestamped JSON audit plus a `.sha256` manifest, including report seals, evidence-manifest indexes, and append-only evaluation history. It includes source paths and content hashes but deliberately excludes imported source bodies and frozen source quotes.
+
+`capacity --project PROJECT` is the read-only admission view for the Ally. It proves the active focus and role budget, one serial execution slot, zero resident role processes, exact local listener-owner counts on ports 5173, 8788, 8765, and 11434, verified service identity, Ollama's loaded-model count, at least 1 GiB physical-memory headroom, and the project operator brief. It never starts or stops a process, calls a model, or changes company state. Unknown listener, model, memory, service, focus, or brief evidence is indeterminate instead of being treated as spare capacity.
+
+Verify the embedded manifest before tests or release. After changing any covered package file or fixed lifecycle script, refresh it with a new, explicit, monotonic build ID and check it again. A missing, linked, escaped, oversized, or unstable required script fails closed; unrelated docs, tests, and helper scripts are not silently added to the trust boundary. These commands touch no company state or service process:
+
+```powershell
+python .\scripts\stamp_build_manifest.py --check
+python .\scripts\stamp_build_manifest.py --write --build-id local-build-YYYYMMDD.N
+python .\scripts\stamp_build_manifest.py --check
+```
+
+This identity detects checked on-disk drift; it is not a signature and cannot establish authenticity against an actor able to rewrite both the verifier and manifest. Future lifecycle scripts must be added explicitly to the code-owned allowlist and released with a new build ID.
+
+Run stamping only while local source edits are paused; its double scan detects ordinary concurrent changes but is not a lock against a malicious filesystem writer. A write failure with `replacement_committed: true` means the atomic replacement reached disk before a later check failed: run `--check`, inspect the result, and do not restart the service until it passes. The live dashboard caches its embedded identity at process startup, so a validated and committed build becomes live only after a separate deliberate service restart.
+
+After commit or restart, compare that checked disk manifest with the fixed loopback build-status view. The checker is read-only, caps the response at 64 KiB, bypasses proxies and redirects, validates provenance fields, reports exact mismatches, and refuses to recommend an immediate restart while a job, queued/running mission, approval, report finalization, evaluation, or worker transition is active. It blocks downgrade advice when disk is older or a build ID conflicts. During the first upgrade, the query-form URL accepts a pre-compact build's legacy health response only when it fits the 64 KiB client cap; current builds answer it with the compact snapshot:
+
+```powershell
+python .\scripts\check_live_build.py
+```
+
+Use the composed readiness gate before accepting a new local mission:
+
+```powershell
+python .\scripts\check_readiness.py --model llama3.2:1b
+```
+
+It returns exit 0 only when the selected local company home has a valid identity matching the live service, the disk manifest is valid, the live build exactly matches it, local work is idle, the queue worker is enabled, the service is startup-attested to the requested Ollama model on the fixed loopback endpoint, Ollama is reachable, and that exact model is installed. The gate rereads the selected identity immediately before a ready result and fails closed if it changed during the check. Use the same optional `--home` value as the CLI. On Windows, readiness accepts only an existing normal local-drive path and rejects UNC, mapped-remote, device, and reparse-point paths before opening SQLite. A valid store mismatch returns the neutral `align_company_home` action and never switches, initializes, or relaunches either store. Exit 1 reports a bounded, known local action; exit 2 means state, live, or dependency status is unavailable or malformed; exit 3 means the disk manifest or checker itself is indeterminate. Follow the JSON `action`, then rerun the gate. The Ollama tags probe does not generate text, so `generation_tested` remains false; use `benchmark` separately when an inference proof is required.
+
+The opaque store ID identifies database lineage, not an exact path, freshness, or authenticity. Copies, hardlinks, and restored backups retain it, and a local writer could spoof it. The live process pins its first valid identity and keeps each identity check in the same SQLite transaction as the corresponding read or mutation, so a different valid store cannot be used silently during that operation.
+
+## One-shot local runtime guard
+
+`runtime_guard.py` is a bounded, fail-closed lifecycle check for an already initialized company store. It is not a mission scheduler or worker. It never runs a queued mission, materializes a schedule, calls a model, pulls a model, invokes service shutdown, or kills an existing recorded process. Run it manually with explicit local paths before using it from an operating-system task:
+
+```powershell
+python .\scripts\runtime_guard.py `
+  --home "C:\Users\YOUR-NAME\Projects\supermega-local-company-state" `
+  --ollama-executable "C:\Users\YOUR-NAME\AppData\Local\Programs\Ollama\ollama.exe" `
+  --ollama-sha256 "REPLACE-WITH-VERIFIED-64-CHAR-LOWERCASE-SHA256" `
+  --record-result
+```
+
+The guard validates the selected store read-only, pins its opaque identity, checks the stamped operational build, and uses a private singleton lock. All HTTP checks remain on loopback: Ollama is fixed at `http://127.0.0.1:11434/api/tags`, and automatic dashboard starts are fixed at `http://127.0.0.1:8765`; the service port argument accepts only `8765`. Proxies and redirects are disabled. Ollama is launched at most once, with `OLLAMA_HOST=127.0.0.1:11434`, only after two strict probes plus a socket check confirm that the listener is absent. On Windows systems that silently time out closed loopback connects, two native IPv4-and-IPv6 TCP listener-table snapshots must both confirm that no listener owns the port. A reset, unexpected HTTP response, malformed or oversized inventory, unsafe executable, unavailable listener table, or other ambiguous result is never treated as permission to launch. If the newly owned Ollama child cannot establish a valid listener, the guard reaps only that exact child and reports an inspection action; it never kills by PID or process name. A reachable Ollama instance without the configured model also starts nothing: install that model deliberately with `ollama pull`, then rerun the guard.
+
+For automatic recovery, record an independently reviewed Ollama executable's SHA-256 and pass it with `--ollama-sha256`; the pin requires an explicit `--ollama-executable` and accepts exactly 64 lowercase hexadecimal characters. Omitting the pin remains valid for a healthy observation, but if Ollama absence is confirmed and no higher-priority store, build, listener, or service state needs attention, the guard returns exit `1`, `ollama_executable_pin_required`, and `configure_ollama_executable_pin` before executable lookup or process creation. There is no unpinned automatic-launch fallback. With a pin, the guard hashes the bounded executable only after absence is confirmed and immediately before launch. On Windows it keeps a read-only handle that denies write and delete sharing through process creation, so an updater or replacement cannot swap the checked bytes before launch. A digest mismatch or pre-launch verification failure returns exit `2` with a fixed inspection blocker before any child or service is started. On POSIX, a replacement in the final pathname-to-process gap is detected after process creation; the guard immediately reaps only that owned child, starts no service, and reports cleanup failure explicitly if reaping cannot be confirmed. This is a local byte pin, not publisher-authenticity proof, and it does not attest DLLs, models, or configuration. Deliberately verify and update the stored pin after an approved Ollama upgrade; do not calculate it afresh inside every scheduled invocation.
+
+The local service is started only when its checked state is `not_configured`, safely stopped or failed with an absent or mismatched process, stale with an absent process, or `stale_pid_reused` with a mismatched process. A live matching service is left alone. Legacy, unreachable, endpoint-mismatched, configuration-mismatched, PID-ambiguous, or malformed state fails closed; the guard never tries to repair it by stopping or replacing a process. Before any ready result, the guard also runs the composed readiness gate for live-build equality, live company/runtime attestation, idle work state, worker availability, Ollama, and the model. It then rechecks the exact service process, store, build, and Ollama snapshots once more.
+
+The command writes one compact `local-company.runtime-guard.v1` JSON object. Exit `0` means the complete runtime was confirmed ready, with `status` showing whether recovery occurred. Exit `1` reports a bounded operator action such as installing the configured model, starting a component manually, or waiting for the other guard instance. Exit `2` is an indeterminate store, build, listener, service identity, result-journal, or internal result; exit `3` means invalid arguments. Output includes fixed `missions_started: 0` and `models_pulled: 0` counters and does not expose service tokens or process fingerprints. Follow the returned `action`, rerun the guard, and still use `check_readiness.py` as the authoritative gate before accepting a mission.
+
+`--record-result` atomically records the exact stdout JSON bytes at the fixed `<validated-company-home>/runtime-guard-last.json` path while the guard lock remains held. It accepts no output path, never creates or selects a company home, and fails nonzero if the requested commit is unsafe or unavailable. Invalid-store, invalid-argument, busy-lock, and invalid-lock runs leave an existing record untouched. On POSIX the temporary record is created with mode `0600`; on Windows the record inherits the validated company home's ACL, so keep that home inside a current-user-controlled directory and do not treat the journal as stronger than the store's own access boundary. The file is only the last completed result for a valid, uncontended store and can legitimately be stale; its age and the current task result must be checked, and it is never an authorization signal or a substitute for authoritative readiness.
+
+The repository does not register a Windows scheduled task by itself. The intended cutover is a current-user, least-privilege task that invokes this one-shot command every five minutes with absolute Python, script, company-home, and Ollama-executable paths, the reviewed `--ollama-sha256` pin, and `--record-result`. Configure **Run only when user is logged on**, **Do not start a new instance**, **Start the task as soon as possible after a scheduled start is missed**, and a bounded execution limit. Do not run it as `SYSTEM` or an administrator: Ollama models and the company store belong to the selected user. The default launch requires `CREATE_BREAKAWAY_FROM_JOB`. Use `--allow-windows-job-inheritance` only on a machine where an isolated scheduled-task probe has both demonstrated error 5 for breakaway and confirmed that a detached inherited child remains alive after the action exits; the fallback is never attempted for another error. Register and test that task only after a manual exit-0 run; see `OPERATOR.md` for the cutover checklist. The task maintains local listeners only and does not make queue execution autonomous.
+
+## Read-only runtime supervisor
+
+After the Windows task is installed, use one read-only command to validate the complete local supervision chain. The example below is the explicit accepted profile for this machine; change a path or digest only after deliberately revalidating the replacement:
+
+```powershell
+python .\scripts\check_runtime_supervisor.py `
+  --home "C:\Users\thesw\Projects\supermega-local-company-state" `
+  --task-name "SuperMega Local Runtime Guard" `
+  --python-executable "C:\Users\thesw\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
+  --ollama-executable "C:\Users\thesw\AppData\Local\Programs\Ollama\ollama.exe" `
+  --ollama-sha256 "9648169dfef645752ff8b25fded65d57e4b519fda9b0c9710a938af025cec2a1" `
+  --model llama3.2:1b `
+  --allow-windows-job-inheritance
+```
+
+`check_runtime_supervisor.py` validates the sealed current-user, least-privilege task definition and action, its latest Task Scheduler result, the fixed atomic guard journal, the reviewed Ollama executable pin, the checked disk and live build, and the authoritative readiness result. The task name defaults to `SuperMega Local Runtime Guard`; supplying `--task-name` accepts only that exact value. The task action is required to use the explicit local values above plus the sealed Ally profile: port `8765`, context `4096`, prediction limit `768`, keep-alive `0s`, wait limit `15` seconds, and `--record-result`. The zero-second keep-alive releases model memory after every completed request; specialist roles still execute serially, up to the active focus limit.
+
+The supervisor is observational only. It does not enable, disable, register, start, stop, or rewrite the task; change the guard journal; start or stop a service; execute or queue a mission; advance a schedule; call a model; or pull a model. It emits one bounded, sanitized JSON object and does not return the supplied paths or digest. Exit `0` means the sealed task, a successful fresh journaled run, the Ollama pin, build identity, and authoritative readiness all agree. Exit `1` reports a determinate local action, such as enabling the task, waiting for a current run, or correcting stale state. Exit `2` means the observation is unavailable, malformed, inconsistent, or changed repeatedly during the check. Exit `3` means invalid command usage or an internal supervisor failure. Follow `action` and `blockers`; never treat the journal alone as authorization to run work.
+
+Freshness is fixed to the sealed five-minute task: a `300`-second interval, `180`-second execution limit, `120`-second dispatch grace, and `2`-second clock-skew allowance. A ready task result and journal may be at most `420` seconds old. The journal timestamp must correlate from two seconds before the latest task start through `210` seconds after it, and the canonical journal is capped at `2048` bytes. A disabled task is action-required, a running or queued task is transient action-required, and an unknown task state is indeterminate. The checker snapshots the task and journal around the build and readiness checks and retries a crossing scheduled run once instead of reporting a false component failure.
+
+## Inspect and recover work
+
+```powershell
+.\local-company.cmd status
+.\local-company.cmd show JOB_ID
+.\local-company.cmd recover --stale-minutes 60
+.\local-company.cmd resume JOB_ID
+.\local-company.cmd retry JOB_ID --provider ollama
+.\local-company.cmd retry JOB_ID --roles chief-of-staff,operations,finance,quality --provider ollama
+```
+
+Each completed assignment is checkpointed. Before a final report filename is published, the exact report bytes, digest, paths, and execution lease are committed to a private SQLite finalization journal. Windows publication uses replace-existing plus write-through semantics; other platforms replace in the same directory and flush that directory. If a process or machine stops before or immediately after file replacement, `recover` can recreate a missing temporary file or register an exact matching final report, seal it, run the deterministic evaluator, and reconcile its queue without rerunning the model. Transient filesystem sharing errors retain the intent and leases for a later retry. A readable mismatched path, lease, temporary file, or final file fails closed as `interrupted`; suspicious artifacts are never registered or overwritten. A sealed stale job that crashed before evaluation is evaluated before its queue is reconciled. A stale queue linked to a completed job receives a fresh deterministic recheck for that recovery attempt; recovery never decides from the unbound summary cache alone. Recovery is idempotent.
+
+`retry --roles` preserves the exact objective, project, and parent-job lineage while replacing only
+the retry team. Normal role validation and the active execution-focus ceiling still run before job
+creation or model load, so this can shrink a legacy oversized playbook but cannot bypass capacity.
+
+For other stale-heartbeat jobs, `recover` revokes their execution leases and reconciles stale queue claims to `failed` without resuming or rerunning a model. Linked job IDs are preserved; ambiguous legacy claims are never guessed while any job is still live. Any old model response arriving after recovery is audited and discarded. Use `resume` to issue a new lease and continue ordinary interrupted work deliberately, `retry` to create a new auditable child when a report artifact failed integrity checks, or `queue reset` to make a failed queue item eligible for an explicit later run. Lease tokens and pending report bytes are excluded from portable audit exports. Only one mission may run at a time, protecting shared RAM from competing local generations.
+
+## Local operator dashboard and task intake
+
+```powershell
+.\local-company.cmd service start --port 8765
+```
+
+Open `http://127.0.0.1:8765`. The detached service binds only to localhost and shows an authenticated form for adding project-scoped tasks to the queue. The page does not auto-refresh while an objective is being drafted; use **Refresh** explicitly. The Vision evidence banner shows the same pathless product-readiness and commercial-claim gates as `vision-product-status` and `vision-commercial-status`, including the evidence-supported founding-pilot stage and count of integrity-checked unsent drafts; it never treats dataset coverage as model accuracy or pipeline value as revenue. Each project row opens its deterministic, pathless operator brief. The **Failed mission recovery** card opens a bounded, pathless priority view that separates stored history from current-evaluator status, score, failed gates, integrity booleans, gate deltas, and code-owned repair actions for every active failure. Current common gates and actions therefore remain useful after evaluator changes. It withholds objectives, reports, sources, evidence, and model output and performs no evaluation append, model call, queue change, or work side effect. Its per-mission **Current preview detail** links show the same comparison in isolation. Mission IDs open a local detail page containing the report, failed automated gates, source-conflict evidence, exact frozen evidence excerpts, report/manifest hashes, append-only evaluation history, assignments, and audit events. A visible **Mission completion pending** banner and row annotations distinguish durable report-finalization or evaluation phases from an ordinary failure, including after a service restart. Queued items may be cancelled before they start. Intake never runs a model or performs an external action. The separate run control names the exact next ID, priority, and objective it will claim. If priority order changes after rendering, the stale submission is refused and the operator must refresh. A database-wide execution-slot guard keeps losing concurrent queue or direct attempts untouched instead of consuming a second item.
+
+When the active project has an unreviewed sealed mission, the dashboard now
+shows **Human product evidence review ready**. Its `/product-review` page shows
+the complete bounded result, automated score, roles, report hash, and evidence
+hash before asking for the owner's actual category, accept/reject decision,
+outcome reason, corrections, willingness-to-pay observation, optional measured
+peak memory, and literal confirmation. The managed service secret, loopback
+Host and Origin checks, exact job plus both hashes, and a final candidate
+recheck bind the submission. A cancelled form, wrong token, stale candidate,
+replay, or changed report records nothing. A successful submission appends only
+the local human-review evidence; it calls no model and grants no external send,
+payment, deployment, or publication authority. A directly launched read-only
+dashboard can inspect the result but cannot display a writable review form.
+
+The loopback-only `/vision-capture-lab/<state>/<variant>` route renders controlled,
+deterministic `ready`, `loading`, `error`, or `degraded` SuperMega screens for
+owned Vision training collection. Variants are limited to 1-32. The route reads
+no company database, worker, mission, project, sales, contact, or customer data;
+sets no-store, no-index, and restrictive browser security headers; and labels
+every page as controlled fixture material rather than production evidence.
+
+Dataset IDs on the dashboard open a read-only aggregate quality page. The list and
+detail view expose dimensions, deterministic flag categories, declared-key checks,
+per-column missing/type/distinct counts, and finite numeric summaries. They do not
+expose source paths, generated-brief paths, or source row values. `/health.json`
+reports only the total dataset count, never dataset records. Detail rendering is capped at 200 columns and
+reports the omitted count. A malformed or unsupported stored profile fails closed to
+an unavailable notice instead of displaying arbitrary stored fields. These screens
+do not infer business validity, required fields, date semantics, units, or freshness.
+
+The service uses a random local secret for queue changes, local execution, and shutdown; rejects non-loopback Host authorities and cross-site mutation origins; limits form bodies; escapes stored text; adds browser security headers; and writes queue lifecycle audit events. Service state is written through flush/fsync/atomic replacement. A persistent OS-backed lifecycle lock serializes the complete start and stop operations. Each launch records an opaque OS process-birth fingerprint and a separate random listener instance ID; status requires both the exact process and a constant-size private loopback handshake to match. Shutdown atomically excludes new mission starts, disables proxies and redirects, sends its secret only after both identities match, and waits for the exact original process to exit. PID reuse, a listener collision, malformed state, or an indeterminate process query therefore cannot claim a verified live service or receive a shutdown request. The fingerprint and secret are omitted from status output. Detached service identity is currently supported on Windows and Linux; direct read-only dashboard mode remains available elsewhere. A single-worker lock prevents competing Ollama jobs, and normalized sensitive-action patterns stop common email/funds/data-wipe wording at `needs_approval` before any model call. Running `dashboard` directly, without the service secret, preserves the read-only view.
+
+When upgrading from a service state created before `local-company.service.v2`, stop the running service with the prior build before switching source, then start it once with the current build. Current code labels an active legacy record `legacy_unverified` and refuses to guess that a PID belongs to the old service.
+
+## Owner approval inbox
+
+Sensitive wording in an objective fails closed and creates a pending request. You can also record a proposed action explicitly:
+
+```powershell
+.\local-company.cmd approvals request "Send email to the approved customer list" --job JOB_ID
+.\local-company.cmd approvals list --status pending
+.\local-company.cmd approvals approve REQUEST_ID --note "Draft reviewed"
+.\local-company.cmd approvals reject REQUEST_ID --note "Not authorized"
+```
+
+Approval is a recorded decision only. This version deliberately has no side-effect executor, so approving a request still sends, spends, publishes, deploys, and deletes nothing.
+
+## Local data
+
+Profile an explicitly selected CSV, JSON, or standard `.xlsx` workbook without
+modifying the source:
+
+```powershell
+.\local-company.cmd datasets add "C:\approved-data\sales.xlsx" `
+  --project "Yangon Tyre" `
+  --allow-root "C:\approved-data" `
+  --sheet "Sales" `
+  --key "invoice_id" `
+  --required "invoice_id" `
+  --required "amount" `
+  --type "amount" "numeric" `
+  --min "amount" "0" `
+  --max "amount" "100000"
+.\local-company.cmd datasets list --project "Yangon Tyre"
+```
+
+XLSX input requires `--allow-root`; the resolved workbook must stay inside that
+normal local directory. The dependency-free reader rejects links, reparse
+points, remote roots, path-traversing or encrypted ZIP members, unsupported
+workbook types, unsafe XML declarations, oversized expansion, more than 512
+profiled columns, and malformed relationships. It reads at most 10,000 data
+rows from one explicitly named sheet, or the first visible sheet. Formula and
+error cells are counted but ignored: formulas, macros, links, and cached formula
+results are never executed or treated as data. Generated briefs contain only
+statistics, not copied source rows. Profiles include missing and uniqueness
+rates, exact-duplicate impact, compact numeric min/quartile/median/max/mean,
+zero/negative rates, and IQR outlier counts. Repeat `--key` for a composite key
+to measure declared-grain completeness and uniqueness without storing key
+values.
+
+Dataset contracts are owner-declared on each profiling command. Repeat
+`--required COLUMN` to require presence and no missing rows; repeat
+`--type COLUMN TYPE` to allow multiple non-missing types (`array`, `boolean`,
+`integer`, `number`, `numeric`, `object`, or `string`). `numeric` accepts both
+integer and number observations. `--min COLUMN VALUE` and `--max COLUMN VALUE`
+set inclusive finite numeric bounds. Missing values are checked only by
+`--required`; non-missing values that cannot be checked as finite numbers count
+as range violations. An absent declared column is a violation. A clean check on
+a source capped at 10,000 profiled rows is labeled `conforms_profiled_rows`, not
+full-source conformance. Reprofiling the same source replaces its prior declared
+contract with the flags supplied on that command.
+
+Contract storage and the private dashboard contain declared column names,
+types, bounds, counts, rates, and results only—never source row values. Business
+keys, units, date semantics, allowed values, severity, freshness limits, and
+fitness for use are never guessed. `--allow-root` is optional but available as
+the same containment check for CSV and JSON; `--sheet` is XLSX-only.
+
+All runtime data stays under `.local-company` by default:
+
+```text
+.local-company/
+  company.db       SQLite jobs, plans, sources, approvals, and events
+  outputs/         Markdown reports
+```
+
+Use `--home D:\somewhere` before the command to choose another state directory.
+
+## Architecture and next boundary
+
+The coordinator is dependency-free Python using SQLite and Ollama's localhost HTTP API. Specialists work in sequence, then an executive-chair pass turns their outputs into one decision-ready synthesis. This PC remains the authority. Future worker machines should be named nodes receiving scoped assignments; they should never inherit blanket permissions.
+
+The read-only spreadsheet boundary is local and path-allowlisted. External connectors and action executors should come later, one narrow tool at a time, with explicit approvals and durable receipts.

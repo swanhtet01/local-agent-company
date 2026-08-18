@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -350,6 +354,54 @@ class ComputerUseWorkflowTests(unittest.TestCase):
         self.assertTrue(explain(proof)["effects"]["localStateMayChange"])
         with self.assertRaisesRegex(ValueError, "automate_operation_unknown"):
             translate(["automate", "guess"])
+
+
+class NonWindowsImportTests(unittest.TestCase):
+    """The coordinator must survive on a host without ctypes.wintypes.
+
+    cli.py and workflow_pilot import computer_use unconditionally, and
+    mcp_server runs missions by shelling out to `python -m local_company.cli`,
+    so an import-time failure here takes the whole company down on Linux rather
+    than just the Windows desktop workcell.
+    """
+
+    def test_core_modules_import_without_wintypes(self) -> None:
+        program = textwrap.dedent(
+            """
+            import sys, importlib.abc
+
+            class BlockWintypes(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname == "ctypes.wintypes":
+                        # What CPython raises on Linux: wintypes declares
+                        # VARIANT_BOOL with the Windows-only "v" format code.
+                        raise ValueError("_type_ 'v' not supported")
+                    return None
+
+            sys.meta_path.insert(0, BlockWintypes())
+            import local_company.computer_use as computer_use
+            import local_company.cli
+            import local_company.workflow_pilot
+            import local_company.mcp_server
+            assert computer_use.wintypes is None
+            assert callable(local_company.cli.main)
+            print("ok")
+            """
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            timeout=120,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"import failed without wintypes:\n{completed.stderr}",
+        )
+        self.assertIn("ok", completed.stdout)
 
 
 if __name__ == "__main__":
