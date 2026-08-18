@@ -2055,12 +2055,11 @@ class CompanyTests(unittest.TestCase):
         # On a Windows volume with 8.3 short-name generation enabled -- off by
         # default on client Windows, on by default on the Windows Server image
         # GitHub Actions runs, and NOT reproducible on this development machine's
-        # own filesystem -- Path.resolve() can silently substitute a long
-        # directory component for its short alias (C:\Users\runneradmin becomes
-        # C:\Users\RUNNER~1). This is exactly what surfaced on the project's own
-        # first real CI run: three unrelated-looking test failures that were all
-        # this one root cause. Both forms open the identical file, so the
-        # function's SECURITY check (containment, no symlink escape) must still
+        # own filesystem -- Path.resolve() can silently substitute an 8-character
+        # alias for a longer directory component. This is exactly what surfaced
+        # on the project's own first real CI run: three unrelated-looking test
+        # failures that were all this one root cause. Both forms open the identical
+        # file, so the function's SECURITY check (containment, no symlink escape) must still
         # run against the resolved form -- but its RETURN VALUE must be the
         # caller's original, un-mangled strings, or every other reference to the
         # same report in the ledger permanently diverges by exact string.
@@ -2084,8 +2083,7 @@ class CompanyTests(unittest.TestCase):
             def short_name_resolve(self, *args, **kwargs):
                 resolved = real_resolve(self, *args, **kwargs)
                 # Simulate 8.3 mangling of exactly the one long component this
-                # test introduced, the same way Windows would mangle
-                # "runneradmin" -- nothing else in the path is touched.
+                # test introduced -- nothing else in the path is touched.
                 mangled = str(resolved).replace("LongDirectoryName", "LONGDI~1")
                 return Path(mangled)
 

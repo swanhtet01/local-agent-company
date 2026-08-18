@@ -2211,8 +2211,9 @@ class Company:
         # that resolution has proven them safe. On a Windows volume with 8.3
         # short-name generation enabled (off by default on client Windows, on by
         # default on the Windows Server image GitHub Actions runs) .resolve() can
-        # silently substitute a long directory component for its short alias, e.g.
-        # C:\Users\runneradmin -> C:\Users\RUNNER~1. Both forms open the identical
+        # silently substitute an 8-character alias for a longer directory
+        # component -- see test_finalization_paths_survive_a_resolve_that_mutates_
+        # the_string_form for a worked example. Both forms open the identical
         # file, so nothing about containment or symlink-safety changes -- but the
         # short form would then get written back to the ledger, permanently
         # diverging from every other reference to the same report by the exact
