@@ -2207,7 +2207,17 @@ class Company:
             or expected_temporary is None
         ):
             return None
-        return resolved_output, resolved_temporary
+        # Deliberately return the CALLER-SUPPLIED paths, not the resolved ones, now
+        # that resolution has proven them safe. On a Windows volume with 8.3
+        # short-name generation enabled (off by default on client Windows, on by
+        # default on the Windows Server image GitHub Actions runs) .resolve() can
+        # silently substitute a long directory component for its short alias, e.g.
+        # C:\Users\runneradmin -> C:\Users\RUNNER~1. Both forms open the identical
+        # file, so nothing about containment or symlink-safety changes -- but the
+        # short form would then get written back to the ledger, permanently
+        # diverging from every other reference to the same report by the exact
+        # string every other call in this codebase compares paths with.
+        return output, temporary
 
     @staticmethod
     def _write_fsynced_report(path: Path, content: bytes) -> None:

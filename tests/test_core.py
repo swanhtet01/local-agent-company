@@ -2051,6 +2051,58 @@ class CompanyTests(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(repeated_history, 1)
 
+    def test_finalization_paths_survive_a_resolve_that_mutates_the_string_form(self):
+        # On a Windows volume with 8.3 short-name generation enabled -- off by
+        # default on client Windows, on by default on the Windows Server image
+        # GitHub Actions runs, and NOT reproducible on this development machine's
+        # own filesystem -- Path.resolve() can silently substitute a long
+        # directory component for its short alias (C:\Users\runneradmin becomes
+        # C:\Users\RUNNER~1). This is exactly what surfaced on the project's own
+        # first real CI run: three unrelated-looking test failures that were all
+        # this one root cause. Both forms open the identical file, so the
+        # function's SECURITY check (containment, no symlink escape) must still
+        # run against the resolved form -- but its RETURN VALUE must be the
+        # caller's original, un-mangled strings, or every other reference to the
+        # same report in the ledger permanently diverges by exact string.
+        #
+        # Reproduced here by mocking resolve() to behave exactly like an
+        # 8.3-enabled volume would, since this machine's own filesystem cannot
+        # exhibit the real behavior to test against directly.
+        with tempfile.TemporaryDirectory() as tmp:
+            model = CountingMockModel()
+            company = Company(Path(tmp), model)
+            job_id = "finaliz1234"
+            long_dir = company.output_dir / "LongDirectoryName"
+            long_dir.mkdir(parents=True)
+            output_path = long_dir / f"{job_id}.md"
+            temporary_path = long_dir / f".{job_id}.md.{'a' * 32}.tmp"
+            output_path.write_bytes(b"report")
+            temporary_path.write_bytes(b"report")
+
+            real_resolve = Path.resolve
+
+            def short_name_resolve(self, *args, **kwargs):
+                resolved = real_resolve(self, *args, **kwargs)
+                # Simulate 8.3 mangling of exactly the one long component this
+                # test introduced, the same way Windows would mangle
+                # "runneradmin" -- nothing else in the path is touched.
+                mangled = str(resolved).replace("LongDirectoryName", "LONGDI~1")
+                return Path(mangled)
+
+            with patch.object(Path, "resolve", short_name_resolve):
+                result = company._validated_report_finalization_paths(
+                    job_id, str(output_path), str(temporary_path),
+                )
+            self.assertIsNotNone(result, "the safety check must still pass under the mocked resolve")
+            returned_output, returned_temporary = result
+            self.assertEqual(
+                str(returned_output), str(output_path),
+                "the returned path must be the caller's original string, not the mangled resolved form",
+            )
+            self.assertEqual(str(returned_temporary), str(temporary_path))
+            self.assertNotIn("LONGDI~1", str(returned_output))
+            self.assertNotIn("LONGDI~1", str(returned_temporary))
+
     def test_recovery_registers_replaced_report_after_precommit_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = CountingMockModel()
