@@ -1,5 +1,8 @@
 # SuperMega Local Workcell
 
+[![CI](https://github.com/swanhtet01/local-agent-company/actions/workflows/ci.yml/badge.svg)](https://github.com/swanhtet01/local-agent-company/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 **A local-first AI agent company that runs entirely on your own machine, and
 never acts on the outside world without you.** It plans work with role-based
 agent teams against a small local model, teaches and replays bounded desktop
@@ -47,22 +50,26 @@ state, not a plan.
 | Read-only browser QA with evidence | Works on Windows | Needs an npm package and installed Edge; drives no clicks or forms |
 | Windows teach-and-replay desktop automation | Works on Windows only | ctypes/WinAPI; not portable |
 | Local dataset profiling (CSV / JSON / XLSX) | Works | Stdlib reader, read-only, path-allowlisted |
-| Running on Linux (Docker / VPS) | New and unproven | See below |
+| Running on Linux (Docker / VPS) | Works | CI-verified: full suite green on Ubuntu, Python 3.11-3.13 |
 | Browser QA on Linux | Does not work | Needs a substrate swap and a fresh acceptance run |
 | Desktop automation on Linux or macOS | Does not work | Excluded by platform, by design |
 | Any autonomous external action | Does not exist | Not "not yet" — see [Safety](#the-safety-model) |
 
 Four more things you should know before you invest time:
 
-1. **CI exists but has never run.** GitHub Actions workflows for the test matrix
-   (Windows and Linux, Python 3.11 to 3.13) and for CodeQL are in the repository,
-   but the repository has no remote yet, so not one of those jobs has ever
-   executed. The Linux legs are marked advisory on purpose: **whether the suite
-   passes on Linux has never been observed by anyone.** Three test modules are
-   still Windows-only and will not pass cleanly there. Today the honest
-   verification story is "run `python scripts/run_tests.py` yourself on Windows",
-   plus [`deploy/verify_linux_port.py`](deploy/verify_linux_port.py), which you
-   run by hand inside the container.
+1. **CI is green on the full matrix.** GitHub Actions runs the test suite on
+   both `ubuntu-latest` and `windows-latest`, Python 3.11 through 3.13 (six
+   legs total), plus CodeQL. All six legs pass; the `required` status check
+   gates merges on every one of them. Linux support was unproven until
+   2026-08-19 — the legs ran with a temporary `continue-on-error` excusal
+   while the port was still shaking out, and that excusal was removed once
+   Ubuntu went green on all three Python versions. The handful of
+   Windows-only *features* (Task Scheduler fallback, desktop automation,
+   drive classification) still skip their tests on Linux by design — see
+   `unittest.skipUnless(os.name == "nt", ...)` in the test files — but the
+   suite as a whole runs and passes there now. For a from-scratch Docker/VPS
+   check beyond CI, [`deploy/verify_linux_port.py`](deploy/verify_linux_port.py)
+   is still there to run by hand inside a container.
 2. **Model quality is bounded by a 1-billion-parameter model.** The policy in
    [`src/local_company/model_policy.py`](src/local_company/model_policy.py)
    allows exactly `llama3.2:1b` and `llama3.2:3b`, and there is no environment

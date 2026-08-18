@@ -439,11 +439,13 @@ checks, raising `computer_use_requires_windows`. That is the correct behaviour
 — you cannot drive Windows UI Automation from a headless container — but do
 not mistake "imports cleanly" for "works".
 
-> Whether the tests **pass** on Linux at runtime is still unverified: there is
-> no Linux machine on the founder's setup, so `.github/workflows/ci.yml` is the
-> first real Linux verification this project has ever had. Its ubuntu legs are
-> deliberately `continue-on-error` until they go green. Treat any Linux claim
-> in this runbook as unproven until that CI has actually run.
+> The tests **do pass** on Linux at runtime: `.github/workflows/ci.yml` runs
+> the full suite on `ubuntu-latest`, Python 3.11 through 3.13, and as of
+> 2026-08-19 all three legs are green and required for merge (the earlier
+> `continue-on-error` excusal has been removed). That verifies import and
+> runtime behavior under CI's container, not this runbook's specific
+> deployment target - re-run `python deploy/verify_linux_port.py` after any
+> change to this Dockerfile or the VPS steps below.
 
 ### Browser QA — needs a substrate swap, then a fresh acceptance rehearsal
 

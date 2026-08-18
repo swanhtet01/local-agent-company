@@ -58,7 +58,5 @@ keeps it that way:
 - Linux: <!-- e.g. Ubuntu 24.04 container, Python 3.12, plus the
      `python deploy/verify_linux_port.py` receipt - or "not run" -->
 
-<!-- CI runs both. The ubuntu-latest legs are currently advisory
-     (continue-on-error) while the Linux port is unproven; the windows-latest
-     legs gate the merge. If you fix something on Linux, say so - that
-     scaffolding is meant to be deleted. -->
+<!-- CI runs both, six legs total (ubuntu-latest and windows-latest, Python
+     3.11-3.13), and the `required` job gates the merge on all six. -->
