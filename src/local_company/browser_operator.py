@@ -15,14 +15,14 @@ from typing import Callable
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 
-RECEIPT_SCHEMA = "supermega.browser-proof.v1"
-DOCTOR_SCHEMA = "supermega.browser-doctor.v1"
-SUITE_SCHEMA = "supermega.browser-suite.v1"
-SUITE_MANIFEST_SCHEMA = "supermega.browser-suite-manifest.v1"
-SUITE_SUMMARY_SCHEMA = "supermega.browser-suite-summary.v1"
-SUITE_SEAL_SCHEMA = "supermega.browser-suite-seal.v1"
+RECEIPT_SCHEMA = "local-company.browser-proof.v1"
+DOCTOR_SCHEMA = "local-company.browser-doctor.v1"
+SUITE_SCHEMA = "local-company.browser-suite.v1"
+SUITE_MANIFEST_SCHEMA = "local-company.browser-suite-manifest.v1"
+SUITE_SUMMARY_SCHEMA = "local-company.browser-suite-summary.v1"
+SUITE_SEAL_SCHEMA = "local-company.browser-suite-seal.v1"
 PINNED_AGENT_BROWSER_VERSION = "0.33.2"
-NAMESPACE = "supermega-local-workcell"
+NAMESPACE = "local-company-browser"
 MAX_URL_LENGTH = 4096
 MAX_PAGE_TEXT_BYTES = 512 * 1024
 MAX_SUITE_MANIFEST_BYTES = 64 * 1024
@@ -189,7 +189,7 @@ def _manifest_digest(definition: dict[str, object]) -> str:
     encoded = json.dumps(
         definition, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
     ).encode("utf-8")
-    return hashlib.sha256(b"supermega.browser-suite-manifest.v1\0" + encoded).hexdigest()
+    return hashlib.sha256(b"local-company.browser-suite-manifest.v1\0" + encoded).hexdigest()
 
 
 def _validated_manifest_definition(value: object) -> dict[str, object]:
@@ -350,7 +350,7 @@ def create_suite_template(
     destination = output.expanduser().resolve()
     _write_json_exclusive(destination, _sealed_manifest(definition))
     return {
-        "schema": "supermega.browser-suite-template-result.v1",
+        "schema": "local-company.browser-suite-template-result.v1",
         "status": "created",
         "path": str(destination),
         "manifestSha256": _manifest_digest(definition),
@@ -373,7 +373,7 @@ def seal_suite_manifest(input_path: Path, output: Path | None = None) -> dict[st
     )
     _write_json_exclusive(destination, _sealed_manifest(definition))
     return {
-        "schema": "supermega.browser-suite-seal-result.v1",
+        "schema": "local-company.browser-suite-seal-result.v1",
         "status": "sealed",
         "path": str(destination),
         "manifestSha256": _manifest_digest(definition),
@@ -438,7 +438,7 @@ class AgentBrowserClient:
         ):
             self.environment.pop(key, None)
         config = tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", prefix="supermega-browser-",
+            mode="w", encoding="utf-8", prefix="local-company-browser-",
             suffix=".json", delete=False,
         )
         try:
@@ -608,7 +608,7 @@ def install_browser_operator(
         raise ValueError("browser_operator_repository_invalid")
     before = browser_doctor(repository_root=root, runner=runner)
     result: dict[str, object] = {
-        "schema": "supermega.browser-install.v1",
+        "schema": "local-company.browser-install.v1",
         "status": before["status"],
         "agentBrowserVersionPin": PINNED_AGENT_BROWSER_VERSION,
         "installAttempted": False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -454,7 +455,11 @@ class LocalCompanyMcpTests(unittest.TestCase):
                 first["experiment"]["requiredActions"],
                 ["status", "project_overview", "playbooks"],
             )
-            self.assertEqual(first["runnerInvocation"]["mode"], "--run")
+            # runnerInvocation's launcher is a Windows-only batch file with
+            # no shipped POSIX counterpart -- what mode/launcher this
+            # produces is platform-dependent (see the dedicated test below
+            # for both branches pinned deterministically); this test only
+            # checks the part that's true on every platform.
             self.assertEqual(first["runnerInvocation"]["prompt"], first["experiment"]["prompt"])
             self.assertIn("actual human observations", first["humanReviewFields"]["warning"])
             self.assertFalse(first["modelCalled"])
@@ -474,6 +479,50 @@ class LocalCompanyMcpTests(unittest.TestCase):
             self.assertEqual(
                 second["experiment"]["requiredActions"],
                 ["product_evidence_status", "product_evidence_next"],
+            )
+
+    def test_next_product_experiment_runner_invocation_is_platform_honest(self) -> None:
+        # local-company-agent.cmd is a Windows batch launcher with no
+        # shipped POSIX counterpart (confirmed: build_pilot_bundle.py's
+        # bundle manifest, setup_local_ai.py, and local-ai-menu.cmd only
+        # ever reference the .cmd form). Returning it unconditionally
+        # handed a POSIX caller an unusable launcher string with no signal
+        # that anything was platform-limited. Pin both branches
+        # deterministically via os.name rather than relying on which
+        # platform happens to run this test.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = self._session(root)
+            project_id = session.company_tools.company.create_project("Runner Lab")
+
+            with patch("local_company.mcp_server.os.name", "nt"):
+                windows = self._call(session, "product_experiment_next", {
+                    "project": project_id,
+                }, 3)["result"]["structuredContent"]
+            self.assertEqual(windows["runnerInvocation"]["launcher"], "local-company-agent.cmd")
+            self.assertEqual(windows["runnerInvocation"]["mode"], "--run")
+            self.assertNotIn("launcherUnavailableReason", windows["runnerInvocation"])
+            self.assertEqual(
+                windows["nextAction"],
+                "run_runner_invocation_then_human_review_then_product_experiment_review",
+            )
+
+            with patch("local_company.mcp_server.os.name", "posix"):
+                posix = self._call(session, "product_experiment_next", {
+                    "project": project_id,
+                }, 4)["result"]["structuredContent"]
+            self.assertIsNone(posix["runnerInvocation"]["launcher"])
+            self.assertIsNone(posix["runnerInvocation"]["mode"])
+            self.assertEqual(
+                posix["runnerInvocation"]["launcherUnavailableReason"],
+                "windows_only_launcher_not_shipped_for_this_platform",
+            )
+            # The prompt itself is still useful even without an
+            # auto-invokable launcher -- a caller can run it manually.
+            self.assertEqual(posix["runnerInvocation"]["prompt"], windows["runnerInvocation"]["prompt"])
+            self.assertEqual(
+                posix["nextAction"],
+                "manually_run_prompt_then_human_review_then_product_experiment_review",
             )
 
     def test_product_offer_requires_milestone_and_repeated_paid_setup_evidence(self) -> None:

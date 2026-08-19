@@ -8,6 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local_company.browser_operator import (
+    DOCTOR_SCHEMA,
+    NAMESPACE,
+    RECEIPT_SCHEMA,
+    SUITE_MANIFEST_SCHEMA,
+    SUITE_SCHEMA,
+    SUITE_SEAL_SCHEMA,
+    SUITE_SUMMARY_SCHEMA,
     browser_doctor,
     create_suite_template,
     discover_agent_browser,
@@ -132,6 +139,30 @@ def fake_runtime(root: Path) -> tuple[Path, Path]:
 
 
 class BrowserOperatorTests(unittest.TestCase):
+    def test_schema_and_namespace_constants_dont_leak_the_maintainers_project_name(
+        self,
+    ) -> None:
+        # `doctor`, `check`, `suite`, `suite-template`, and `suite-seal` are
+        # all plain, ungated subcommands run by any general user -- unlike
+        # `supermega-release`, which this session already gated behind
+        # SUPERMEGA_RELEASE_CHECK_ENABLED. Every schema constant elsewhere
+        # in this codebase (dashboard.py, computer_use.py, mcp_server.py,
+        # config.py, core.py, service.py, ...) uses a "local-company.*"
+        # prefix; these six were the one outlier still stamped
+        # "supermega.*", and NAMESPACE (handed to the third-party
+        # agent-browser CLI for on-disk session/profile naming on every
+        # invocation) was "supermega-local-workcell". Nothing previously
+        # pinned this, so a future edit could silently reintroduce it.
+        schemas = (
+            RECEIPT_SCHEMA, DOCTOR_SCHEMA, SUITE_SCHEMA,
+            SUITE_MANIFEST_SCHEMA, SUITE_SUMMARY_SCHEMA, SUITE_SEAL_SCHEMA,
+        )
+        for schema in schemas:
+            with self.subTest(schema=schema):
+                self.assertTrue(schema.startswith("local-company."))
+                self.assertNotIn("supermega", schema)
+        self.assertNotIn("supermega", NAMESPACE)
+
     def test_discover_agent_browser_finds_a_real_linux_install(self) -> None:
         # Every functional test in this file bypasses discovery entirely via
         # LOCAL_COMPANY_BROWSER_EXECUTABLE/fake_runtime()'s Windows-only
@@ -372,7 +403,7 @@ class BrowserOperatorTests(unittest.TestCase):
                 "failOnConsoleErrors": True, "maxA11yViolations": 0,
             } for index in range(21)]
             source.write_text(json.dumps({
-                "schema": "supermega.browser-suite-manifest.v1",
+                "schema": "local-company.browser-suite-manifest.v1",
                 "name": "Too many", "requiredRuns": 1, "pages": pages,
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "browser_suite_manifest_page_count_invalid"):
@@ -381,7 +412,7 @@ class BrowserOperatorTests(unittest.TestCase):
             pages.pop()
             pages[0]["surprise"] = True
             source.write_text(json.dumps({
-                "schema": "supermega.browser-suite-manifest.v1",
+                "schema": "local-company.browser-suite-manifest.v1",
                 "name": "Unknown field", "requiredRuns": 1, "pages": pages,
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "browser_suite_manifest_page_unknown_field"):

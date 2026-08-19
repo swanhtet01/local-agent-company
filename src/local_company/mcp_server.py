@@ -564,6 +564,32 @@ class CompanyTools:
             plan = None
         else:
             status = "experiment_ready"
+        runner_invocation = None
+        next_action = "inspect_evidence_and_decide_whether_to_design_a_new_milestone"
+        if plan:
+            if os.name == "nt":
+                runner_invocation = {
+                    "launcher": "local-company-agent.cmd", "mode": "--run",
+                    "prompt": plan["prompt"],
+                }
+                next_action = "run_runner_invocation_then_human_review_then_product_experiment_review"
+            else:
+                # local-company-agent.cmd is a Windows batch launcher with no
+                # shipped POSIX counterpart (build_pilot_bundle.py's bundle
+                # manifest, setup_local_ai.py, and local-ai-menu.cmd all only
+                # reference the .cmd form). Returning it unconditionally
+                # handed a POSIX caller a launcher name with no interpreter
+                # and no signal anything was wrong. The underlying prompt is
+                # still runnable manually via
+                # `python3 scripts/run_local_company_prompt.py --run <prompt>`
+                # (that script itself is cross-platform), so keep the prompt
+                # but be explicit that this tool cannot name a one-command
+                # launcher for it here.
+                runner_invocation = {
+                    "launcher": None, "mode": None, "prompt": plan["prompt"],
+                    "launcherUnavailableReason": "windows_only_launcher_not_shipped_for_this_platform",
+                }
+                next_action = "manually_run_prompt_then_human_review_then_product_experiment_review"
         return {
             "schema": "local-company.mcp-product-experiment-next.v1",
             "status": status,
@@ -572,10 +598,7 @@ class CompanyTools:
             "selectionRule": "least_reviewed_category_then_coding_business_data_research",
             "categoryCounts": category_counts,
             "experiment": plan,
-            "runnerInvocation": (
-                {"launcher": "local-company-agent.cmd", "mode": "--run", "prompt": plan["prompt"]}
-                if plan else None
-            ),
+            "runnerInvocation": runner_invocation,
             "machineAcceptanceChecks": [
                 "receipt schema is local-ai.company-prompt-result.v1",
                 "receipt status and reason are accepted with exit code zero",
@@ -595,10 +618,7 @@ class CompanyTools:
                 "confirmation": PRODUCT_EXPERIMENT_CONFIRMATION,
                 "warning": "Record only actual human observations; do not infer sales demand.",
             } if plan else None,
-            "nextAction": (
-                "run_runner_invocation_then_human_review_then_product_experiment_review"
-                if plan else "inspect_evidence_and_decide_whether_to_design_a_new_milestone"
-            ),
+            "nextAction": next_action,
             "modelCalled": False, "stateMutated": False,
             "externalActionPerformed": False,
         }

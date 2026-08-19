@@ -142,7 +142,7 @@ console-error and accessibility limits are explicit gates:
 
 ```json
 {
-  "schema": "supermega.browser-suite-manifest.v1",
+  "schema": "local-company.browser-suite-manifest.v1",
   "name": "Customer public release",
   "requiredRuns": 10,
   "pages": [
