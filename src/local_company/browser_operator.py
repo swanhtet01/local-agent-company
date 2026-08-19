@@ -57,6 +57,12 @@ def discover_agent_browser(repository_root: Path | None = None) -> Path | None:
         root / ".local-company-tools" / "node_modules" / "agent-browser" / "bin"
         / "agent-browser-win32-x64.exe",
         root / ".local-company-tools" / "node_modules" / ".bin" / "agent-browser.cmd",
+        # A real `npm install agent-browser` on Linux produces these instead;
+        # this project now has real Linux CI, so a genuine install there must
+        # actually be found, not just imported.
+        root / ".local-company-tools" / "node_modules" / "agent-browser" / "bin"
+        / "agent-browser-linux-x64",
+        root / ".local-company-tools" / "node_modules" / ".bin" / "agent-browser",
     ]
     bundled = next((path for path in candidates if path.is_file()), None)
     if bundled is not None:
@@ -82,7 +88,22 @@ def discover_browser_executable() -> Path | None:
         program_files_x86 / "Google" / "Chrome" / "Application" / "chrome.exe",
         local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe",
     ]
-    return next((path.resolve() for path in candidates if path.is_file()), None)
+    found = next((path.resolve() for path in candidates if path.is_file()), None)
+    if found is not None:
+        return found
+    # The env vars above are all Windows-only, so they resolve to empty
+    # candidate paths on Linux/macOS and this never found anything there.
+    # A real browser install on those platforms puts a launcher on PATH
+    # instead, under one of these common package names.
+    for name in (
+        "microsoft-edge", "microsoft-edge-stable",
+        "google-chrome", "google-chrome-stable",
+        "chromium", "chromium-browser",
+    ):
+        on_path = shutil.which(name)
+        if on_path:
+            return Path(on_path).resolve()
+    return None
 
 
 def _validate_target_url(value: str) -> str:

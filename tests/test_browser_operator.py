@@ -10,6 +10,8 @@ from unittest.mock import patch
 from local_company.browser_operator import (
     browser_doctor,
     create_suite_template,
+    discover_agent_browser,
+    discover_browser_executable,
     install_browser_operator,
     load_sealed_suite_manifest,
     run_browser_check,
@@ -130,6 +132,44 @@ def fake_runtime(root: Path) -> tuple[Path, Path]:
 
 
 class BrowserOperatorTests(unittest.TestCase):
+    def test_discover_agent_browser_finds_a_real_linux_install(self) -> None:
+        # Every functional test in this file bypasses discovery entirely via
+        # LOCAL_COMPANY_BROWSER_EXECUTABLE/fake_runtime()'s Windows-only
+        # fixture, so discovery itself was never actually exercised. A real
+        # `npm install agent-browser` on Linux produces
+        # bin/agent-browser-linux-x64 plus a POSIX .bin/agent-browser shim,
+        # not the Windows .exe/.cmd names this used to look for exclusively.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = (
+                root / ".local-company-tools" / "node_modules" / "agent-browser" / "bin"
+                / "agent-browser-linux-x64"
+            )
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"tool")
+            with patch.dict("os.environ", {}, clear=True):
+                found = discover_agent_browser(repository_root=root)
+            self.assertEqual(found, binary.resolve())
+
+    def test_discover_browser_executable_falls_back_to_path_on_linux(self) -> None:
+        # ProgramFiles/ProgramFiles(x86)/LOCALAPPDATA are all Windows-only,
+        # so on Linux every literal candidate path is empty and this used to
+        # always return None even with a real Chrome/Chromium on PATH.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            browser = root / "google-chrome"
+            browser.write_bytes(b"browser")
+            with patch.dict(
+                "os.environ",
+                {"ProgramFiles": "", "ProgramFiles(x86)": "", "LOCALAPPDATA": ""},
+                clear=True,
+            ), patch(
+                "local_company.browser_operator.shutil.which",
+                side_effect=lambda name: str(browser) if name == "google-chrome" else None,
+            ):
+                found = discover_browser_executable()
+            self.assertEqual(found, browser.resolve())
+
     def test_check_writes_hashed_pass_receipt_without_model_or_secret_headers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

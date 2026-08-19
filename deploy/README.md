@@ -450,11 +450,11 @@ not mistake "imports cleanly" for "works".
 ### Browser QA — needs a substrate swap, then a fresh acceptance rehearsal
 
 `browser_operator.py` drives **installed Microsoft Edge** through the pinned
-`agent-browser` npm CLI. Every part of that is Windows-shaped: it looks for
-`agent-browser-win32-x64.exe` and `agent-browser.cmd` under
-`.local-company-tools`, invokes `npm.cmd`, and probes hardcoded
-`Program Files\Microsoft\Edge\Application\msedge.exe` paths. There is no
-headless browser and no `DISPLAY` on the VPS.
+`agent-browser` npm CLI. It also now looks for a Linux `npm install`'s
+`agent-browser-linux-x64` binary and falls back to `google-chrome`/`chromium`
+on PATH, so discovery itself is no longer Windows-only - but that alone does
+not make browser QA work on a VPS. There is still no headless browser and no
+`DISPLAY` there.
 
 Substituting Playwright/Chromium is the obvious path and is a real project, not
 a config change: the pinned-version check, the sealed suite manifest, and the
