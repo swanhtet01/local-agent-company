@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,20 @@ def accepted_prompt_receipt(actions: list[str]) -> dict[str, object]:
 
 
 class LocalAiLaunchpadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # `supermega ...` is gated behind an explicit opt-in (see
+        # test_supermega_shortcuts_are_absent_and_unmentioned_by_default
+        # below) since it's a shortcut around one project the maintainer
+        # happens to have, not a general Local Workcell feature. Every
+        # other test in this class exercises its *behavior*, which is
+        # unaffected by the gate, so enable it once here rather than
+        # patching each test individually.
+        self._supermega_shortcuts_patcher = patch.dict(
+            os.environ, {"SUPERMEGA_PROJECT_SHORTCUTS_ENABLED": "1"},
+        )
+        self._supermega_shortcuts_patcher.start()
+        self.addCleanup(self._supermega_shortcuts_patcher.stop)
+
     def test_friendly_modes_translate_to_existing_bounded_commands(self) -> None:
         self.assertEqual(translate(["plan", "Invent a product"]).command, ("preflight", "Invent a product"))
         self.assertEqual(translate(["experiment"]).command, ())
@@ -159,6 +174,43 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             with self.subTest(args=args), redirect_stderr(error):
                 self.assertEqual(main(args), 2)
                 self.assertEqual(json.loads(error.getvalue())["reason"], reason)
+
+    def test_supermega_shortcuts_are_absent_and_unmentioned_by_default(self) -> None:
+        # `supermega ...` is a convenience layer around one project the
+        # maintainer happens to have, not a general Local Workcell feature.
+        # A general user of this now-public tool has no project named
+        # "SuperMega" -- the command must be unreachable AND unmentioned in
+        # --help unless explicitly enabled, the same as every other test in
+        # this class enables it via setUp.
+        with patch.dict(os.environ, {"SUPERMEGA_PROJECT_SHORTCUTS_ENABLED": ""}):
+            with self.assertRaises(ValueError):
+                translate(["supermega"])
+            error = io.StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(main(["supermega", "ask", "What next?"]), 2)
+            self.assertEqual(
+                json.loads(error.getvalue())["reason"], "launchpad_command_unknown",
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main([]), 0)
+            help_text = output.getvalue()
+            self.assertIn("Local AI Launchpad", help_text)  # sanity: help still renders
+            self.assertNotIn("local-ai.cmd supermega", help_text)
+            self.assertNotIn("local-ai.cmd web supermega", help_text)
+            self.assertIn("local-ai.cmd ask", help_text)  # sanity: unrelated lines survive
+            # An unrelated example line uses supermega.dev as a demo URL for
+            # the general `web` audit command -- that's not part of either
+            # gated block and must survive untouched.
+            self.assertIn("web https://supermega.dev", help_text)
+
+        # The explicit opt-in restores it exactly as every other test here
+        # already relies on via setUp.
+        self.assertEqual(translate(["supermega"]).mode, "supermega-status")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main([]), 0)
+        self.assertIn("local-ai.cmd supermega", output.getvalue())
 
     def test_company_execution_is_repository_anchored_and_argument_safe(self) -> None:
         action = translate(["plan", "Quote ; & $() exactly", "--project", "Future Product"])

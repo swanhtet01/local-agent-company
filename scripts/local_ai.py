@@ -181,6 +181,27 @@ Everything runs locally by default. Sensitive objectives stop at an owner gate.
 No command silently sends messages, spends money, deploys, or exposes a model server.
 """
 
+# HELP lists both `supermega ...` (the project-shortcut namespace) and
+# `web supermega` (the four-page release checker) unconditionally, even
+# though both are now gated commands that fail with "invalid choice" unless
+# explicitly enabled -- confusing for a general user of this now-public tool,
+# who has no project named "SuperMega" and no reason to check
+# app.supermega.dev. HELP itself stays the complete, literal text (existing
+# code and tests read it directly); _visible_help() is what the CLI actually
+# prints, filtering each block out independently by its own opt-in so
+# enabling one doesn't have to reveal help for the other.
+_SUPERMEGA_SHORTCUT_HELP_LINE = re.compile(r"^\s*local-ai\.cmd\s+supermega\b")
+_SUPERMEGA_RELEASE_CHECK_HELP_LINE = re.compile(r"^\s*local-ai\.cmd\s+web\s+supermega\b")
+
+
+def _visible_help() -> str:
+    lines = HELP.splitlines()
+    if not _supermega_shortcuts_enabled():
+        lines = [line for line in lines if not _SUPERMEGA_SHORTCUT_HELP_LINE.match(line)]
+    if not os.getenv("SUPERMEGA_RELEASE_CHECK_ENABLED"):
+        lines = [line for line in lines if not _SUPERMEGA_RELEASE_CHECK_HELP_LINE.match(line)]
+    return "\n".join(lines)
+
 
 def _require_tail(name: str, values: list[str]) -> list[str]:
     if not values or not values[0].strip():
@@ -203,6 +224,21 @@ def _supermega_objective(name: str, values: list[str]) -> list[str]:
     if any(item == "--project" or item.startswith("--project=") for item in objective):
         raise ValueError("supermega_project_override_forbidden")
     return objective
+
+
+def _supermega_shortcuts_enabled() -> bool:
+    """Whether this install has explicitly opted into the SuperMega project shortcuts.
+
+    `local-ai supermega ...` is a convenience layer around one specific
+    project the maintainer happens to have (SUPERMEGA_PROJECT_NAME), not a
+    general Local Workcell feature -- a general user of this now-public tool
+    has no project named "SuperMega" and no reason to. Its handlers already
+    fail reasonably (no crash) when that project doesn't exist, but every
+    --help line, example, and error message still assumes it does. Gate
+    visibility on an explicit opt-in, the same shape as the CLI-level Vision
+    and browser supermega-release fixes shipped earlier this session.
+    """
+    return bool(os.getenv("SUPERMEGA_PROJECT_SHORTCUTS_ENABLED"))
 
 
 def translate(argv: list[str]) -> LaunchAction | None:
@@ -277,7 +313,7 @@ def translate(argv: list[str]) -> LaunchAction | None:
             "Read one website in a fresh local browser and write a verified QA evidence pack.",
             False, True,
         )
-    if name == "supermega":
+    if name == "supermega" and _supermega_shortcuts_enabled():
         operation = tail[0].lower() if tail else "status"
         values = tail[1:]
         if operation == "status":
@@ -2690,7 +2726,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         action = translate(args)
         if action is None:
-            print(_localize_command(HELP))
+            print(_localize_command(_visible_help()))
             return 0
         if action.mode == "supermega-status":
             return run_supermega_status(action)
