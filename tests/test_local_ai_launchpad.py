@@ -182,6 +182,14 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         # "SuperMega" -- the command must be unreachable AND unmentioned in
         # --help unless explicitly enabled, the same as every other test in
         # this class enables it via setUp.
+        #
+        # HELP text is printed through _localize_command(), which rewrites
+        # the "local-ai.cmd" placeholder to "./local-ai" on POSIX -- so
+        # assertions here must go through it too rather than hardcoding the
+        # Windows spelling directly.
+        import scripts.local_ai as launchpad
+
+        localize = launchpad._localize_command
         with patch.dict(os.environ, {"SUPERMEGA_PROJECT_SHORTCUTS_ENABLED": ""}):
             with self.assertRaises(ValueError):
                 translate(["supermega"])
@@ -196,9 +204,9 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 self.assertEqual(main([]), 0)
             help_text = output.getvalue()
             self.assertIn("Local AI Launchpad", help_text)  # sanity: help still renders
-            self.assertNotIn("local-ai.cmd supermega", help_text)
-            self.assertNotIn("local-ai.cmd web supermega", help_text)
-            self.assertIn("local-ai.cmd ask", help_text)  # sanity: unrelated lines survive
+            self.assertNotIn(localize("local-ai.cmd supermega"), help_text)
+            self.assertNotIn(localize("local-ai.cmd web supermega"), help_text)
+            self.assertIn(localize("local-ai.cmd ask"), help_text)  # sanity: unrelated lines survive
             # An unrelated example line uses supermega.dev as a demo URL for
             # the general `web` audit command -- that's not part of either
             # gated block and must survive untouched.
@@ -210,7 +218,7 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(main([]), 0)
-        self.assertIn("local-ai.cmd supermega", output.getvalue())
+        self.assertIn(localize("local-ai.cmd supermega"), output.getvalue())
 
     def test_company_execution_is_repository_anchored_and_argument_safe(self) -> None:
         action = translate(["plan", "Quote ; & $() exactly", "--project", "Future Product"])
