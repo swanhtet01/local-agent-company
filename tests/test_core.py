@@ -392,6 +392,56 @@ class CompanyTests(unittest.TestCase):
                 _write_state(home, {"status": "starting", "pid": 1, "token": "local-test-token"})
             hardened.assert_called_once_with(home / "service.json")
 
+    def test_start_service_hardens_the_dashboard_child_log_file(self):
+        # service.log is the dashboard child's captured stdout+stderr, and
+        # start_service explicitly tells the operator to inspect it on
+        # failure -- it sat right next to service.json (hardened above)
+        # with no protection of its own.
+        class FakeProcess:
+            pid = 5008
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            child = FakeProcess()
+            birth = _ProcessObservation("present", "f" * 64)
+            health = {"status": "ready", "pid": child.pid, "service_instance_id": "e" * 32}
+            with patch("local_company.service._port_in_use", return_value=False), patch(
+                "local_company.service.subprocess.Popen", return_value=child,
+            ), patch("local_company.service._observe_process", return_value=birth), patch(
+                "local_company.service._probe", return_value=health,
+            ), patch(
+                "local_company.service.secrets.token_hex", return_value="e" * 32,
+            ), patch(
+                "local_company.service.secrets.token_urlsafe",
+                return_value="new-token-value-1234567890",
+            ), patch(
+                "local_company.service.restrict_file_to_current_user",
+            ) as hardened:
+                result = start_service(home, provider="mock")
+            self.assertTrue(result["live"])
+            hardened.assert_any_call(home / "service.log")
+            hardened.assert_any_call(home / "service.json")
+
+    def test_company_db_is_hardened_once_on_creation_not_every_connection(self):
+        # company.db is the primary store for every mission objective,
+        # project knowledge source, and synthesis result -- at least as
+        # sensitive as service.json's bearer token. But _connect() runs on
+        # nearly every Company operation, so hardening must happen exactly
+        # once (on creation), not on every single connection -- that would
+        # mean shelling out to icacls on every database operation.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            with patch("local_company.core.restrict_file_to_current_user") as hardened:
+                company.initialize()
+                hardened.assert_called_once_with(home / "company.db")
+                company.create_project("Hardening Lab")
+                company.create_project("Second Call")
+                hardened.assert_called_once_with(home / "company.db")
+
     def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -704,7 +754,7 @@ class CompanyTests(unittest.TestCase):
             ), patch(
                 "local_company.service._observe_process",
                 return_value=_ProcessObservation("unavailable"),
-            ):
+            ), patch("local_company.service.restrict_file_to_current_user"):
                 with self.assertRaisesRegex(RuntimeError, "could not be captured"):
                     start_service(home, provider="mock")
             self.assertTrue(child.terminated)
@@ -761,7 +811,7 @@ class CompanyTests(unittest.TestCase):
             "local_company.service._port_in_use", return_value=False,
         ), patch(
             "local_company.service.subprocess.Popen", side_effect=denied_again,
-        ) as strict_spawn:
+        ) as strict_spawn, patch("local_company.service.restrict_file_to_current_user"):
             with self.assertRaises(PermissionError):
                 start_service(Path(tmp), provider="mock")
         strict_spawn.assert_called_once()
@@ -784,7 +834,7 @@ class CompanyTests(unittest.TestCase):
             ), patch(
                 "local_company.service._observe_process",
                 return_value=_ProcessObservation("present", "f" * 64),
-            ):
+            ), patch("local_company.service.restrict_file_to_current_user"):
                 with self.assertRaisesRegex(RuntimeError, "could not be captured"):
                     start_service(home, provider="mock")
             self.assertFalse((home / "service.json").exists())
@@ -884,7 +934,7 @@ class CompanyTests(unittest.TestCase):
             ), patch(
                 "local_company.service._observe_process",
                 return_value=_ProcessObservation("unavailable"),
-            ):
+            ), patch("local_company.service.restrict_file_to_current_user"):
                 with self.assertRaisesRegex(RuntimeError, "could not be reaped"):
                     start_service(home, provider="mock")
             saved = _read_state(home)

@@ -705,7 +705,28 @@ def start_service(
         state: dict[str, object] | None = None
         readiness_failure = "startup_timeout"
         try:
-            with log_path.open("ab") as log:
+            # service.log is the dashboard child's captured stdout+stderr,
+            # and the code below explicitly tells the operator to inspect
+            # it on failure -- any startup traceback or import error that
+            # reaches it before the HTTP handler starts logging lands here.
+            # It sat right next to service.json (hardened above) with no
+            # protection at all. The fdopen() context manager must own the
+            # descriptor from the moment it's created -- opening it, then
+            # separately hardening it, then only entering the with block
+            # afterward would leak the raw descriptor if the hardening
+            # step ever raised.
+            with os.fdopen(
+                os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+                "ab",
+            ) as log:
+                # O_CREAT's mode only applies on first creation, so also
+                # chmod+restrict unconditionally to cover a log file that
+                # already existed from before this fix shipped.
+                try:
+                    os.chmod(log_path, 0o600)
+                except OSError:
+                    pass
+                restrict_file_to_current_user(log_path)
                 try:
                     process = subprocess.Popen(
                         command, cwd=project_root, env=environment,

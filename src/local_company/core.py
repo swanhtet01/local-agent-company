@@ -25,7 +25,8 @@ from typing import Protocol
 
 from .config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA,
-    read_validated_company_instance_id, valid_company_instance_id,
+    read_validated_company_instance_id, restrict_file_to_current_user,
+    valid_company_instance_id,
 )
 from .focus import enforce_execution_focus, read_execution_focus
 from .model_policy import require_local_llama_model
@@ -1887,7 +1888,23 @@ class Company:
     def _connect(
         self, *, validate_identity: bool = True, immediate: bool = False,
     ) -> sqlite3.Connection:
+        # company.db is the primary store for every mission objective,
+        # project knowledge source, and synthesis result -- at least as
+        # sensitive as service.json's bearer token, which already gets
+        # this same hardening. Unlike service.json (rewritten wholesale on
+        # every state change), a SQLite file's permissions set once persist
+        # across the connection's lifetime, and _connect() runs on nearly
+        # every Company operation -- so only harden the moment the file is
+        # actually created, not on every call (that would mean shelling
+        # out to icacls on every single database operation on Windows).
+        is_new_database = not self.db_path.exists()
         db = sqlite3.connect(self.db_path)
+        if is_new_database:
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
+            restrict_file_to_current_user(self.db_path)
         db.execute("PRAGMA foreign_keys=ON")
         if validate_identity:
             try:
