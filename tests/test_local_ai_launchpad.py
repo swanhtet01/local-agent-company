@@ -100,10 +100,11 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             translate(["web", "https://supermega.dev", "--expect-text", "SuperMega"]).command,
             ("browser", "check", "https://supermega.dev", "--expect-text", "SuperMega"),
         )
-        self.assertEqual(
-            translate(["web", "supermega", "--runs", "10"]).command,
-            ("browser", "supermega-release", "--runs", "10"),
-        )
+        with patch.dict(os.environ, {"SUPERMEGA_RELEASE_CHECK_ENABLED": "1"}):
+            self.assertEqual(
+                translate(["web", "supermega", "--runs", "10"]).command,
+                ("browser", "supermega-release", "--runs", "10"),
+            )
         self.assertEqual(translate(["autopilot", "status"]).command, ("status",))
         self.assertEqual(translate(["autopilot", "repair"]).command, ("repair",))
         self.assertEqual(translate(["brief"]).command, ())
@@ -219,6 +220,33 @@ class LocalAiLaunchpadTests(unittest.TestCase):
         with redirect_stdout(output):
             self.assertEqual(main([]), 0)
         self.assertIn(localize("local-ai.cmd supermega"), output.getvalue())
+
+    def test_web_supermega_fails_closed_by_default_instead_of_reaching_argparse(self) -> None:
+        # `web supermega` is a distinct gate from the `supermega ...`
+        # project-shortcut namespace above (SUPERMEGA_RELEASE_CHECK_ENABLED,
+        # not SUPERMEGA_PROJECT_SHORTCUTS_ENABLED) but was previously
+        # ungated in translate() even though _visible_help() already hid it
+        # and cli.py never registered the "supermega-release" browser
+        # subcommand without the same env var. Before the fix, a disabled
+        # install would build a LaunchAction anyway, main() would shell out
+        # to local_company.cli, and argparse would reject the unregistered
+        # subcommand with a raw "invalid choice" usage dump and exit 2 --
+        # not the launchpad's normal structured JSON error.
+        with patch.dict(os.environ, {"SUPERMEGA_RELEASE_CHECK_ENABLED": ""}):
+            with self.assertRaises(ValueError):
+                translate(["web", "supermega"])
+            error = io.StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(main(["web", "supermega"]), 2)
+            self.assertEqual(
+                json.loads(error.getvalue())["reason"], "launchpad_command_unknown",
+            )
+
+        with patch.dict(os.environ, {"SUPERMEGA_RELEASE_CHECK_ENABLED": "1"}):
+            self.assertEqual(
+                translate(["web", "supermega", "--runs", "10"]).command,
+                ("browser", "supermega-release", "--runs", "10"),
+            )
 
     def test_company_execution_is_repository_anchored_and_argument_safe(self) -> None:
         action = translate(["plan", "Quote ; & $() exactly", "--project", "Future Product"])

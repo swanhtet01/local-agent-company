@@ -303,6 +303,14 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 descriptions[operation], False, True,
             )
         if tail[0].lower() == "supermega":
+            # Gated the same way as _visible_help() hides this line from
+            # --help and cli.py only registers "browser supermega-release"
+            # under the same env var: without it, falling through to the
+            # generic browser-check branch below would silently treat the
+            # literal word "supermega" as a URL to check instead of failing
+            # the way an unrecognized command should.
+            if not os.getenv("SUPERMEGA_RELEASE_CHECK_ENABLED"):
+                raise ValueError("launchpad_command_unknown")
             return LaunchAction(
                 ("browser", "supermega-release", *tail[1:]), "web",
                 "Run the read-only four-product SuperMega release evidence pack.",

@@ -1613,6 +1613,29 @@ class CompanyTests(unittest.TestCase):
                     )
                     self.assertNotIn("SENTINEL", stderr.getvalue())
 
+    def test_computer_doctor_blocked_status_is_a_nonzero_exit(self):
+        # `computer run`/`prove`/`pilot-status` all fail the process exit
+        # code on a bad status; `doctor` was the one computer_command left
+        # out of that check, so a blocked (not-ready) desktop-automation
+        # environment printed the right JSON but still exited 0 -- a script
+        # or scheduled preflight branching on the exit code would treat a
+        # blocked environment as ready. `browser doctor` doesn't have this
+        # gap: its exit check is a generic status allowlist covering every
+        # browser_command, doctor included.
+        with tempfile.TemporaryDirectory() as tmp:
+            for status, expected_code in (("ready", 0), ("blocked", 1)):
+                with self.subTest(status=status):
+                    output = io.StringIO()
+                    with patch(
+                        "sys.argv", ["local-company", "--home", tmp, "computer", "doctor"],
+                    ), patch(
+                        "local_company.cli.WindowsDesktopAdapter.doctor",
+                        return_value={"schema": "doctor", "status": status},
+                    ), patch("sys.stdout", output):
+                        exit_code = cli_main()
+                    self.assertEqual(exit_code, expected_code)
+                    self.assertIn(f'"status": "{status}"', output.getvalue())
+
     def test_ollama_structured_completion_sends_json_schema(self):
         model = OllamaModel("llama3.2:1b")
         schema = {

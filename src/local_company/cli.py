@@ -867,6 +867,8 @@ def main() -> int:
                 args.computer_command == "prove" and result["status"] != "passed"
             ) or (
                 args.computer_command == "pilot-status" and result["status"] == "blocked"
+            ) or (
+                args.computer_command == "doctor" and result["status"] != "ready"
             ):
                 return 1
         elif args.command == "browser":
