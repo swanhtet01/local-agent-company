@@ -422,8 +422,15 @@ class CompanyTests(unittest.TestCase):
             ) as hardened:
                 result = start_service(home, provider="mock")
             self.assertTrue(result["live"])
-            hardened.assert_any_call(home / "service.log")
-            hardened.assert_any_call(home / "service.json")
+            # start_service() resolves `home` internally (home =
+            # home.resolve()) before deriving log_path/service.json --
+            # confirmed on GitHub Actions' windows-latest runner, where a
+            # raw tempfile path and its resolved form render differently
+            # (short vs. long Windows path form), so assert against the
+            # same resolved form start_service actually uses.
+            resolved_home = home.resolve()
+            hardened.assert_any_call(resolved_home / "service.log")
+            hardened.assert_any_call(resolved_home / "service.json")
 
     def test_company_db_is_hardened_once_on_creation_not_every_connection(self):
         # company.db is the primary store for every mission objective,
