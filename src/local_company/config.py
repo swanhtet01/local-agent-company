@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -107,3 +108,34 @@ def default_company_home() -> Path:
             raise ValueError("LOCAL_COMPANY_HOME must be absolute or user-home relative")
         return Path.home() / candidate
     return Path.home() / ".local-company"
+
+
+def restrict_file_to_current_user(path: Path) -> None:
+    """Best-effort: ensure only the current OS user can read a sensitive file.
+
+    On POSIX, ``os.chmod(path, 0o600)`` already does this; callers should
+    keep using it directly there. On Windows, chmod mode bits only toggle
+    the read-only attribute -- they do not touch the file's ACL, so anyone
+    who can reach the parent directory can still read the file regardless
+    of the mode passed to os.open()/os.chmod(). ``icacls`` is a tool built
+    into every Windows install (no new dependency, matching this project's
+    zero-third-party-package rule) that can actually restrict access.
+
+    Best-effort and silent on failure, the same posture as the chmod calls
+    this augments: the private default company-home directory (inherits a
+    per-user NTFS ACL from Path.home()) is the real safety net for the
+    common case. This only matters when LOCAL_COMPANY_HOME has been
+    pointed at a shared or synced location instead.
+    """
+    if os.name != "nt":
+        return
+    username = os.environ.get("USERNAME")
+    if not username:
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F"],
+            capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass

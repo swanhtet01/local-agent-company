@@ -29,7 +29,7 @@ from local_company.build_info import (
 from local_company.cli import main as cli_main, parser
 from local_company.config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA, default_company_home,
-    valid_company_instance_id,
+    restrict_file_to_current_user, valid_company_instance_id,
 )
 from local_company.core import (
     Company, EVALUATOR_VERSION, ExecutionLeaseLost, MockModel, OllamaModel,
@@ -381,6 +381,17 @@ class StructuredRepairModel(MockModel):
 
 
 class CompanyTests(unittest.TestCase):
+    def test_service_state_write_hardens_the_bearer_token_file(self):
+        # service.json carries the plaintext bearer token that authenticates
+        # every mutating dashboard action. os.chmod(0o600) alone doesn't
+        # restrict access on Windows; the real hardening call must actually
+        # run against the final written path, every time state is written.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patch("local_company.service.restrict_file_to_current_user") as hardened:
+                _write_state(home, {"status": "starting", "pid": 1, "token": "local-test-token"})
+            hardened.assert_called_once_with(home / "service.json")
+
     def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -647,7 +658,7 @@ class CompanyTests(unittest.TestCase):
                 "local_company.service._probe", return_value=health,
             ), patch("local_company.service.secrets.token_hex", side_effect=lambda n: "e" * (n * 2)), patch(
                 "local_company.service.secrets.token_urlsafe", return_value="new-token-value-1234567890",
-            ):
+            ), patch("local_company.service.restrict_file_to_current_user"):
                 result = start_service(home, provider="mock")
             self.assertTrue(result["live"])
             saved = _read_state(home)
@@ -725,7 +736,7 @@ class CompanyTests(unittest.TestCase):
         ), patch(
             "local_company.service.secrets.token_urlsafe",
             return_value="new-token-value-1234567890",
-        ):
+        ), patch("local_company.service.restrict_file_to_current_user"):
             result = start_service(
                 Path(tmp), provider="mock", allow_job_inheritance=True,
             )
@@ -804,7 +815,9 @@ class CompanyTests(unittest.TestCase):
                 "local_company.service.subprocess.Popen", return_value=child,
             ), patch("local_company.service._observe_process", return_value=birth), patch(
                 "local_company.service._probe", return_value=None,
-            ), patch("local_company.service.time.sleep"):
+            ), patch("local_company.service.time.sleep"), patch(
+                "local_company.service.restrict_file_to_current_user",
+            ):
                 with self.assertRaisesRegex(RuntimeError, "failed to become ready"):
                     start_service(home, provider="mock")
             self.assertTrue(child.terminated)
@@ -836,7 +849,9 @@ class CompanyTests(unittest.TestCase):
             ), patch(
                 "local_company.service.secrets.token_urlsafe",
                 return_value="new-token-value-1234567890",
-            ), patch("local_company.service.time.sleep"):
+            ), patch("local_company.service.time.sleep"), patch(
+                "local_company.service.restrict_file_to_current_user",
+            ):
                 result = start_service(home, provider="mock")
             self.assertTrue(result["live"])
             self.assertEqual(result["status"], "running")
@@ -1229,6 +1244,48 @@ class CompanyTests(unittest.TestCase):
                 with patch.dict(os.environ, {"LOCAL_COMPANY_HOME": "\\rooted"}):
                     with self.assertRaisesRegex(ValueError, "user-home relative"):
                         default_company_home()
+
+    def test_restrict_file_to_current_user_is_a_noop_off_windows(self):
+        # POSIX os.chmod(0o600) is the real confidentiality control there;
+        # this helper exists specifically for the platform where that call
+        # doesn't restrict access, so it must not do anything (or shell out)
+        # anywhere else.
+        with patch("local_company.config.os.name", "posix"), patch(
+            "local_company.config.subprocess.run",
+        ) as run:
+            restrict_file_to_current_user(Path("unused"))
+        run.assert_not_called()
+
+    def test_restrict_file_to_current_user_restricts_a_real_file_on_windows(self):
+        if os.name != "nt":
+            self.skipTest("icacls is Windows-only")
+
+        def acl_listing() -> str:
+            return subprocess.run(
+                ["icacls", str(target)], capture_output=True, text=True, check=True,
+            ).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "service.json"
+            target.write_text("{}", encoding="utf-8")
+            before = acl_listing()
+            # A freshly-created file inherits its parent directory's ACL,
+            # which on any real Windows temp directory grants access to more
+            # than just the current user (SYSTEM, Administrators, and
+            # whatever groups the parent grants) -- exactly the
+            # confidentiality gap this fix exists to close. "(I)" marks an
+            # inherited access-control entry in icacls' own output.
+            self.assertIn("(I)", before)
+
+            restrict_file_to_current_user(target)
+
+            after = acl_listing()
+            # /inheritance:r strips every inherited entry; only the single
+            # explicit grant this call just made should remain.
+            self.assertNotIn("(I)", after)
+            username = os.environ["USERNAME"]
+            self.assertIn(username, after)
+            self.assertIn(":(F)", after)
 
     def test_company_identity_migrates_atomically_persists_and_pins(self):
         with tempfile.TemporaryDirectory() as tmp:

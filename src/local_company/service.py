@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
 
+from .config import restrict_file_to_current_user
 from .model_policy import DEFAULT_LOCAL_MODEL, require_local_llama_model
 
 
@@ -98,6 +99,12 @@ def _write_state(home: Path, state: dict[str, object]) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+        # service.json carries the plaintext bearer token that authenticates
+        # every mutating dashboard action. On Windows, chmod(0o600) above is
+        # a no-op for actually restricting other accounts -- it only toggles
+        # the read-only attribute -- so it is not a real confidentiality
+        # control there the way it is on POSIX. This is the genuine one.
+        restrict_file_to_current_user(path)
     finally:
         try:
             temporary.unlink()
