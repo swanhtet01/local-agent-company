@@ -2688,6 +2688,29 @@ footer {{ margin-top:24px; color:#7e91ad; font:11px ui-monospace,monospace; }}
 </main></div></body></html>"""
 
 
+class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """A dashboard bound to loopback must be the only listener on that port.
+
+    ``http.server.HTTPServer`` sets ``allow_reuse_address = True`` (SO_REUSEADDR)
+    unconditionally in the standard library, purely so a restarted dev server
+    doesn't wait out a TIME_WAIT socket. On Windows, SO_REUSEADDR is stronger
+    than that: it lets an unrelated process bind the SAME address:port while the
+    original is still actively LISTENING, rather than only easing TIME_WAIT
+    reuse the way POSIX does -- confirmed directly on this machine: two
+    unrelated python.exe processes ended up both LISTENING on 127.0.0.1:8765
+    at once, silently, with neither erroring.
+
+    This dashboard's whole safety pitch is "no authentication, loopback only"
+    (see README). That promise is only as strong as loopback ownership of the
+    port: a second local process able to shadow-bind it could serve a lookalike
+    page to the owner, or receive requests meant for the real instance,
+    undetected. Disabling reuse makes a collision fail loudly and immediately
+    (OSError on bind) instead of succeeding ambiguously.
+    """
+
+    allow_reuse_address = False
+
+
 def create_dashboard_server(
     company: Company, port: int = 0, service_token: str | None = None,
     service_instance_id: str | None = None,
@@ -3144,7 +3167,7 @@ def create_dashboard_server(
         def log_message(self, format: str, *args: object) -> None:
             return
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return _ExclusiveThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
 def serve_dashboard(company: Company, port: int = 8765) -> None:

@@ -3648,6 +3648,25 @@ class CompanyTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_dashboard_port_cannot_be_silently_shadowed_by_a_second_process(self):
+        # http.server.HTTPServer sets allow_reuse_address=True in the stdlib.
+        # On Windows that lets an unrelated process bind the SAME loopback
+        # address:port while the first is still actively listening, rather
+        # than only easing TIME_WAIT reuse the way it does on POSIX -- this
+        # dashboard's entire "no auth, loopback only" safety pitch depends on
+        # actually owning that port. A collision must fail loudly, not
+        # coexist silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            first = create_dashboard_server(company, 0)
+            self.assertFalse(first.allow_reuse_address)
+            bound_port = first.server_address[1]
+            try:
+                with self.assertRaises(OSError):
+                    create_dashboard_server(company, bound_port)
+            finally:
+                first.server_close()
+
     def test_dataset_quality_dashboard_withholds_paths_rows_and_handles_bad_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
