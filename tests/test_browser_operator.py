@@ -291,6 +291,24 @@ class BrowserOperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "browser_url_credentials_forbidden"):
             run_browser_check(Path("unused"), "https://user:secret@example.test")
 
+    def test_supermega_release_check_is_absent_unless_explicitly_enabled(self) -> None:
+        # supermega-release checks four fixed app.supermega.dev pages -- the
+        # maintainer's own site, not a general capability -- but it used to
+        # register as a first-class sibling of the genuinely generic
+        # `browser check`/`suite`/`suite-template` commands regardless.
+        with patch.dict("os.environ", {}, clear=True):
+            built = parser()
+            check_args = built.parse_args(["browser", "check", "https://example.test"])
+            self.assertEqual(check_args.browser_command, "check")  # sanity: the rest of the group still parses
+            with self.assertRaises(SystemExit):
+                built.parse_args(["browser", "supermega-release"])
+        with patch.dict(
+            "os.environ", {"SUPERMEGA_RELEASE_CHECK_ENABLED": "1"}, clear=True,
+        ):
+            enabled_args = parser().parse_args(["browser", "supermega-release", "--runs", "5"])
+        self.assertEqual(enabled_args.browser_command, "supermega-release")
+        self.assertEqual(enabled_args.runs, 5)
+
     def test_template_is_sealed_ready_to_run_and_never_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

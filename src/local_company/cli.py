@@ -17,6 +17,7 @@ from .browser_operator import (
     run_browser_suite,
     run_supermega_release_suite,
     seal_suite_manifest,
+    supermega_release_check_enabled,
 )
 from .computer_use import (
     RUN_CONFIRMATION,
@@ -202,11 +203,12 @@ def parser() -> argparse.ArgumentParser:
     browser_suite.add_argument("manifest", type=Path)
     browser_suite.add_argument("--runs", type=int, default=1)
     browser_suite.add_argument("--timeout-seconds", type=int, default=45)
-    browser_supermega = browser_sub.add_parser(
-        "supermega-release", help="Check all four public SuperMega product setup pages"
-    )
-    browser_supermega.add_argument("--runs", type=int, default=1)
-    browser_supermega.add_argument("--timeout-seconds", type=int, default=45)
+    if supermega_release_check_enabled():
+        browser_supermega = browser_sub.add_parser(
+            "supermega-release", help="Check all four public SuperMega product setup pages"
+        )
+        browser_supermega.add_argument("--runs", type=int, default=1)
+        browser_supermega.add_argument("--timeout-seconds", type=int, default=45)
     browser_check = browser_sub.add_parser(
         "check", help="Inspect one website and write a pass/fail evidence pack"
     )

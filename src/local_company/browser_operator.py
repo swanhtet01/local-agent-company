@@ -38,6 +38,20 @@ SUPERMEGA_RELEASE_PAGES = (
 )
 
 
+def supermega_release_check_enabled() -> bool:
+    """Whether this install has explicitly opted into the SuperMega release check.
+
+    `browser supermega-release` checks four fixed app.supermega.dev pages --
+    the maintainer's own SaaS, not a general-purpose capability, but it was
+    registered as a first-class sibling of the genuinely generic `browser
+    check`/`suite`/`suite-template` commands. Gate registration on an
+    explicit opt-in, the same shape as vision_capability_configured(): a
+    general user exploring this now-public tool's --help has no way to know
+    what "SuperMega" pages means for them, and no reason to.
+    """
+    return bool(os.getenv("SUPERMEGA_RELEASE_CHECK_ENABLED"))
+
+
 class BrowserToolError(RuntimeError):
     pass
 
