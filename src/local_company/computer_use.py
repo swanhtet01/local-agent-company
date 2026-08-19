@@ -210,7 +210,16 @@ def validate_workflow(payload: object) -> dict[str, object]:
             if not isinstance(key, str) or not key or len(key) > 32:
                 raise ValueError("workflow_key_invalid")
             parts = key.split("+")
-            if any(part not in VIRTUAL_KEYS and not (len(part) == 1 and part.isalnum()) for part in parts):
+            # str.isalnum() is Unicode-aware and accepts any single letter or
+            # digit codepoint ('日', 'Ω', ...), not just what _virtual_key()
+            # can actually turn into a valid Win32 virtual-key code. Require
+            # ASCII too, matching the A-Z0-9 range _virtual_key() means to
+            # accept.
+            if any(
+                part not in VIRTUAL_KEYS
+                and not (len(part) == 1 and part.isalnum() and part.isascii())
+                for part in parts
+            ):
                 raise ValueError("workflow_key_unsupported")
         else:
             value_ref = step.get("valueRef")
@@ -619,6 +628,7 @@ $ties=@($ordered | Where-Object {$_.score -eq $top.score}).Count
     def click(
         self, window: dict[str, object], target: dict[str, object], relative: list[float],
     ) -> dict[str, object]:
+        self._require_windows()
         self._focus(window)
         resolved = self.resolve_target(window, target)
         if resolved is not None:
@@ -641,11 +651,12 @@ $ties=@($ordered | Where-Object {$_.score -eq $top.score}).Count
     def _virtual_key(part: str) -> int:
         if part in VIRTUAL_KEYS:
             return VIRTUAL_KEYS[part]
-        if len(part) == 1 and part.isalnum():
+        if len(part) == 1 and part.isalnum() and part.isascii():
             return ord(part.upper())
         raise ValueError("workflow_key_unsupported")
 
     def keypress(self, window: dict[str, object], key: str) -> dict[str, object]:
+        self._require_windows()
         self._focus(window)
         parts = key.split("+")
         codes = [self._virtual_key(part) for part in parts]
@@ -657,6 +668,7 @@ $ties=@($ordered | Where-Object {$_.score -eq $top.score}).Count
         return {"key": key}
 
     def type_text(self, window: dict[str, object], value: str) -> dict[str, object]:
+        self._require_windows()
         self._focus(window)
         if len(value) > 4096:
             raise ValueError("workflow_text_value_too_long")
@@ -1278,6 +1290,7 @@ def run_workflow(
     outcomes: list[dict[str, object]] = []
     status = "completed"
     error_code: str | None = None
+    error_message: str | None = None
     active_step: int | None = None
     failure_stage: str | None = None
     try:
@@ -1337,15 +1350,17 @@ def run_workflow(
             ):
                 raise RuntimeError("final_control_postcondition_failed")
         failure_stage = None
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         status = "halted"
         error_code = "computer_workflow_halted"
+        error_message = str(error)[:200]
     receipt: dict[str, object] = {
         "schema": RUN_SCHEMA, "runId": run_id, "status": status,
         "name": payload["name"], "workflowSha256": payload["workflowSha256"],
         "startedAt": started_at, "wallSeconds": round(time.perf_counter() - started, 3),
         "completedSteps": len(outcomes), "totalSteps": len(payload["steps"]),
         "steps": outcomes, "errorCode": error_code,
+        "errorMessage": error_message,
         "haltedAtStep": active_step if status == "halted" else None,
         "failureStage": failure_stage if status == "halted" else None,
         "evidenceCaptured": capture_evidence,

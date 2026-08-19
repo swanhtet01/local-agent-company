@@ -12,6 +12,7 @@ from pathlib import Path
 from local_company.computer_use import (
     RUN_CONFIRMATION,
     WORKFLOW_SCHEMA,
+    WindowsDesktopAdapter,
     list_workflows,
     load_workflow,
     preview_workflow,
@@ -201,6 +202,19 @@ class ComputerUseWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workflow_seal_mismatch"):
             validate_workflow(tampered)
 
+    def test_key_step_rejects_a_single_non_ascii_character(self) -> None:
+        # str.isalnum() is Unicode-aware, so a hand-edited-then-resealed
+        # workflow.json with e.g. key '日' used to pass this check even
+        # though _virtual_key() can only turn A-Z0-9 into a real Win32
+        # virtual-key code -- ord('日'.upper()) is 26085, far outside the
+        # BYTE range keybd_event expects, with no argtypes declared to catch
+        # it. seal_workflow() calls validate_workflow() internally, so this
+        # must be caught at the earliest point a tampered file is resealed.
+        raw = workflow_payload()
+        raw["steps"][1]["key"] = "日"
+        with self.assertRaisesRegex(ValueError, "workflow_key_unsupported"):
+            seal_workflow(raw)
+
     def test_preview_resolves_windows_and_uia_without_actions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -272,6 +286,9 @@ class ComputerUseWorkflowTests(unittest.TestCase):
             self.assertEqual(result["completedSteps"], 3)
             self.assertEqual(result["failureStage"], "final_window_postcondition")
             self.assertIsNone(result["haltedAtStep"])
+            # The generic error_code alone doesn't say WHY it halted; the
+            # exception's own message is the only thing that does.
+            self.assertEqual(result["errorMessage"], "final_window_postcondition_failed")
 
     def test_network_and_shell_apps_are_blocked_by_default(self) -> None:
         for process_name, flag in (("chrome.exe", "network"), ("powershell.exe", "shell")):
@@ -354,6 +371,27 @@ class ComputerUseWorkflowTests(unittest.TestCase):
         self.assertTrue(explain(proof)["effects"]["localStateMayChange"])
         with self.assertRaisesRegex(ValueError, "automate_operation_unknown"):
             translate(["automate", "guess"])
+
+    def test_click_keypress_type_text_fail_closed_off_windows(self) -> None:
+        # These three don't call self._require_windows() before touching
+        # ctypes.windll/wintypes -- unlike windows(), foreground_window(),
+        # and screenshot(), which do. Today every real caller reaches them
+        # only after find_window() already guarded, so this is currently
+        # masked rather than exploitable; a future caller that skips that
+        # step would hit an unhandled AttributeError on non-Windows instead
+        # of the documented computer_use_requires_windows failure.
+        adapter = WindowsDesktopAdapter()
+        adapter.is_windows = False
+        window = {
+            "title": "Any", "className": "Any", "processName": "any.exe",
+            "recordedBounds": [0, 0, 100, 100], "handle": 1,
+        }
+        with self.assertRaisesRegex(RuntimeError, "computer_use_requires_windows"):
+            adapter.click(window, {}, [0.5, 0.5])
+        with self.assertRaisesRegex(RuntimeError, "computer_use_requires_windows"):
+            adapter.keypress(window, "ENTER")
+        with self.assertRaisesRegex(RuntimeError, "computer_use_requires_windows"):
+            adapter.type_text(window, "value")
 
 
 class NonWindowsImportTests(unittest.TestCase):
