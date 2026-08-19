@@ -1112,6 +1112,20 @@ def main() -> int:
             job_id, output = company.resume(args.job_id)
             print(f"Resumed and completed job {job_id}\nReport: {output}")
         elif args.command == "recover":
+            # cutoff = now - stale_after_seconds, so anything below the
+            # heartbeat cadence (EXECUTION_HEARTBEAT_SECONDS, 5s) makes
+            # every currently-running job look stale regardless of how
+            # recently it last heartbeat -- this command runs from a
+            # second process/terminal while another job may legitimately
+            # be executing, so --stale-minutes 0 would force-interrupt
+            # healthy in-flight work, not just crashed/abandoned jobs.
+            # recover_stale_jobs() itself keeps no floor (its own default
+            # is 900s, but internal callers -- including the test suite,
+            # which deliberately passes 0 to simulate elapsed time without
+            # sleeping -- call it directly with arbitrary values), so the
+            # floor belongs here, at the one place a human picks the value.
+            if args.stale_minutes < 1:
+                raise ValueError("stale_minutes_must_be_at_least_one")
             recovered = company.recover_stale_jobs(args.stale_minutes * 60)
             print(
                 f"Recovered {len(recovered)} stale job(s): "

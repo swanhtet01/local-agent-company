@@ -3446,6 +3446,55 @@ class CompanyTests(unittest.TestCase):
             self.assertIsNone(queue_token)
             self.assertEqual(discarded, 1)
 
+    def test_cli_recover_rejects_stale_minutes_below_one(self):
+        # cutoff = now - stale_after_seconds, so `--stale-minutes 0` makes
+        # any currently-running job (heartbeat written moments ago) look
+        # stale regardless of health, and this command runs from a second
+        # process/terminal while another job may legitimately be
+        # executing -- so it would force-interrupt healthy in-flight work,
+        # not just crashed/abandoned jobs. recover_stale_jobs() itself
+        # keeps no floor (the test suite deliberately calls it directly
+        # with 0 to simulate elapsed time without sleeping), so the floor
+        # belongs at the CLI boundary, the one place a human picks the
+        # value.
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            company.initialize()
+            queue_id = company.enqueue("Protect a healthy job", roles=["operations"])
+            observed_queue, job_id, _report, _passed = company.run_next_queue_item()
+            self.assertEqual(observed_queue, queue_id)
+            self.assertEqual(company.job_detail(job_id)["job"][2], "complete")
+
+            for stale_minutes in ("0", "-1"):
+                with self.subTest(stale_minutes=stale_minutes):
+                    error = io.StringIO()
+                    with patch(
+                        "sys.argv", [
+                            "local-company", "--home", str(company.home), "recover",
+                            "--stale-minutes", stale_minutes,
+                        ],
+                    ), patch("sys.stderr", error), patch(
+                        "local_company.cli.Company.recover_stale_jobs",
+                    ) as recover:
+                        self.assertEqual(cli_main(), 2)
+                    self.assertIn("stale_minutes_must_be_at_least_one", error.getvalue())
+                    recover.assert_not_called()
+
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(company.home), "recover",
+                    "--stale-minutes", "1",
+                ],
+            ), patch("sys.stdout", output), patch(
+                "local_company.cli.Company.recover_stale_jobs", return_value=[],
+            ) as recover:
+                self.assertEqual(cli_main(), 0)
+            recover.assert_called_once_with(60)
+            self.assertIn("Recovered 0 stale job(s)", output.getvalue())
+            self.assertEqual(company.job_detail(job_id)["job"][2], "complete")
+            self.assertEqual(company.queue_items("complete")[0][0], queue_id)
+
     def test_queue_reuse_is_linked_without_repeating_model_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = CountingMockModel()
