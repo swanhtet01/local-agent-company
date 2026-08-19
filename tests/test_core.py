@@ -1250,10 +1250,22 @@ class CompanyTests(unittest.TestCase):
         # this helper exists specifically for the platform where that call
         # doesn't restrict access, so it must not do anything (or shell out)
         # anywhere else.
+        #
+        # patch("local_company.config.os.name", ...) patches the .name
+        # attribute on the real, shared os module object (config.py does
+        # `import os`, not a local alias) -- so it's visible process-wide
+        # for as long as the context manager is open, not just inside
+        # local_company.config. Path() must therefore be constructed
+        # BEFORE entering the patch: on Python 3.11 (confirmed on
+        # windows-latest CI; 3.12/3.13 did not reproduce it),
+        # pathlib.Path.__new__ re-checks os.name on every call and tries
+        # to build a PosixPath while the real interpreter is Windows,
+        # raising NotImplementedError.
+        target = Path("unused")
         with patch("local_company.config.os.name", "posix"), patch(
             "local_company.config.subprocess.run",
         ) as run:
-            restrict_file_to_current_user(Path("unused"))
+            restrict_file_to_current_user(target)
         run.assert_not_called()
 
     def test_restrict_file_to_current_user_restricts_a_real_file_on_windows(self):
