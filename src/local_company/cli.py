@@ -61,6 +61,7 @@ from .supermega import (
     create_vision_prospect_drafts,
     import_vision_prospects,
     run_vision_sales,
+    vision_capability_configured,
     vision_commercial_status,
     vision_product_status,
     vision_sales_status,
@@ -215,39 +216,49 @@ def parser() -> argparse.ArgumentParser:
     browser_check.add_argument("--fail-on-console-errors", action="store_true")
     browser_check.add_argument("--max-a11y-violations", type=int)
     browser_check.add_argument("--timeout-seconds", type=int, default=30)
-    supermega = sub.add_parser("supermega", help="Run bounded local SuperMega operating capabilities")
-    supermega_sub = supermega.add_subparsers(dest="supermega_command", required=True)
-    vision_sales = supermega_sub.add_parser("vision-sales", help="Process local Vision leads into owner-review sales drafts")
-    vision_sales.add_argument("--platform-root", type=Path)
-    vision_sales.add_argument("--sales-root", type=Path)
-    vision_status = supermega_sub.add_parser("vision-sales-status", help="Inspect the local Vision sales pipeline without processing it")
-    vision_status.add_argument("--sales-root", type=Path)
-    vision_intake = supermega_sub.add_parser("vision-sales-intake", help="Validate one local prospect file and queue a Vision contact event")
-    vision_intake_source = vision_intake.add_mutually_exclusive_group(required=True)
-    vision_intake_source.add_argument("--input", type=Path)
-    vision_intake_source.add_argument("--interactive", action="store_true", help="Prompt locally without placing prospect data in command arguments")
-    vision_intake.add_argument("--sales-root", type=Path)
-    vision_prospect_import = supermega_sub.add_parser("vision-prospect-import", help="Import researched prospects without qualifying or contacting them")
-    vision_prospect_import.add_argument("--input", type=Path, required=True)
-    vision_prospect_import.add_argument("--sales-root", type=Path)
-    vision_prospect_drafts = supermega_sub.add_parser("vision-prospect-drafts", help="Create integrity-checked local outreach drafts without sending them")
-    vision_prospect_drafts.add_argument("--sales-root", type=Path)
-    vision_pilot_packages = supermega_sub.add_parser(
-        "vision-founding-pilot-packages",
-        help="Create claim-safe internal founding-pilot packages without sending or pricing",
-    )
-    vision_pilot_packages.add_argument("--sales-root", type=Path)
-    vision_product = supermega_sub.add_parser(
-        "vision-product-status",
-        help="Cross-check local Vision readiness and commercial-claim gates",
-    )
-    vision_product.add_argument("--product-root", type=Path)
-    vision_commercial = supermega_sub.add_parser(
-        "vision-commercial-status",
-        help="Combine local Vision product and sales evidence into one offer gate",
-    )
-    vision_commercial.add_argument("--product-root", type=Path)
-    vision_commercial.add_argument("--sales-root", type=Path)
+    # SuperMega's own Vision sales pipeline is a capability pack for one
+    # company's product, not a general Local Workcell feature. Registering
+    # it unconditionally meant every install of this now-public tool saw
+    # "supermega" in --help with subcommands about "Vision leads" and
+    # "founding-pilot packages" that mean nothing to a general user. Gate
+    # registration on the same signal the dashboard's Vision banner already
+    # uses: has this machine ever set up a Vision product or sales root.
+    # Anyone who has (including this project's own maintainer) still gets
+    # the full command tree, unchanged.
+    if vision_capability_configured():
+        supermega = sub.add_parser("supermega", help="Run bounded local SuperMega operating capabilities")
+        supermega_sub = supermega.add_subparsers(dest="supermega_command", required=True)
+        vision_sales = supermega_sub.add_parser("vision-sales", help="Process local Vision leads into owner-review sales drafts")
+        vision_sales.add_argument("--platform-root", type=Path)
+        vision_sales.add_argument("--sales-root", type=Path)
+        vision_status = supermega_sub.add_parser("vision-sales-status", help="Inspect the local Vision sales pipeline without processing it")
+        vision_status.add_argument("--sales-root", type=Path)
+        vision_intake = supermega_sub.add_parser("vision-sales-intake", help="Validate one local prospect file and queue a Vision contact event")
+        vision_intake_source = vision_intake.add_mutually_exclusive_group(required=True)
+        vision_intake_source.add_argument("--input", type=Path)
+        vision_intake_source.add_argument("--interactive", action="store_true", help="Prompt locally without placing prospect data in command arguments")
+        vision_intake.add_argument("--sales-root", type=Path)
+        vision_prospect_import = supermega_sub.add_parser("vision-prospect-import", help="Import researched prospects without qualifying or contacting them")
+        vision_prospect_import.add_argument("--input", type=Path, required=True)
+        vision_prospect_import.add_argument("--sales-root", type=Path)
+        vision_prospect_drafts = supermega_sub.add_parser("vision-prospect-drafts", help="Create integrity-checked local outreach drafts without sending them")
+        vision_prospect_drafts.add_argument("--sales-root", type=Path)
+        vision_pilot_packages = supermega_sub.add_parser(
+            "vision-founding-pilot-packages",
+            help="Create claim-safe internal founding-pilot packages without sending or pricing",
+        )
+        vision_pilot_packages.add_argument("--sales-root", type=Path)
+        vision_product = supermega_sub.add_parser(
+            "vision-product-status",
+            help="Cross-check local Vision readiness and commercial-claim gates",
+        )
+        vision_product.add_argument("--product-root", type=Path)
+        vision_commercial = supermega_sub.add_parser(
+            "vision-commercial-status",
+            help="Combine local Vision product and sales evidence into one offer gate",
+        )
+        vision_commercial.add_argument("--product-root", type=Path)
+        vision_commercial.add_argument("--sales-root", type=Path)
     focus = sub.add_parser("focus", help="Constrain model-backed work to one project and role budget")
     focus_sub = focus.add_subparsers(dest="focus_command", required=True)
     focus_set = focus_sub.add_parser("set", help="Activate one local execution focus")

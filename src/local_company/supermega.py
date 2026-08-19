@@ -76,6 +76,44 @@ def default_vision_repo_root() -> Path:
     return Path(configured) if configured else Path.home() / "Projects" / "supermega-vision"
 
 
+def vision_capability_configured() -> bool:
+    """Whether this machine has set up, or explicitly opted into, SuperMega's
+    own Vision pipeline.
+
+    `supermega ...` is a capability pack for one company's product, not a
+    general Local Workcell feature -- almost no install of this now-public
+    tool will ever have a Vision product or sales root on disk. This gates
+    whether the CLI even registers the `supermega` subcommand, so it runs on
+    every invocation including plain `--help`.
+
+    Checking only whether the default roots already exist would make first
+    setup impossible: the subcommands that would create that first file are
+    exactly the ones this gate would hide. So this also treats an explicit
+    SUPERMEGA_VISION_PRODUCT_ROOT / SUPERMEGA_VISION_SALES_ROOT override as
+    configured on its own, regardless of whether that path exists yet --
+    setting either is a deliberate opt-in signal, not something a general
+    user would ever do by accident.
+
+    Runs on every CLI invocation, including ones that have nothing to do
+    with Vision (parser() calls this while building the whole command
+    tree), so a filesystem surprise here must never break unrelated
+    commands. Path.home() raises RuntimeError when neither HOME nor
+    USERPROFILE is set and LOCALAPPDATA is also unset or empty -- a real
+    state in the wild (some locked-down or freshly-provisioned Windows
+    accounts, arbitrary bounded shells) and a real one this project's own
+    test suite exercises to prove other commands stay environment-free.
+    Any such failure here means "cannot determine whether Vision is
+    configured," which is exactly the fail-safe default: treat it as not
+    configured rather than let it crash CLI startup.
+    """
+    if os.getenv("SUPERMEGA_VISION_PRODUCT_ROOT") or os.getenv("SUPERMEGA_VISION_SALES_ROOT"):
+        return True
+    try:
+        return default_vision_product_root().exists() or default_vision_sales_root().exists()
+    except (OSError, RuntimeError):
+        return False
+
+
 def _canonical_contract_id(value: dict, identity_field: str) -> str:
     body = {key: item for key, item in value.items() if key != identity_field}
     encoded = json.dumps(

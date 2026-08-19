@@ -17,6 +17,7 @@ from local_company.supermega import (
     default_vision_product_root,
     import_vision_prospects,
     run_vision_sales,
+    vision_capability_configured,
     vision_commercial_status,
     vision_product_status,
     vision_sales_status,
@@ -410,72 +411,101 @@ class SuperMegaCapabilityTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_cli_exposes_one_bounded_supermega_vision_sales_command(self):
-        args = parser().parse_args([
-            "supermega", "vision-sales", "--platform-root", str(self.platform),
-            "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(args.command, "supermega")
-        self.assertEqual(args.supermega_command, "vision-sales")
-        self.assertEqual(args.platform_root, self.platform)
-        self.assertEqual(args.sales_root, self.sales)
+        # Registration requires vision_capability_configured(); assert an
+        # explicit opt-in still exposes the full command tree unchanged.
+        with patch.dict(os.environ, {"SUPERMEGA_VISION_SALES_ROOT": str(self.sales)}, clear=True):
+            args = parser().parse_args([
+                "supermega", "vision-sales", "--platform-root", str(self.platform),
+                "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(args.command, "supermega")
+            self.assertEqual(args.supermega_command, "vision-sales")
+            self.assertEqual(args.platform_root, self.platform)
+            self.assertEqual(args.sales_root, self.sales)
 
-        status_args = parser().parse_args([
-            "supermega", "vision-sales-status", "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(status_args.supermega_command, "vision-sales-status")
-        self.assertEqual(status_args.sales_root, self.sales)
+            status_args = parser().parse_args([
+                "supermega", "vision-sales-status", "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(status_args.supermega_command, "vision-sales-status")
+            self.assertEqual(status_args.sales_root, self.sales)
 
-        intake_args = parser().parse_args([
-            "supermega", "vision-sales-intake", "--input", str(self.root / "prospect.json"),
-            "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(intake_args.supermega_command, "vision-sales-intake")
-        self.assertEqual(intake_args.input, self.root / "prospect.json")
-        self.assertEqual(intake_args.sales_root, self.sales)
+            intake_args = parser().parse_args([
+                "supermega", "vision-sales-intake", "--input", str(self.root / "prospect.json"),
+                "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(intake_args.supermega_command, "vision-sales-intake")
+            self.assertEqual(intake_args.input, self.root / "prospect.json")
+            self.assertEqual(intake_args.sales_root, self.sales)
 
-        interactive_args = parser().parse_args([
-            "supermega", "vision-sales-intake", "--interactive", "--sales-root", str(self.sales),
-        ])
-        self.assertTrue(interactive_args.interactive)
-        self.assertIsNone(interactive_args.input)
+            interactive_args = parser().parse_args([
+                "supermega", "vision-sales-intake", "--interactive", "--sales-root", str(self.sales),
+            ])
+            self.assertTrue(interactive_args.interactive)
+            self.assertIsNone(interactive_args.input)
 
-        prospect_args = parser().parse_args([
-            "supermega", "vision-prospect-import", "--input", str(self.root / "prospects.csv"),
-            "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(prospect_args.supermega_command, "vision-prospect-import")
-        self.assertEqual(prospect_args.input, self.root / "prospects.csv")
+            prospect_args = parser().parse_args([
+                "supermega", "vision-prospect-import", "--input", str(self.root / "prospects.csv"),
+                "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(prospect_args.supermega_command, "vision-prospect-import")
+            self.assertEqual(prospect_args.input, self.root / "prospects.csv")
 
-        draft_args = parser().parse_args([
-            "supermega", "vision-prospect-drafts", "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(draft_args.supermega_command, "vision-prospect-drafts")
-        self.assertEqual(draft_args.sales_root, self.sales)
+            draft_args = parser().parse_args([
+                "supermega", "vision-prospect-drafts", "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(draft_args.supermega_command, "vision-prospect-drafts")
+            self.assertEqual(draft_args.sales_root, self.sales)
 
-        package_args = parser().parse_args([
-            "supermega", "vision-founding-pilot-packages",
-            "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(
-            package_args.supermega_command, "vision-founding-pilot-packages",
-        )
-        self.assertEqual(package_args.sales_root, self.sales)
+            package_args = parser().parse_args([
+                "supermega", "vision-founding-pilot-packages",
+                "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(
+                package_args.supermega_command, "vision-founding-pilot-packages",
+            )
+            self.assertEqual(package_args.sales_root, self.sales)
 
-        product_args = parser().parse_args([
-            "supermega", "vision-product-status", "--product-root", str(self.root),
-        ])
-        self.assertEqual(product_args.supermega_command, "vision-product-status")
-        self.assertEqual(product_args.product_root, self.root)
+            product_args = parser().parse_args([
+                "supermega", "vision-product-status", "--product-root", str(self.root),
+            ])
+            self.assertEqual(product_args.supermega_command, "vision-product-status")
+            self.assertEqual(product_args.product_root, self.root)
 
-        commercial_args = parser().parse_args([
-            "supermega", "vision-commercial-status",
-            "--product-root", str(self.root), "--sales-root", str(self.sales),
-        ])
-        self.assertEqual(
-            commercial_args.supermega_command, "vision-commercial-status",
-        )
-        self.assertEqual(commercial_args.product_root, self.root)
-        self.assertEqual(commercial_args.sales_root, self.sales)
+            commercial_args = parser().parse_args([
+                "supermega", "vision-commercial-status",
+                "--product-root", str(self.root), "--sales-root", str(self.sales),
+            ])
+            self.assertEqual(
+                commercial_args.supermega_command, "vision-commercial-status",
+            )
+            self.assertEqual(commercial_args.product_root, self.root)
+            self.assertEqual(commercial_args.sales_root, self.sales)
+
+    def test_supermega_command_is_absent_unless_vision_is_configured(self):
+        # supermega is a capability pack for one company's own Vision sales
+        # pipeline, not a general Local Workcell feature. A fresh install
+        # that has never set up Vision (no env override, no root directory
+        # on disk) must not see it at all -- neither in --help nor as a
+        # parseable command.
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "local_company.cli.vision_capability_configured", return_value=False,
+        ):
+            built = parser()
+            self.assertNotIn("supermega", built.format_help())
+            with self.assertRaises(SystemExit):
+                built.parse_args(["supermega", "vision-sales-status"])
+
+    def test_vision_capability_configured_survives_an_undeterminable_home_directory(self):
+        # vision_capability_configured() runs on every CLI invocation via
+        # parser() -- including commands with nothing to do with Vision --
+        # so it must never raise. A fully cleared environment (no HOME, no
+        # USERPROFILE, no LOCALAPPDATA) makes Path.home() itself raise
+        # RuntimeError; this is exactly the state the rest of the test suite
+        # already relies on being safe for unrelated commands like
+        # `service start`.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(vision_capability_configured())
+
 
     def _write_prospect_csv(self, rows=None):
         rows = rows or [
