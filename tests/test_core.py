@@ -1291,6 +1291,45 @@ class CompanyTests(unittest.TestCase):
             self.assertIn(username, after)
             self.assertIn(":(F)", after)
 
+    def test_restrict_file_to_current_user_strips_explicit_aces_too(self):
+        # The test above covers the common case, where extra ACEs (SYSTEM,
+        # Administrators) arrive INHERITED from the parent directory -- true
+        # on a normal client install and what a local run of this suite
+        # exercises. But a GitHub Actions windows-latest runner was observed
+        # granting SYSTEM an EXPLICIT (non-inherited) ACE on a freshly
+        # created temp file, and /inheritance:r alone only strips entries
+        # flagged inherited -- it silently left the explicit SYSTEM grant in
+        # place, defeating the whole point of this function. That gap only
+        # reproduces given an explicit ACE, which the parent-inheritance
+        # path above won't naturally produce on a normal dev machine, so
+        # simulate it directly here rather than depending on CI's runner
+        # happening to behave that way.
+        if os.name != "nt":
+            self.skipTest("icacls is Windows-only")
+
+        def acl_listing() -> str:
+            return subprocess.run(
+                ["icacls", str(target)], capture_output=True, text=True, check=True,
+            ).stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "service.json"
+            target.write_text("{}", encoding="utf-8")
+            subprocess.run(
+                ["icacls", str(target), "/grant", "SYSTEM:(F)"],
+                capture_output=True, check=True,
+            )
+            before = acl_listing()
+            self.assertIn("SYSTEM:(F)", before)  # explicit, no (I) flag
+
+            restrict_file_to_current_user(target)
+
+            after = acl_listing()
+            self.assertNotIn("SYSTEM", after)
+            username = os.environ["USERNAME"]
+            self.assertIn(username, after)
+            self.assertIn(":(F)", after)
+
     def test_company_identity_migrates_atomically_persists_and_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

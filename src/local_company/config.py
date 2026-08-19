@@ -133,6 +133,27 @@ def restrict_file_to_current_user(path: Path) -> None:
     if not username:
         return
     try:
+        # Two separate icacls calls, deliberately not combined into one:
+        #
+        # 1. /reset -- a freshly-created file can carry EXPLICIT (not
+        #    inherited) ACEs for SYSTEM/Administrators depending on the host
+        #    -- confirmed both ways: inherited on a normal client install,
+        #    but explicit on GitHub Actions' windows-latest runner.
+        #    /inheritance:r alone only strips entries flagged inherited, so
+        #    on a host with explicit extra ACEs it silently leaves them in
+        #    place. /reset collapses the ACL back to pure inheritance from
+        #    the parent first, so /inheritance:r then has something to
+        #    actually strip.
+        # 2. /inheritance:r /grant:r -- icacls rejects /reset combined with
+        #    /inheritance:r in the same invocation ("Invalid parameter"),
+        #    and fails the WHOLE command silently under check=False,
+        #    leaving the original ACL completely untouched. Confirmed by
+        #    hand: same flags, one call errors and no-ops; two calls apply
+        #    cleanly.
+        subprocess.run(
+            ["icacls", str(path), "/reset"],
+            capture_output=True, timeout=10, check=False,
+        )
         subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F"],
             capture_output=True, timeout=10, check=False,
