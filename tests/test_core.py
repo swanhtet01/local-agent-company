@@ -3469,6 +3469,46 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(detail["job"][2], "complete")
             self.assertEqual([row[2] for row in detail["assignments"]], ["complete", "complete"])
 
+    def test_resume_reconciles_the_mission_queue_row_it_came_from(self):
+        # A queue-driven mission that fails leaves its mission_queue row at
+        # status='failed'. evaluate_job()'s queue-sync only finalizes a row
+        # that is 'running' under a matching claim, and until now resume()
+        # never reconnected to the claim it originally came from - so a
+        # successful resume left the queue row stuck at 'failed' forever,
+        # permanently misrepresenting a job that actually finished. Whether
+        # the resumed mission passes or fails quality is a different axis
+        # entirely (FailOnceModel's placeholder text fails it here) - either
+        # way the row must land on a real terminal state, not stay orphaned.
+        with tempfile.TemporaryDirectory() as tmp:
+            model = FailOnceModel()
+            company = Company(Path(tmp), model)
+            queue_id = company.enqueue("Plan inventory", roles=["operations", "quality"])
+            with self.assertRaisesRegex(RuntimeError, "simulated model interruption"):
+                company.run_next_queue_item(queue_id)
+            with closing(sqlite3.connect(company.db_path)) as db:
+                queue_status, job_id = db.execute(
+                    "SELECT status, job_id FROM mission_queue WHERE id=?", (queue_id,),
+                ).fetchone()
+            self.assertEqual(queue_status, "failed")
+            self.assertEqual(company.job_detail(job_id)["job"][2], "failed")
+
+            resumed_id, report = company.resume(job_id)
+            self.assertEqual(resumed_id, job_id)
+            self.assertTrue(report.exists())
+            self.assertEqual(company.job_detail(job_id)["job"][2], "complete")
+
+            with closing(sqlite3.connect(company.db_path)) as db:
+                final_status, final_job_id, final_run_token = db.execute(
+                    "SELECT status, job_id, run_token FROM mission_queue WHERE id=?",
+                    (queue_id,),
+                ).fetchone()
+            self.assertEqual(final_status, "quality_failed")
+            self.assertEqual(final_job_id, job_id)
+            self.assertIsNone(final_run_token)
+            self.assertEqual(company.queue_items("running"), [])
+            self.assertEqual(company.queue_items("failed"), [])
+            self.assertEqual(len(company.queue_items("quality_failed")), 1)
+
     def test_resumed_job_is_never_reused_under_a_different_runtime_identity(self):
         class RuntimeStructuredModel(MockModel):
             def __init__(self, identity, fail=False):

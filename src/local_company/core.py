@@ -7840,7 +7840,7 @@ class Company:
         self, job_id: str, objective: str, assignments: list[Assignment], sources: list[SourceHit],
         project_id: str | None, project_name: str | None, results: list[tuple[Assignment, str]],
         evidence_manifest_sha256: str | None, run_token: str, *,
-        defer_evaluation: bool = False,
+        defer_evaluation: bool = False, _queue_claim: QueueClaim | None = None,
     ) -> tuple[str, Path]:
         source_context = "\n\n".join(
             f"[EVIDENCE:{hit.evidence_id}] SOURCE {hit.path} lines {hit.line_start}-{hit.line_end} "
@@ -8704,7 +8704,9 @@ class Company:
                 )
         if not defer_evaluation:
             try:
-                self.evaluate_job(job_id)
+                self.evaluate_job(job_id, _queue_claim=_queue_claim)
+            except ExecutionLeaseLost:
+                raise
             except Exception as exc:
                 raise ReportFinalizationPending(
                     f"Report for job {job_id} is sealed but deterministic evaluation is pending: "
@@ -8774,9 +8776,37 @@ class Company:
                 "resumed execution may use a different local runtime",
             )
             self._event(db, job_id, "job_resumed", f"completed_assignments={len(results)}")
+            # A queue-driven mission that failed leaves its mission_queue row
+            # stuck at status='failed' forever: evaluate_job()'s queue-sync
+            # only finalizes a row that was actively 'running' under a
+            # matching _queue_claim, and nothing before this reconnected a
+            # resumed job to the claim it originally came from. Re-claim it
+            # here, under the SAME run_token this resume just gave the job,
+            # so a successful finish finalizes it exactly like a normal
+            # queue run would, and a failure leaves it in the same
+            # 'running-but-orphaned' shape recover_stale_jobs() already
+            # knows how to reconcile back to 'failed'.
+            queue_row = db.execute(
+                "SELECT id, objective, project_id, roles_json FROM mission_queue "
+                "WHERE job_id=? AND status='failed'",
+                (job_id,),
+            ).fetchone()
+            queue_claim = None
+            if queue_row:
+                requeued = db.execute(
+                    "UPDATE mission_queue SET status='running', started_at=?, error=NULL, "
+                    "run_token=? WHERE id=? AND status='failed' AND job_id=?",
+                    (utc_now(), run_token, queue_row[0], job_id),
+                ).rowcount
+                if requeued == 1:
+                    queue_claim = QueueClaim(queue_row[0], queue_row[1], queue_row[2], queue_row[3], run_token)
+                    self._event(
+                        db, job_id, "queue_claim_relinked_for_resume",
+                        json.dumps({"queue_id": queue_row[0]}, sort_keys=True),
+                    )
         return self._execute_job(
             job_id, job[0], assignments, sources, job[2], job[3], results, job[4],
-            run_token,
+            run_token, _queue_claim=queue_claim,
         )
 
     def retry(
