@@ -1181,7 +1181,21 @@ def render_dashboard(
         if type(vision_samples) is int and type(vision_minimum) is int
         else "unavailable"
     )
-    vision_product_html = (
+    # SuperMega Vision is one optional capability pack among several this
+    # runtime can host (see `supermega vision-sales`), tied to a specific
+    # machine-wide product root (default_vision_product_root(), not this
+    # company's home) rather than to any one company. Most installs of this
+    # now-public, general-purpose tool have never configured it, and
+    # vision_product_status() reports that with reason
+    # "vision_product_root_unavailable" -- rendering the banner anyway meant
+    # every fresh dashboard opened on internal SuperMega sales jargon
+    # ("founding_pilot_owned_data_collection_and_held_out_evaluation") that
+    # is undocumented in this repo's README and irrelevant to the install.
+    vision_configured = (
+        isinstance(vision, dict)
+        and vision.get("reason") != "vision_product_root_unavailable"
+    )
+    vision_product_html = "" if not vision_configured else (
         '<section class="vision-banner"><h2>SuperMega Vision product evidence</h2>'
         f'<p><strong>{cell(vision.get("status", "unavailable"))}</strong> &middot; '
         f'commercial claims: <span class="gate">{cell(vision.get("commercial_status", "hold"))}</span></p>'
@@ -1199,6 +1213,14 @@ def render_dashboard(
         f'claim-safe packages ready: {cell(vision_sales.get("founding_pilot_packages_ready", 0) if isinstance(vision_sales, dict) else 0)} &middot; '
         f'external send authorized: {cell(vision_offer.get("external_send_authorized", False) if isinstance(vision_offer, dict) else False)}.</p>'
         f'<p class="hint">Commercial next action: <code>{cell(vision_commercial.get("next_action", "restore_and_verify_local_vision_product_evidence") if isinstance(vision_commercial, dict) else "restore_and_verify_local_vision_product_evidence")}</code>.</p></section>'
+    )
+    # Same gate as vision_product_html: an install with no product root has
+    # nothing meaningful to show here either, regardless of what the sales
+    # pipeline directory happens to contain.
+    vision_metric_cards = "" if not vision_configured else (
+        f'<div class="card"><div class="metric gate">{cell(vision_metric)}</div><div class="label">Vision reviewed samples / minimum</div></div>\n'
+        f'<div class="card"><div class="metric gate">{cell(vision_sales.get("outreach_drafts_ready", 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision local drafts ready, unsent</div></div>\n'
+        f'<div class="card"><div class="metric gate">{cell(vision_sales.get("founding_pilot_packages_ready", 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision claim-safe pilot packages</div></div>'
     )
 
     project_options = "".join(
@@ -1346,9 +1368,7 @@ def render_dashboard(
 <div class="card"><div class="metric">{snapshot['health']['disk_free_bytes'] / (1024 ** 3):.1f}</div><div class="label">Free disk GiB</div></div>
 <div class="card"><div class="metric">{snapshot['health']['ollama_model_storage_bytes'] / (1024 ** 3):.1f}</div><div class="label">Ollama model GiB</div></div>
 <div class="card"><div class="metric">{len(snapshot['datasets'])}</div><div class="label">Profiled datasets</div></div>
-<div class="card"><div class="metric gate">{cell(vision_metric)}</div><div class="label">Vision reviewed samples / minimum</div></div>
-<div class="card"><div class="metric gate">{cell(vision_sales.get('outreach_drafts_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision local drafts ready, unsent</div></div>
-<div class="card"><div class="metric gate">{cell(vision_sales.get('founding_pilot_packages_ready', 0) if isinstance(vision_sales, dict) else 0)}</div><div class="label">Vision claim-safe pilot packages</div></div>
+{vision_metric_cards}
 {quality_recovery_card}
 {supersession_review_card}
 {product_review_card}

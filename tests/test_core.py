@@ -3599,6 +3599,43 @@ class CompanyTests(unittest.TestCase):
             self.assertIn("Vision claim-safe pilot packages", page)
             self.assertIn("external send authorized: False", page)
 
+    def test_dashboard_hides_the_vision_banner_when_no_vision_product_is_configured(self):
+        # vision_product_status() defaults to a machine-wide product root
+        # (default_vision_product_root(), not this company's home) that most
+        # installs of this now-public, general-purpose tool never configure.
+        # That is the REAL default shape it returns in that case - the
+        # dashboard used to render the whole "SuperMega Vision product
+        # evidence" banner regardless, showing internal sales jargon on
+        # every fresh install.
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            with patch("local_company.dashboard.vision_product_status", return_value={
+                "contract": "local-company.supermega-vision-product-status.v1",
+                "status": "unavailable",
+                "dataset_ready": False,
+                "commercial_status": "hold",
+                "reason": "vision_product_root_unavailable",
+                "next_action": "restore_and_verify_local_vision_product_evidence",
+                "controls": {
+                    "model_calls": 0, "network_requests": 0, "external_sends": 0,
+                    "payments": 0, "files_written": 0, "paths_included": False,
+                    "pixels_included": False, "annotations_included": False,
+                },
+            }):
+                page = render_dashboard(company, build_identity={
+                    "schema": "local-company.runtime-build.v2",
+                    "package_version": "0.1.0",
+                    "build_id": "test-build",
+                    "source_sha256": "a" * 64,
+                })
+            self.assertIn("Local Agent Company", page)
+            self.assertNotIn("SuperMega Vision product evidence", page)
+            self.assertNotIn('class="vision-banner"', page)
+            self.assertNotIn("founding_pilot_owned_data_collection_and_held_out_evaluation", page)
+            self.assertNotIn("Vision reviewed samples / minimum", page)
+            self.assertNotIn("Vision local drafts ready, unsent", page)
+            self.assertNotIn("Vision claim-safe pilot packages", page)
+
     def test_vision_capture_lab_is_static_local_and_contains_no_company_data(self):
         rendered = {
             state: render_vision_capture_fixture(state, index)
