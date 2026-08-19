@@ -1269,20 +1269,24 @@ class CompanyTests(unittest.TestCase):
             target = Path(tmp) / "service.json"
             target.write_text("{}", encoding="utf-8")
             before = acl_listing()
-            # A freshly-created file inherits its parent directory's ACL,
-            # which on any real Windows temp directory grants access to more
-            # than just the current user (SYSTEM, Administrators, and
-            # whatever groups the parent grants) -- exactly the
-            # confidentiality gap this fix exists to close. "(I)" marks an
-            # inherited access-control entry in icacls' own output.
-            self.assertIn("(I)", before)
+            # A freshly-created file inherits its parent directory's default
+            # ACL, which grants access to more than just the current user --
+            # SYSTEM at minimum, on both a real workstation and a GitHub
+            # Actions Windows runner (confirmed on both; the runner's temp
+            # directory turned out not to flag entries "(I)" for inherited
+            # the way a normal client install does, so check the actual
+            # principal instead of that flag). That broader grant is exactly
+            # the confidentiality gap this fix exists to close.
+            self.assertIn("SYSTEM", before)
 
             restrict_file_to_current_user(target)
 
             after = acl_listing()
-            # /inheritance:r strips every inherited entry; only the single
-            # explicit grant this call just made should remain.
-            self.assertNotIn("(I)", after)
+            # /inheritance:r plus a single explicit grant leaves only the
+            # current user with access -- SYSTEM and Administrators, present
+            # moments ago, must be gone.
+            self.assertNotIn("SYSTEM", after)
+            self.assertNotIn("Administrators", after)
             username = os.environ["USERNAME"]
             self.assertIn(username, after)
             self.assertIn(":(F)", after)
