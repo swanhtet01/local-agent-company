@@ -81,16 +81,16 @@ The five-minute task checks lifecycle only. Queue review and mission execution r
 
 ## Read-only scheduled-runtime supervisor
 
-Run the supervisor after task installation or a deliberate runtime update, and before relying on automatic recovery. This is the exact accepted local profile for this machine:
+Run the supervisor after task installation or a deliberate runtime update, and before relying on automatic recovery. `--task-name` must be exactly `SuperMega Local Runtime Guard` — the supervisor rejects any other value, so name the Task Scheduler entry itself to match rather than changing this flag. Replace the other paths and the `--ollama-sha256` value with your own reviewed local profile, the same as the runtime-guard example above:
 
 ```powershell
-cd C:\Users\thesw\Projects\local-agent-company
+cd C:\Users\YOUR-NAME\Projects\local-agent-company
 python .\scripts\check_runtime_supervisor.py `
-  --home "C:\Users\thesw\Projects\supermega-local-company-state" `
+  --home "C:\Users\YOUR-NAME\Projects\supermega-local-company-state" `
   --task-name "SuperMega Local Runtime Guard" `
-  --python-executable "C:\Users\thesw\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
-  --ollama-executable "C:\Users\thesw\AppData\Local\Programs\Ollama\ollama.exe" `
-  --ollama-sha256 "9648169dfef645752ff8b25fded65d57e4b519fda9b0c9710a938af025cec2a1" `
+  --python-executable "C:\Users\YOUR-NAME\AppData\Local\Python\pythoncore-3.14-64\python.exe" `
+  --ollama-executable "C:\Users\YOUR-NAME\AppData\Local\Programs\Ollama\ollama.exe" `
+  --ollama-sha256 "REPLACE-WITH-VERIFIED-64-CHAR-LOWERCASE-SHA256" `
   --model llama3.2:1b `
   --allow-windows-job-inheritance
 ```
