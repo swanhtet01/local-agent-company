@@ -1,8 +1,10 @@
+import os
 import stat
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from local_company.cli import parser
 from local_company.core import Company, MockModel
@@ -184,6 +186,58 @@ class SpreadsheetDatasetTests(unittest.TestCase):
                     rewritten.writestr(info.filename, content)
             with self.assertRaisesRegex(ValueError, "declarations are unsafe"):
                 company.profile_dataset(unsafe_xml, "Guarded Data", allowed_root=approved)
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive classification")
+    def test_allow_root_rejects_a_dataset_root_on_a_non_local_drive(self):
+        # _windows_drive_type()/_require_local_absolute() guard --allow-root
+        # XLSX ingestion against non-local/network drives, but had zero test
+        # coverage for either failure branch -- unlike the byte-for-byte
+        # identical sibling implementation in scripts/check_readiness.py,
+        # which tests/test_readiness.py deliberately mock-tests the same
+        # way this test does. A future inverted check or swallowed
+        # exception here would silently accept a REMOTE (type-4) drive as
+        # local, weakening the exact safety property the rest of this file
+        # tests for UNC/path-traversal rejection.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            approved = root / "approved"
+            approved.mkdir()
+            source = approved / "sales.xlsx"
+            write_test_workbook(source)
+            company = Company(root / "state", MockModel())
+            company.create_project("Guarded Data")
+
+            with patch(
+                "local_company.spreadsheet._windows_drive_type", return_value=4,
+            ) as drive_type:
+                with self.assertRaisesRegex(ValueError, "must be on a local drive"):
+                    company.profile_dataset(source, "Guarded Data", allowed_root=approved)
+                drive_type.assert_called_once_with(approved.resolve().anchor)
+
+            # A genuinely local (fixed) drive still works.
+            with patch("local_company.spreadsheet._windows_drive_type", return_value=3):
+                dataset_id, _brief_path, _profile = company.profile_dataset(
+                    source, "Guarded Data", allowed_root=approved,
+                )
+            self.assertTrue(dataset_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive classification")
+    def test_windows_drive_type_fails_closed_when_the_probe_itself_errors(self) -> None:
+        # _windows_drive_type()'s own try/except (wrapping the real
+        # GetDriveTypeW ctypes call) had zero coverage -- mocking the
+        # whole function (as the test above does, to control its return
+        # value) bypasses this internal exception handling entirely, so
+        # it needs a direct test of its own: a drive-check exception
+        # (missing kernel32 attribute, OS error, ...) must fail closed as
+        # SpreadsheetError, not propagate a raw ctypes exception or be
+        # swallowed into treating the root as local.
+        from local_company.spreadsheet import SpreadsheetError, _windows_drive_type
+
+        with patch(
+            "ctypes.windll.kernel32.GetDriveTypeW", side_effect=OSError("probe failed"),
+        ):
+            with self.assertRaisesRegex(SpreadsheetError, "could not be verified"):
+                _windows_drive_type("C:\\")
 
     def test_sheet_option_is_rejected_for_non_xlsx_data(self):
         with tempfile.TemporaryDirectory() as tmp:

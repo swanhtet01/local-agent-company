@@ -365,6 +365,50 @@ class ExecutionFocusTests(unittest.TestCase):
                 ["chief-of-staff", "operations", "finance", "quality"],
             )
 
+    def test_cli_benchmark_focus_wiring_allows_the_focused_project_and_denies_others(self):
+        # _enforce_cli_execution_focus's benchmark branch (resolving
+        # args.project via _project_identity() and hardcoding
+        # roles=["benchmark"]) was never exercised end-to-end via main() --
+        # only the shared enforce_execution_focus() primitive was unit
+        # tested directly, and only retry/queue run-next were CLI-tested.
+        # A wiring bug specific to benchmark (wrong roles list, or
+        # args.project resolution silently swallowing an error) would let
+        # a model call proceed against a focus-restricted project with
+        # nothing in CI to catch it.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home, MockModel())
+            focused_id = company.create_project("Focused Project")
+            company.create_project("Other Project")
+            set_execution_focus(home, focused_id, "Focused Project", 4)
+
+            # Denied: benchmark against a project other than the focused one.
+            stdout, stderr = io.StringIO(), io.StringIO()
+            argv = [
+                "local-company", "--home", str(home), "benchmark",
+                "--project", "Other Project", "--provider", "mock",
+            ]
+            with patch.object(sys, "argv", argv), patch(
+                "local_company.core.MockModel.complete",
+            ) as complete, redirect_stdout(stdout), redirect_stderr(stderr):
+                result = main()
+            self.assertEqual(result, 2)
+            self.assertIn("denied before model load", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+            complete.assert_not_called()
+
+            # Allowed: benchmark against the focused project itself.
+            stdout, stderr = io.StringIO(), io.StringIO()
+            argv = [
+                "local-company", "--home", str(home), "benchmark",
+                "--project", "Focused Project", "--provider", "mock",
+            ]
+            with patch.object(sys, "argv", argv), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = main()
+            self.assertEqual(result, 0)
+            self.assertIn("Elapsed wall seconds:", stdout.getvalue())
+            self.assertIn("Output:\nSIMULATED LOCAL OUTPUT", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

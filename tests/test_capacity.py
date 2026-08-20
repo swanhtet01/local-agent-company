@@ -11,7 +11,10 @@ from unittest.mock import patch
 
 from local_company.capacity import (
     build_capacity_snapshot,
+    machine_capacity_snapshot,
     observe_cgroup_memory,
+    observe_listeners,
+    observe_memory,
     parse_meminfo,
     parse_windows_listeners,
 )
@@ -137,6 +140,132 @@ class CapacityTests(unittest.TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+    def test_machine_capacity_snapshot_picks_the_ollama_port_out_of_listener_counts(self) -> None:
+        # machine_capacity_snapshot() is the one production call site for
+        # observe_listeners/observe_memory/observe_loaded_models, but no
+        # test exercised its own wiring: it must read counts["11434"] (not
+        # some other port, and not a hardcoded index) out of whatever the
+        # listener_observer returns, and pass exactly that value through
+        # to model_observer. A typo'd port key or swapped observer
+        # argument would silently break `local-company capacity` and
+        # nothing would notice, since the CLI-level test above patches
+        # machine_capacity_snapshot itself rather than calling through.
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            company.create_project("Capacity Lab")
+            listeners_result = {
+                "status": "ready",
+                "counts": {"5173": 0, "8765": 0, "8788": 0, "11434": 7},
+            }
+            model_calls: list[int | None] = []
+
+            def fake_model_observer(ollama_listener_count: int | None) -> dict[str, object]:
+                model_calls.append(ollama_listener_count)
+                return {"status": "ready", "loaded_count": 0}
+
+            snapshot = machine_capacity_snapshot(
+                company, "Capacity Lab",
+                listener_observer=lambda: listeners_result,
+                memory_observer=lambda: {
+                    "status": "ready", "total_bytes": 16 * 1024**3, "available_bytes": 4 * 1024**3,
+                },
+                model_observer=fake_model_observer,
+            )
+            self.assertEqual(model_calls, [7])
+            self.assertEqual(snapshot["schema"], "local-company.machine-capacity.v1")
+            self.assertEqual(
+                snapshot["runtime"]["listener_counts"],
+                {"5173": 0, "8765": 0, "8788": 0, "11434": 7},
+            )
+
+            # A missing/malformed counts dict must degrade to None, not
+            # raise or silently pick a wrong port.
+            model_calls.clear()
+            machine_capacity_snapshot(
+                company, "Capacity Lab",
+                listener_observer=lambda: {"status": "unavailable"},
+                memory_observer=lambda: {"status": "unavailable", "total_bytes": None, "available_bytes": None},
+                model_observer=fake_model_observer,
+            )
+            self.assertEqual(model_calls, [None])
+
+    def test_observe_listeners_dispatches_on_platform_and_fails_closed(self) -> None:
+        # observe_listeners()'s real body (the os.name early-return, the
+        # netstat subprocess call, and its error/decode-failure handling)
+        # was never exercised by any test -- only parse_windows_listeners,
+        # its pure sub-helper, was.
+        with patch("local_company.capacity.os.name", "posix"):
+            self.assertEqual(
+                observe_listeners(),
+                {"status": "unavailable", "counts": {str(p): None for p in (5173, 8765, 8788, 11434)}},
+            )
+
+        netstat_output = (
+            "  TCP    127.0.0.1:11434      0.0.0.0:0       LISTENING       500\n"
+        )
+        with patch("local_company.capacity.os.name", "nt"), patch(
+            "local_company.capacity.subprocess.run",
+        ) as run:
+            run.return_value = type(
+                "Completed", (), {"returncode": 0, "stdout": netstat_output.encode("utf-8")},
+            )()
+            result = observe_listeners()
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["counts"]["11434"], 1)
+
+        # subprocess failing to start (netstat missing, etc.) fails closed.
+        with patch("local_company.capacity.os.name", "nt"), patch(
+            "local_company.capacity.subprocess.run", side_effect=OSError("not found"),
+        ):
+            self.assertEqual(observe_listeners()["status"], "unavailable")
+
+        # A non-zero exit code fails closed too, even with parseable output.
+        with patch("local_company.capacity.os.name", "nt"), patch(
+            "local_company.capacity.subprocess.run",
+        ) as run:
+            run.return_value = type(
+                "Completed", (), {"returncode": 1, "stdout": b""},
+            )()
+            self.assertEqual(observe_listeners()["status"], "unavailable")
+
+    def test_observe_memory_dispatches_posix_to_the_cgroup_aware_reader(self) -> None:
+        # observe_memory()'s os.name dispatch, and _observe_posix_memory's
+        # host/cgroup merge logic behind it, had zero coverage -- only the
+        # pure sub-helpers (parse_meminfo, observe_cgroup_memory) were
+        # tested directly.
+        with patch("local_company.capacity.os.name", "posix"), patch(
+            "local_company.capacity.Path.read_bytes",
+            return_value=(
+                b"MemTotal:        8039084 kB\nMemAvailable:    6120044 kB\n"
+            ),
+        ), patch(
+            "local_company.capacity.observe_cgroup_memory",
+            return_value={"status": "unavailable", "total_bytes": None, "available_bytes": None},
+        ):
+            result = observe_memory()
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["total_bytes"], 8039084 * 1024)
+
+        # Both host and cgroup ready: the real ceiling is the min() of
+        # each, since the process cannot exceed either one.
+        with patch("local_company.capacity.os.name", "posix"), patch(
+            "local_company.capacity.Path.read_bytes",
+            return_value=(
+                b"MemTotal:        8039084 kB\nMemAvailable:    6120044 kB\n"
+            ),
+        ), patch(
+            "local_company.capacity.observe_cgroup_memory",
+            return_value={
+                "status": "ready",
+                "total_bytes": 2 * 1024 * 1024,
+                "available_bytes": 1 * 1024 * 1024,
+            },
+        ):
+            result = observe_memory()
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["total_bytes"], 2 * 1024 * 1024)
+            self.assertEqual(result["available_bytes"], 1 * 1024 * 1024)
 
 
 class PosixMemoryObservationTests(unittest.TestCase):

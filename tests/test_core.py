@@ -5393,6 +5393,43 @@ class CompanyTests(unittest.TestCase):
             self.assertNotIn("private local reference body", audit_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["project_knowledge_authority"], [])
 
+    def test_cli_export_wires_destination_argument_and_prints_the_exact_receipt(self):
+        # export_audit() itself is well covered by direct calls on a
+        # Company instance, but the `export` CLI subcommand -- its
+        # `destination` positional argument, and the tuple-unpack +
+        # three-line print at cli.py's dispatch site -- was never invoked
+        # end-to-end via main(). A rename of the positional, or a
+        # transposed hash_path/digest unpack (both plain strings, so a
+        # swap wouldn't raise), would only be caught by a human reading
+        # stdout, not by CI.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            company = Company(home / "state", MockModel())
+            company.create_project("Export Lab")
+            destination = home / "exports"
+            output = io.StringIO()
+            with patch(
+                "sys.argv", [
+                    "local-company", "--home", str(home / "state"), "export", str(destination),
+                ],
+            ), patch("sys.stdout", output):
+                self.assertEqual(cli_main(), 0)
+            rendered = output.getvalue()
+            lines = rendered.splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(lines[0].startswith("Audit: "))
+            self.assertTrue(lines[1].startswith("SHA-256: "))
+            self.assertTrue(lines[2].startswith("Manifest: "))
+            audit_path = Path(lines[0].removeprefix("Audit: "))
+            digest = lines[1].removeprefix("SHA-256: ")
+            hash_path = Path(lines[2].removeprefix("Manifest: "))
+            self.assertTrue(audit_path.is_file())
+            self.assertTrue(hash_path.is_file())
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertEqual(hashlib.sha256(audit_path.read_bytes()).hexdigest(), digest)
+            self.assertIn(digest, hash_path.read_text(encoding="ascii"))
+            self.assertEqual(audit_path.parent, destination.resolve())
+
     def test_health_snapshot_reports_local_storage(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
