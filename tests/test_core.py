@@ -449,6 +449,53 @@ class CompanyTests(unittest.TestCase):
                 company.create_project("Second Call")
                 hardened.assert_called_once_with(home / "company.db")
 
+    def test_create_project_rejects_names_that_desync_cmd_exes_quote_tracking(self):
+        # mcp_server.py's product_experiment_next() embeds a project name
+        # via repr() into a suggested runnerInvocation.prompt meant to be
+        # run as `local-company-agent.cmd --run <prompt>`. repr() does not
+        # escape an embedded double-quote when the string has no single
+        # quote, so a name like this reaches that suggested command with a
+        # raw '"' in it -- and Windows launches a .cmd target by handing
+        # the whole line to cmd.exe even under argv-list/shell=False,
+        # whose quote tracking toggles on every literal '"' regardless of
+        # context, exposing a trailing '&'/'|' as a command cmd.exe will
+        # actually execute if a human or agent runtime follows the tool's
+        # own next-step instruction. Reject at the one place every project
+        # name enters the store.
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            unsafe_names = [
+                'evil" & echo INJECTED & echo "',
+                "safe1 | safe2",
+                "safe1 & safe2",
+                "safe1 < safe2",
+                "safe1 > safe2",
+                "safe1 ^ safe2",
+            ]
+            for unsafe in unsafe_names:
+                with self.subTest(unsafe=unsafe):
+                    with self.assertRaisesRegex(ValueError, "unsafe characters"):
+                        company.create_project(unsafe)
+            self.assertEqual(company.projects(), [])
+
+            # A repr() of the rejected name would have carried the raw
+            # quote straight through unescaped -- the exact mechanism the
+            # sweep's verification agent reproduced end-to-end.
+            self.assertIn('"', repr('evil" & echo INJECTED & echo "'))
+
+            # '\r'/'\n' are already neutralized before the character check
+            # even runs -- create_project() whitespace-collapses the name
+            # first (" ".join(name.split())), and \r/\n count as
+            # whitespace for str.split() -- so that path independently
+            # closes the same gap for this field.
+            company.create_project("indirectly safe1\r\nsafe2")
+            self.assertEqual(company.projects()[0][1], "indirectly safe1 safe2")
+
+            # Ordinary names, including punctuation outside the unsafe
+            # set, still work.
+            project_id = company.create_project("Q4 Pricing (Draft) - v2, EU/US")
+            self.assertIn(project_id, [row[0] for row in company.projects()])
+
     def test_service_state_is_atomic_and_startup_lock_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -3826,7 +3873,13 @@ class CompanyTests(unittest.TestCase):
     def test_dashboard_is_read_only_snapshot_and_escapes_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())
-            company.create_project("<script>alert(1)</script>")
+            # create_project() now rejects '<'/'>'/'&' outright (they're
+            # part of _UNSAFE_CMD_TARGET_CHARACTERS -- a project name is
+            # embedded into a suggested shell command elsewhere), so HTML
+            # in a project name can no longer reach the dashboard to
+            # exercise its escaping; request_action's free-text field and
+            # build_identity below still exercise that same escaping path.
+            company.create_project("Vision Product Lab")
             company.request_action("Review <unsafe> text")
             with patch("local_company.dashboard.vision_product_status", return_value={
                 "contract": "local-company.supermega-vision-product-status.v1",
@@ -3863,9 +3916,9 @@ class CompanyTests(unittest.TestCase):
                     "source_sha256": "a" * 64,
                 })
             self.assertIn("Local Agent Company", page)
-            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+            self.assertIn("Vision Product Lab", page)
             self.assertIn("Review &lt;unsafe&gt; text", page)
-            self.assertNotIn("<script>alert(1)</script>", page)
+            self.assertNotIn("<unsafe>", page)
             self.assertIn("&lt;script&gt;build&lt;/script&gt;", page)
             self.assertNotIn("<script>build</script>", page)
             self.assertIn("SuperMega Vision product evidence", page)
@@ -3997,9 +4050,9 @@ class CompanyTests(unittest.TestCase):
             )
             original = source.read_bytes()
             company = Company(root / "state", MockModel())
-            company.create_project("Data <Lab>")
+            company.create_project("Data Lab")
             dataset_id, brief_path, profile = company.profile_dataset(
-                source, "Data <Lab>", key_columns=["id"],
+                source, "Data Lab", key_columns=["id"],
             )
 
             summary = company.dataset_quality_items()[0]
@@ -4020,7 +4073,7 @@ class CompanyTests(unittest.TestCase):
             self.assertNotIn("never-render-row", snapshot_text)
             page = render_dashboard(company)
             self.assertIn(f'/datasets/{dataset_id}', page)
-            self.assertIn("Data &lt;Lab&gt;", page)
+            self.assertIn("Data Lab", page)
             self.assertNotIn(str(source), page)
             self.assertNotIn(str(brief_path), page)
             self.assertNotIn("never-render-row", page)

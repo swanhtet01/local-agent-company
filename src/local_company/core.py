@@ -250,6 +250,10 @@ PRODUCT_EVIDENCE_OUTCOME_REASONS = frozenset({
 })
 PRODUCT_EVIDENCE_MISSION_TARGET = 10
 MAX_PRODUCT_EVIDENCE_REVIEWS = 100
+# Matches scripts/local_ai.py's _UNSAFE_CMD_TARGET_CHARACTERS: the specific
+# characters that desync cmd.exe's quote tracking when a .cmd target is
+# launched on Windows, letting a trailing '&'/'|' run as a separate command.
+_UNSAFE_CMD_TARGET_CHARACTERS = frozenset('"&|<>^\r\n')
 
 
 def count_words(text: str) -> int:
@@ -2782,6 +2786,23 @@ class Company:
         description = description.strip()
         if not name or len(name) > 80:
             raise ValueError("Project name must contain 1 to 80 characters")
+        if _UNSAFE_CMD_TARGET_CHARACTERS.intersection(name):
+            # product_experiment_next (mcp_server.py) embeds the project
+            # name via repr() into a suggested runnerInvocation.prompt
+            # that's meant to be run as `local-company-agent.cmd --run
+            # <prompt>` -- Windows launches a .cmd target by handing the
+            # whole command line to cmd.exe even under subprocess.run's
+            # argv-list form with shell=False, and cmd.exe's quote
+            # tracking toggles on every literal '"' regardless of
+            # context, unlike the MSVCRT-style escaping repr()/
+            # list2cmdline() assume they're producing. A name containing
+            # one can desync that parser and expose a trailing '&'/'|' as
+            # a separate command cmd.exe will actually execute if a human
+            # or agent runtime follows the tool's own suggested next
+            # step. Reject at the single point every project name enters
+            # the store, rather than trying to sanitize every downstream
+            # use individually.
+            raise ValueError("Project name contains unsafe characters")
         if len(description) > 500:
             raise ValueError("Project description must be at most 500 characters")
         project_id = uuid.uuid4().hex[:12]
