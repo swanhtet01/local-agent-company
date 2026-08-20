@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local_company.capacity import (
+    _observe_posix_memory,
     build_capacity_snapshot,
     machine_capacity_snapshot,
     observe_cgroup_memory,
@@ -229,12 +230,35 @@ class CapacityTests(unittest.TestCase):
             )()
             self.assertEqual(observe_listeners()["status"], "unavailable")
 
-    def test_observe_memory_dispatches_posix_to_the_cgroup_aware_reader(self) -> None:
-        # observe_memory()'s os.name dispatch, and _observe_posix_memory's
-        # host/cgroup merge logic behind it, had zero coverage -- only the
-        # pure sub-helpers (parse_meminfo, observe_cgroup_memory) were
-        # tested directly.
+    def test_observe_memory_dispatches_to_the_posix_reader_off_windows(self) -> None:
+        # observe_memory()'s os.name dispatch had zero coverage. Mock out
+        # _observe_posix_memory() itself (rather than reaching into its
+        # Path("/proc/meminfo") call) for this dispatch check specifically:
+        # patch("...os.name", "posix") patches the .name attribute on the
+        # real, shared os module process-wide for as long as the context
+        # manager is open (config.py/capacity.py do `import os`, not a
+        # local alias) -- on Python 3.11 (confirmed on windows-latest CI;
+        # not 3.12/3.13 or local), pathlib.Path.__new__ re-checks os.name
+        # on every call, so constructing a real Path() anywhere inside that
+        # patched block -- as _observe_posix_memory's real body does --
+        # tries to build a PosixPath on a real Windows box and raises
+        # NotImplementedError. Keeping the mocked function opaque avoids
+        # that landmine entirely.
+        sentinel = {"status": "ready", "total_bytes": 1, "available_bytes": 1}
         with patch("local_company.capacity.os.name", "posix"), patch(
+            "local_company.capacity._observe_posix_memory", return_value=sentinel,
+        ) as posix_reader:
+            self.assertEqual(observe_memory(), sentinel)
+            posix_reader.assert_called_once_with()
+
+    def test_observe_posix_memory_merges_host_and_cgroup_ceilings(self) -> None:
+        # _observe_posix_memory's host/cgroup merge logic had zero
+        # coverage -- only its pure sub-helpers (parse_meminfo,
+        # observe_cgroup_memory) were tested directly. Called directly
+        # here (not through observe_memory()'s os.name dispatch), so no
+        # os.name patching is needed at all -- this function itself never
+        # checks os.name, only observe_memory()'s wrapper does.
+        with patch(
             "local_company.capacity.Path.read_bytes",
             return_value=(
                 b"MemTotal:        8039084 kB\nMemAvailable:    6120044 kB\n"
@@ -243,13 +267,13 @@ class CapacityTests(unittest.TestCase):
             "local_company.capacity.observe_cgroup_memory",
             return_value={"status": "unavailable", "total_bytes": None, "available_bytes": None},
         ):
-            result = observe_memory()
+            result = _observe_posix_memory()
             self.assertEqual(result["status"], "ready")
             self.assertEqual(result["total_bytes"], 8039084 * 1024)
 
         # Both host and cgroup ready: the real ceiling is the min() of
         # each, since the process cannot exceed either one.
-        with patch("local_company.capacity.os.name", "posix"), patch(
+        with patch(
             "local_company.capacity.Path.read_bytes",
             return_value=(
                 b"MemTotal:        8039084 kB\nMemAvailable:    6120044 kB\n"
@@ -262,7 +286,7 @@ class CapacityTests(unittest.TestCase):
                 "available_bytes": 1 * 1024 * 1024,
             },
         ):
-            result = observe_memory()
+            result = _observe_posix_memory()
             self.assertEqual(result["status"], "ready")
             self.assertEqual(result["total_bytes"], 2 * 1024 * 1024)
             self.assertEqual(result["available_bytes"], 1 * 1024 * 1024)
