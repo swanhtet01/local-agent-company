@@ -8,11 +8,13 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from local_company.computer_use import (
     RUN_CONFIRMATION,
     WORKFLOW_SCHEMA,
     WindowsDesktopAdapter,
+    _atomic_json,
     list_workflows,
     load_workflow,
     preview_workflow,
@@ -194,6 +196,32 @@ class ProofDesktop(FakeDesktop):
 
 
 class ComputerUseWorkflowTests(unittest.TestCase):
+    def test_atomic_json_flushes_and_fsyncs_before_the_rename(self) -> None:
+        # _atomic_json backs workflow.json (minutes of a user's desktop
+        # demonstration) and receipt.json (re-hashed and permanently bound
+        # into the pilot's append-only acceptance ledger). Path.write_text()
+        # only hands bytes to the OS write cache; os.replace() can report
+        # success while the data is still only cached in memory, so a
+        # crash/power-loss shortly after can revert the file to stale or
+        # absent content. Every other durability-critical writer in this
+        # codebase explicitly flushes and fsyncs before its rename -- this
+        # one didn't.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "workflow.json"
+            with patch("local_company.computer_use.os.fsync") as fsync:
+                _atomic_json(target, {"steps": ["one"]})
+            fsync.assert_called_once()
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"steps": ["one"]})
+
+            # A second write (the real-world case: re-recording, or
+            # run_workflow overwriting a prior receipt) must also fsync,
+            # and must leave no stray temp file behind either way.
+            with patch("local_company.computer_use.os.fsync") as fsync:
+                _atomic_json(target, {"steps": ["two"]})
+            fsync.assert_called_once()
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"steps": ["two"]})
+            self.assertEqual(list(Path(tmp).glob(".workflow.json.*.tmp")), [])
+
     def test_workflow_is_integrity_sealed_and_tampering_fails(self) -> None:
         payload = workflow_payload()
         self.assertEqual(validate_workflow(payload)["workflowSha256"], payload["workflowSha256"])

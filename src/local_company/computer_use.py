@@ -88,21 +88,41 @@ def _file_digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _atomic_json(path: Path, payload: object) -> None:
+def _atomic_write(path: Path, encoded: bytes) -> None:
+    # Path.write_text() only hands bytes to the OS write cache; os.replace()
+    # can report success while the new file's data is still only cached in
+    # memory. A crash/power-loss shortly after can revert the rename target
+    # to stale or absent content. Every other durability-critical writer in
+    # this codebase (core.py _write_fsynced_report, service.py _write_state,
+    # focus.py _write_execution_focus_unlocked) explicitly flushes and
+    # fsyncs before the rename; this one didn't. Used for workflow.json
+    # (minutes of a user's desktop demonstration) and receipt.json/
+    # receipt.sha256 (re-hashed and permanently bound into the pilot's
+    # append-only acceptance ledger), so a reverted write here silently
+    # discards real work rather than just a cosmetic staleness.
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    _atomic_write(path, (
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8"))
 
 
 def _atomic_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(value, encoding="ascii")
-    os.replace(temporary, path)
+    _atomic_write(path, value.encode("ascii"))
 
 
 def _safe_name(name: str) -> str:
