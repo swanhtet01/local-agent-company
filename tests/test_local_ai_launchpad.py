@@ -1543,6 +1543,86 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(receipt["qualityScore"], 88)
             self.assertFalse(receipt["externalActionPerformed"])
 
+    def test_work_receipt_reports_groundedness_and_warns_when_unsourced(self) -> None:
+        # Found by running the tool against its own repo: a run with no
+        # registered knowledge produced a fabricated quote and looked
+        # identical at the command line to a fully grounded run -- the only
+        # signal was a "No retrieved evidence excerpts." line buried in the
+        # report's manifest section. The receipt must say how much real
+        # evidence backed the run, and an unsourced run must warn loudly.
+        completed = "Completed job 0123456789ab\nReport: C:\\private\\report.md\n"
+        evaluation = {"passed": True, "score": 100, "checks": {"model_stopped_cleanly": True}}
+        job = ["0123456789ab", "private objective", "complete", "time", "C:\\private\\report.md"]
+
+        grounded = {
+            "job": job,
+            "evaluation": evaluation,
+            "evidence_manifest": {
+                "evidence": [{"evidence_id": "a" * 16}, {"evidence_id": "b" * 16}],
+                "sources": [{"source_id": "s1", "path": "README.md"}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, completed, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(grounded), ""),
+            ]
+            output, error = io.StringIO(), io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 0)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["evidenceCount"], 2)
+            self.assertEqual(receipt["sourceCount"], 1)
+            self.assertTrue(receipt["grounded"])
+            self.assertNotIn("WARNING", error.getvalue())
+
+        # Same passing evaluation, but nothing real behind it.
+        unsourced = {
+            "job": job,
+            "evaluation": evaluation,
+            "evidence_manifest": {"evidence": [], "sources": []},
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, completed, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(unsourced), ""),
+            ]
+            output, error = io.StringIO(), io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 0)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["evidenceCount"], 0)
+            self.assertEqual(receipt["sourceCount"], 0)
+            self.assertFalse(receipt["grounded"])
+            self.assertIn("no registered knowledge source", error.getvalue())
+
+        # A malformed or absent manifest must degrade to "ungrounded" and
+        # warn, never crash or silently claim groundedness.
+        for manifest in (None, "not-a-dict", {}, {"evidence": "bad"}):
+            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as directory, patch(
+                "scripts.local_ai.subprocess.run",
+            ) as run:
+                root = Path(directory)
+                (root / "src").mkdir()
+                payload = {"job": job, "evaluation": evaluation}
+                if manifest is not None:
+                    payload["evidence_manifest"] = manifest
+                run.side_effect = [
+                    subprocess.CompletedProcess([], 0, completed, ""),
+                    subprocess.CompletedProcess([], 0, json.dumps(payload), ""),
+                ]
+                output, error = io.StringIO(), io.StringIO()
+                with redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 0)
+                receipt = json.loads(output.getvalue().splitlines()[-1])
+                self.assertEqual(receipt["evidenceCount"], 0)
+                self.assertFalse(receipt["grounded"])
+                self.assertIn("no registered knowledge source", error.getvalue())
+
     def test_work_fails_closed_when_completion_cannot_be_inspected(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
             root = Path(directory)

@@ -39,6 +39,7 @@ from local_company.core import (
     ReportFinalizationPending, SourceHit,
     _failure_mode_is_substantive,
     _required_ending_from_objective,
+    _requires_retrieved_evidence,
     _requires_strict_grounded_synthesis,
     bounded_context_blocks,
     compact_labeled_sections,
@@ -6728,6 +6729,59 @@ class CompanyTests(unittest.TestCase):
         self.assertFalse(_requires_strict_grounded_synthesis(
             "Using imported evidence, separate verified facts from assumptions."
         ))
+
+    def test_read_the_source_objectives_require_retrieved_evidence(self):
+        # Found by actually running the tool against its own repo: an
+        # objective saying "read README.md and quote the most confusing
+        # sentence", run against a project with NO registered knowledge,
+        # produced a wholly fabricated quote and scored a perfect 100 --
+        # because evidence_ids_valid, evidence_manifest_bound_to_report and
+        # source_limitations_respected are all vacuously true when nothing
+        # was retrieved (zero citations means zero citations to invalidate).
+        # The same objective WITH the README registered produced a real,
+        # correctly cited quote and scored LOWER, because a grounded run has
+        # actual surface area to fail on. Fabrication must never outscore
+        # truth.
+        for objective in (
+            "Read README.md in this repo and identify the most confusing sentence.",
+            "Using the registered README.md knowledge source, identify the gap.",
+            "Review the CHANGELOG and summarize the last three releases.",
+            "Analyze this file and quote the relevant section.",
+            "Inspect config.yaml and explain the retry settings.",
+        ):
+            with self.subTest(objective=objective):
+                self.assertTrue(_requires_retrieved_evidence(objective))
+
+        # Planning, drafting and brainstorming legitimately have no sources.
+        # A false positive here would block ordinary unsourced work, so this
+        # half of the contract matters as much as the half above.
+        for objective in (
+            "Create a 30-day launch plan for a new product.",
+            "Draft three pricing options for a small shop.",
+            "Brainstorm names for a coffee subscription service.",
+            "Plan the next sprint for the engineering team.",
+            "Review our pricing strategy and propose improvements.",
+        ):
+            with self.subTest(objective=objective):
+                self.assertFalse(_requires_retrieved_evidence(objective))
+
+    def test_ungrounded_read_the_source_report_cannot_pass_quality(self):
+        # End-to-end companion to the unit test above: a factual
+        # "read the source" objective run with zero registered knowledge
+        # must fail the quality gate on grounded_evidence_present rather
+        # than scoring a clean pass on a report nothing supports.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            company = Company(root / "state", CountingMockModel())
+            company.create_project("Ungrounded Lab")
+            job_id, _report = company.run(
+                "Read README.md in this repo and identify the most confusing sentence.",
+                roles=["operations", "quality"],
+                project="Ungrounded Lab",
+            )
+            evaluation = company.evaluate_job(job_id)
+            self.assertIs(evaluation["checks"]["grounded_evidence_present"], False)
+            self.assertFalse(evaluation["passed"])
 
     def test_daily_control_brief_uses_code_owned_grounded_synthesis(self):
         objective = (

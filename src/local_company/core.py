@@ -221,7 +221,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-30.20"
+EVALUATOR_VERSION = "local-quality-2026-07-30.21"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
@@ -1190,6 +1190,38 @@ def _requires_design_partner_brief(objective: str) -> bool:
             "privacy, legal, and action-control review gates",
             "exact source filename and supplied evidence id",
         )
+    )
+
+
+# An objective that tells the model to read, quote, or analyse an existing
+# document is only answerable from retrieved evidence. Without any, a small
+# local model does not refuse -- it invents a plausible-sounding source and
+# states it confidently (observed: a fabricated README sentence that scored
+# 100/100 because every evidence check is vacuously true when nothing was
+# retrieved). These verbs are deliberately narrow: planning, drafting, and
+# brainstorming objectives legitimately have no sources and must stay
+# unaffected.
+_SOURCE_READING_OBJECTIVE_PATTERN = re.compile(
+    r"\b(?:read|re-?read|review|inspect|examine|analyse|analyze|summarise|summarize|"
+    r"quote|cite|using|from|according to|based on)\b",
+    flags=re.IGNORECASE,
+)
+# Paired with the verb above: some reference to an actual artifact to read.
+_SOURCE_ARTIFACT_PATTERN = re.compile(
+    r"(?:\b[\w.-]+\.(?:md|txt|json|ya?ml|csv|py|ts|tsx|js|toml|ini|cfg|rst)\b"
+    r"|\b(?:readme|changelog|licen[cs]e)\b"
+    r"|\b(?:this|the)\s+(?:file|document|report|source|repo(?:sitory)?|codebase)\b"
+    r"|\bknowledge source\b"
+    r"|\bregistered\s+(?:source|evidence|knowledge)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _requires_retrieved_evidence(objective: str) -> bool:
+    """Whether this objective can only be answered honestly from real sources."""
+    return bool(
+        _SOURCE_READING_OBJECTIVE_PATTERN.search(objective)
+        and _SOURCE_ARTIFACT_PATTERN.search(objective)
     )
 
 
@@ -6622,6 +6654,22 @@ class Company:
             and evidence_id.lower() in valid_evidence_ids
             for evidence_id in mentioned_evidence_ids
         )
+        if _requires_retrieved_evidence(objective):
+            # evidence_ids_valid, evidence_manifest_bound_to_report and
+            # source_limitations_respected are all vacuously true when nothing
+            # was retrieved: zero citations means zero citations to invalidate.
+            # So an objective that says "read README.md and quote it" against a
+            # project with no registered knowledge used to score a perfect 100
+            # on a wholly fabricated quote, while the same objective WITH the
+            # file registered had real surface area to fail on. Require that a
+            # read-the-source objective actually cited retrieved evidence.
+            checks["grounded_evidence_present"] = bool(
+                valid_evidence_ids
+                and any(
+                    evidence_id.lower() in valid_evidence_ids
+                    for evidence_id in mentioned_evidence_ids
+                )
+            )
         minimum_sources_match = re.search(
             r"\bcite at least (two|\d+) current sources\b",
             objective_lower,

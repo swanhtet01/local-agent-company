@@ -2489,6 +2489,18 @@ def run_work(action: LaunchAction, root: Path | None = None) -> int:
     except (IndexError, KeyError, TypeError, json.JSONDecodeError):
         print(json.dumps({"schema": WORK_RESULT_SCHEMA, "ok": False, "jobId": job_id, "reason": "quality_receipt_invalid"}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 2
+    # How much real, retrieved evidence backed this run. Previously the only
+    # signal was a "No retrieved evidence excerpts." line buried in the
+    # report's manifest section, so a run against a project with no
+    # registered knowledge looked identical to a fully grounded one at the
+    # command line -- including when the model had invented its sources
+    # outright. Surface it where the operator actually looks.
+    manifest = detail.get("evidence_manifest")
+    manifest = manifest if isinstance(manifest, dict) else {}
+    evidence_items = manifest.get("evidence")
+    source_items = manifest.get("sources")
+    evidence_count = len(evidence_items) if isinstance(evidence_items, list) else 0
+    source_count = len(source_items) if isinstance(source_items, list) else 0
     receipt = {
         "schema": WORK_RESULT_SCHEMA,
         "ok": passed,
@@ -2500,8 +2512,18 @@ def run_work(action: LaunchAction, root: Path | None = None) -> int:
         "recommendedAction": "review_accepted_report" if passed else "review_failure_then_retry_with_better_model_or_tighter_task",
         "modelUnloadedAfterRun": evaluation.get("checks", {}).get("model_stopped_cleanly") is True,
         "externalActionPerformed": False,
+        "evidenceCount": evidence_count,
+        "sourceCount": source_count,
+        "grounded": evidence_count > 0,
     }
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
+    if evidence_count == 0:
+        print(
+            "WARNING: no registered knowledge source backed this run. Nothing in "
+            "the report was checked against a real document. Register sources "
+            "with `knowledge add` and rerun before trusting any factual claim.",
+            file=sys.stderr,
+        )
     return 0 if passed else 1
 
 
