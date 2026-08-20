@@ -1693,6 +1693,26 @@ def run_experiment_agent(action: LaunchAction, root: Path | None = None) -> int:
     return 0 if accepted else 1
 
 
+# Windows launches a .cmd target by handing the whole command line to
+# cmd.exe (CreateProcess falls back to it for any non-PE/.bat/.cmd target,
+# even under subprocess.run's argv-list form with shell=False), and cmd.exe
+# re-tokenizes that line for its own quoting/metacharacters. Its quote
+# tracking toggles on every literal '"' regardless of context -- unlike the
+# MSVCRT-style escaping subprocess.list2cmdline() assumes it's producing --
+# so a single embedded '"' can desync the parser and expose a trailing
+# '&'/'|' as a separate command cmd.exe will actually execute. Reject the
+# characters that matter for that specific desync before ever reaching
+# local-code.cmd, rather than relying on argv-list/shell=False to be a
+# sufficient defense (it is not, for .cmd targets).
+_UNSAFE_CMD_TARGET_CHARACTERS = frozenset('"&|<>^\r\n')
+
+
+def _reject_unsafe_cmd_arguments(values: list[str]) -> None:
+    for value in values:
+        if _UNSAFE_CMD_TARGET_CHARACTERS.intersection(value):
+            raise ValueError("argument_contains_unsafe_characters")
+
+
 def run_code(action: LaunchAction, root: Path | None = None) -> int:
     project_root = root or Path(__file__).resolve(strict=True).parents[1]
     command = list(action.command)
@@ -1700,6 +1720,7 @@ def run_code(action: LaunchAction, root: Path | None = None) -> int:
         default_project = str(project_root.parent / "supermega-vision")
         if len(command) == 1 or command[1:] == ["--check"]:
             command.append(default_project)
+    _reject_unsafe_cmd_arguments(command)
     completed = subprocess.run(
         [str(project_root / "local-code.cmd"), *command],
         cwd=project_root, check=False,

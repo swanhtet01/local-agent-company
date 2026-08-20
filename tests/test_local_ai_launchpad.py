@@ -1191,6 +1191,51 @@ class LocalAiLaunchpadTests(unittest.TestCase):
             self.assertEqual(command[2], "C:\\Project With Spaces")
             self.assertFalse(run.call_args.kwargs["check"])
 
+    def test_code_mode_rejects_arguments_that_desync_cmd_exes_quote_tracking(self) -> None:
+        # Windows launches a .cmd target by handing the whole command line
+        # to cmd.exe -- CreateProcess falls back to it for any .bat/.cmd
+        # target even under subprocess.run's argv-list form with
+        # shell=False -- and cmd.exe re-tokenizes that line for its own
+        # quoting. Its quote-tracking toggles on every literal '"'
+        # regardless of context, unlike the MSVCRT-style escaping
+        # subprocess.list2cmdline() assumes it's producing, so one
+        # embedded '"' can desync the parser and expose a trailing '&'/'|'
+        # as a separate command cmd.exe actually executes -- reproduced by
+        # hand: subprocess.run([local-code.cmd, "--run", 'proj" & echo
+        # INJECTED & echo "']) really does execute the injected echo.
+        # argv-list/shell=False alone is not a sufficient defense for .cmd
+        # targets, so run_code() must reject these characters itself.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "local-code.cmd").write_text("@exit /b 0\n", encoding="utf-8")
+            unsafe_arguments = [
+                'proj" & echo INJECTED & echo "',
+                "safe1 | safe2",
+                "safe1 & safe2",
+                "safe1 < safe2",
+                "safe1 > safe2",
+                "safe1 ^ safe2",
+                "safe1\r\nsafe2",
+            ]
+            for unsafe in unsafe_arguments:
+                with self.subTest(unsafe=unsafe), patch(
+                    "scripts.local_ai.subprocess.run",
+                ) as run:
+                    action = translate(["code", unsafe])
+                    with self.assertRaisesRegex(
+                        ValueError, "argument_contains_unsafe_characters",
+                    ):
+                        run_code(action, root)
+                    run.assert_not_called()
+
+            # A legitimate path with spaces, still no shell metacharacters,
+            # must keep working exactly as before.
+            action = translate(["code", "C:\\Project With Spaces"])
+            with patch("scripts.local_ai.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0)
+                self.assertEqual(run_code(action, root), 0)
+            run.assert_called_once()
+
     def test_autopilot_routes_only_fixed_task_manager_modes(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
             root = Path(directory)
