@@ -49,7 +49,6 @@ cd C:\Users\thesw\Projects\local-agent-company
 .\local-ai.cmd web install
 .\local-ai.cmd web template .\customer-suite.json
 .\local-ai.cmd web suite .\customer-suite.json
-.\local-ai.cmd web supermega
 .\local-ai.cmd web https://your-site.example --expect-text "Expected heading"
 .\local-ai.cmd automate prove --confirm "RUN LOCAL COMPUTER WORKFLOW"
 .\local-ai.cmd code C:\path\to\any-project
@@ -87,9 +86,15 @@ Run a proof against any explicit public or localhost HTTP(S) URL:
 ```
 
 SuperMega's first business-specific pack checks the Shop, Plant, Website, and
-Ecommerce setup pages with strong product-specific assertions:
+Ecommerce setup pages with strong product-specific assertions. This is a
+maintainer-specific shortcut, not a general capability: it is hidden from
+`--help` and refuses to run (`launchpad_command_unknown`) unless
+`SUPERMEGA_RELEASE_CHECK_ENABLED` is set in the environment first, since a
+general user of this now-public tool has no reason to check
+`app.supermega.dev`:
 
 ```powershell
+$env:SUPERMEGA_RELEASE_CHECK_ENABLED = "1"
 .\local-ai.cmd web supermega
 .\local-ai.cmd web supermega --runs 10
 ```
@@ -244,9 +249,16 @@ build-versus-integrate decisions are in [PRODUCT.md](../PRODUCT.md).
 
 For the pathless SuperMega workflow, double-click **SuperMega AI Workbench** or
 use these aliases. The proof commands reuse the same receipt validation and
-human-review contracts as the general product workflow:
+human-review contracts as the general product workflow. This whole namespace
+is a maintainer-specific shortcut, not a general capability: it is hidden
+from `--help` and refuses to run (`launchpad_command_unknown`) unless
+`SUPERMEGA_PROJECT_SHORTCUTS_ENABLED` is set in the environment first --
+including through the Workbench double-click shortcut, which does not set it
+either -- since a general user of this now-public tool has no project named
+"SuperMega":
 
 ```powershell
+$env:SUPERMEGA_PROJECT_SHORTCUTS_ENABLED = "1"
 .\local-ai.cmd supermega
 .\local-ai.cmd supermega ask "What should I do next?"
 .\local-ai.cmd supermega proof
@@ -287,7 +299,7 @@ answer, and unloads the model afterward:
 ```powershell
 ollama pull llama3.2:1b
 .\local-ai.cmd ask "Which active product action is supported by our evidence?"
-.\local-ai.cmd supermega ask "What is the verified SuperMega next action?"
+.\local-ai.cmd supermega ask "What is the verified SuperMega next action?"  # requires SUPERMEGA_PROJECT_SHORTCUTS_ENABLED, see above
 ```
 
 The host—not the small model—collects the company brief, project overview, and
@@ -769,9 +781,18 @@ assumptions as facts.
 
 ## SuperMega local capabilities
 
-The coordinator can run the fixed, offline Vision sales worker without loading a model:
+The coordinator can run the fixed, offline Vision sales worker without loading a model.
+This entire `supermega` subcommand tree is a maintainer-specific capability pack, not a
+general Local Workcell feature: on a fresh install `local-company.cmd` does not even
+register `supermega` as a valid top-level command (it fails argparse's own
+`invalid choice` error, not a friendlier gated message), because
+`vision_capability_configured()` almost never returns true for a general install -- it
+requires either `SUPERMEGA_VISION_PRODUCT_ROOT`/`SUPERMEGA_VISION_SALES_ROOT` to be set,
+or the default per-user Vision product/sales root directories to already exist on disk:
 
 ```powershell
+$env:SUPERMEGA_VISION_PRODUCT_ROOT = "C:\local\vision-product"
+$env:SUPERMEGA_VISION_SALES_ROOT = "C:\local\vision-sales"
 .\local-company.cmd supermega vision-sales-intake --interactive
 .\local-company.cmd supermega vision-sales-intake --input C:\local\vision-prospect.json
 .\local-company.cmd supermega vision-prospect-import --input C:\local\vision-prospect-shortlist.csv
