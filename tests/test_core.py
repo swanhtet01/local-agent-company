@@ -1878,6 +1878,45 @@ class CompanyTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     model.complete_structured("system", "prompt", schema)
 
+    def test_wedged_ollama_service_is_named_distinctly_from_a_slow_generation(self):
+        # Observed on a real unattended run: the Ollama service wedged while
+        # its process stayed alive, so even /api/tags (which loads no model)
+        # stopped answering. The 300s blocking chat call burned its full
+        # timeout and failed with a bare "timed out" that reads identically
+        # to a slow-but-healthy generation on a memory-constrained machine,
+        # leaving the operator with no idea the service needed restarting.
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        timeout = TimeoutError("timed out")
+
+        wedged = OllamaModel("llama3.2:1b")
+        wedged.opener = Mock()
+        # Both the chat POST and the liveness probe fail: service is down.
+        wedged.opener.open.side_effect = timeout
+        with self.assertRaises(RuntimeError) as wedged_error:
+            wedged.complete("system", "prompt")
+        self.assertIn("not responding", str(wedged_error.exception))
+        self.assertIn("ollama serve", str(wedged_error.exception))
+
+        slow = OllamaModel("llama3.2:1b")
+        slow.opener = Mock()
+        # The chat POST times out but the liveness probe answers: the service
+        # is alive and the generation itself was simply too slow, so the
+        # operator must NOT be told to restart anything.
+        slow.opener.open.side_effect = [
+            timeout,
+            Response(json.dumps({"models": [{"name": "llama3.2:1b"}]}).encode()),
+        ]
+        with self.assertRaises(RuntimeError) as slow_error:
+            slow.complete("system", "prompt")
+        self.assertIn("unavailable", str(slow_error.exception))
+        self.assertNotIn("ollama serve", str(slow_error.exception))
+
     def test_routes_specialists_and_persists_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             company = Company(Path(tmp), MockModel())

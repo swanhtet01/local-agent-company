@@ -1820,6 +1820,20 @@ class OllamaModel:
             with self.opener.open(request, timeout=300) as response:
                 payload = json.load(response)
         except (urllib.error.URLError, TimeoutError) as exc:
+            # Observed on a real unattended run: the Ollama service can wedge
+            # while its process stays alive, so even /api/tags (which loads no
+            # model) stops answering. The blocking call above then burns its
+            # full 300s timeout before failing with a bare "timed out" that
+            # looks identical to a slow-but-healthy generation on a
+            # memory-constrained machine. A 3s liveness probe on the way out
+            # distinguishes the two, so the operator is told to restart the
+            # service instead of assuming the model is merely slow.
+            if not self.ping():
+                raise RuntimeError(
+                    f"Local Ollama is not responding at {self.host} (its liveness "
+                    "endpoint failed too, so the service is wedged or stopped, not "
+                    f"merely slow). Restart it with `ollama serve`, then retry: {exc}"
+                ) from exc
             raise RuntimeError(f"Local Ollama is unavailable at {self.url}: {exc}") from exc
         eval_count = int(payload.get("eval_count", 0))
         eval_duration = int(payload.get("eval_duration", 0))
