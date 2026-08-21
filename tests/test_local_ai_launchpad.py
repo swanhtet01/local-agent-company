@@ -1623,6 +1623,89 @@ class LocalAiLaunchpadTests(unittest.TestCase):
                 self.assertFalse(receipt["grounded"])
                 self.assertIn("no registered knowledge source", error.getvalue())
 
+    def test_work_receipt_names_the_stages_whose_output_was_truncated(self) -> None:
+        # Verified against a real run: a grounded report failed quality
+        # solely on model_stopped_cleanly, and the cause was two stages
+        # hitting num_predict exactly (512/512) and being cut off
+        # mid-sentence. The gate is right to fail that -- it is a real
+        # content defect, not a resource hiccup -- but the receipt only said
+        # qualityPassed=false, so the operator had to dig through `show` to
+        # learn which stage was truncated and that raising --num-predict is
+        # the remedy.
+        completed = "Completed job 0123456789ab\nReport: C:\\private\\report.md\n"
+        job = ["0123456789ab", "objective", "complete", "time", "C:\\private\\report.md"]
+        manifest = {"evidence": [{"evidence_id": "a" * 16}], "sources": [{"source_id": "s1"}]}
+
+        def metric(stage: str, done_reason: str) -> list[str]:
+            return ["model_metrics", json.dumps({"stage": stage, "done_reason": done_reason}), "t"]
+
+        truncated = {
+            "job": job,
+            "evaluation": {"passed": False, "score": 94, "checks": {"model_stopped_cleanly": False}},
+            "evidence_manifest": manifest,
+            "events": [
+                metric("chief-of-staff", "stop"),
+                metric("quality", "length"),
+                metric("executive-synthesis", "length"),
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, completed, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(truncated), ""),
+            ]
+            output, error = io.StringIO(), io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 1)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["truncatedStages"], ["quality", "executive-synthesis"])
+            self.assertIn("cut off mid-sentence", error.getvalue())
+            self.assertIn("--num-predict", error.getvalue())
+
+        # A clean run names no stages and stays silent about truncation.
+        clean = {
+            "job": job,
+            "evaluation": {"passed": True, "score": 100, "checks": {"model_stopped_cleanly": True}},
+            "evidence_manifest": manifest,
+            "events": [metric("chief-of-staff", "stop"), metric("quality", "stop")],
+        }
+        with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
+            root = Path(directory)
+            (root / "src").mkdir()
+            run.side_effect = [
+                subprocess.CompletedProcess([], 0, completed, ""),
+                subprocess.CompletedProcess([], 0, json.dumps(clean), ""),
+            ]
+            output, error = io.StringIO(), io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 0)
+            receipt = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(receipt["truncatedStages"], [])
+            self.assertNotIn("cut off mid-sentence", error.getvalue())
+
+        # Malformed or absent event payloads must degrade quietly, never
+        # crash the receipt that reports them.
+        for events in (None, "not-a-list", [["model_metrics", "not-json", "t"]], [["other", "{}", "t"]], [[]]):
+            with self.subTest(events=events), tempfile.TemporaryDirectory() as directory, patch(
+                "scripts.local_ai.subprocess.run",
+            ) as run:
+                root = Path(directory)
+                (root / "src").mkdir()
+                payload = {"job": job, "evaluation": clean["evaluation"], "evidence_manifest": manifest}
+                if events is not None:
+                    payload["events"] = events
+                run.side_effect = [
+                    subprocess.CompletedProcess([], 0, completed, ""),
+                    subprocess.CompletedProcess([], 0, json.dumps(payload), ""),
+                ]
+                output, error = io.StringIO(), io.StringIO()
+                with redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(run_work(translate(["work", "Bounded task"]), root), 0)
+                receipt = json.loads(output.getvalue().splitlines()[-1])
+                self.assertEqual(receipt["truncatedStages"], [])
+
     def test_work_fails_closed_when_completion_cannot_be_inspected(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch("scripts.local_ai.subprocess.run") as run:
             root = Path(directory)

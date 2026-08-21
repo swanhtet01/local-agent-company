@@ -2501,6 +2501,22 @@ def run_work(action: LaunchAction, root: Path | None = None) -> int:
     source_items = manifest.get("sources")
     evidence_count = len(evidence_items) if isinstance(evidence_items, list) else 0
     source_count = len(source_items) if isinstance(source_items, list) else 0
+    # Which stages ran out of output budget mid-sentence. The quality gate
+    # already fails these (model_stopped_cleanly is done_reason == "length",
+    # i.e. real truncation, not a resource hiccup), but the receipt only said
+    # qualityPassed=false -- the operator had to dig through `show` output to
+    # learn WHICH stage was cut off and that raising --num-predict is the fix.
+    truncated_stages: list[str] = []
+    for event in detail.get("events") or []:
+        if not (isinstance(event, (list, tuple)) and len(event) >= 2 and event[0] == "model_metrics"):
+            continue
+        try:
+            metric = json.loads(event[1])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(metric, dict) and metric.get("done_reason") == "length":
+            stage = metric.get("stage")
+            truncated_stages.append(str(stage) if isinstance(stage, str) else "unknown")
     receipt = {
         "schema": WORK_RESULT_SCHEMA,
         "ok": passed,
@@ -2510,11 +2526,16 @@ def run_work(action: LaunchAction, root: Path | None = None) -> int:
         "qualityScore": score,
         "report": report_path,
         "recommendedAction": "review_accepted_report" if passed else "review_failure_then_retry_with_better_model_or_tighter_task",
+        # Kept under the established cross-script field name even though this
+        # check is really "output was not truncated" -- every other runner
+        # script publishes modelUnloadedAfterRun, and run_scheduled_cycle.py's
+        # allowlist reads it. truncatedStages below carries the precise signal.
         "modelUnloadedAfterRun": evaluation.get("checks", {}).get("model_stopped_cleanly") is True,
         "externalActionPerformed": False,
         "evidenceCount": evidence_count,
         "sourceCount": source_count,
         "grounded": evidence_count > 0,
+        "truncatedStages": truncated_stages,
     }
     print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     if evidence_count == 0:
@@ -2522,6 +2543,14 @@ def run_work(action: LaunchAction, root: Path | None = None) -> int:
             "WARNING: no registered knowledge source backed this run. Nothing in "
             "the report was checked against a real document. Register sources "
             "with `knowledge add` and rerun before trusting any factual claim.",
+            file=sys.stderr,
+        )
+    if truncated_stages:
+        print(
+            "WARNING: output was cut off mid-sentence in these stages: "
+            f"{', '.join(truncated_stages)}. They hit the output token ceiling, "
+            "so the report is incomplete. Rerun with a higher --num-predict or a "
+            "tighter objective.",
             file=sys.stderr,
         )
     return 0 if passed else 1
