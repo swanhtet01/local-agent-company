@@ -10191,6 +10191,29 @@ class Company:
                     [item for item in raw_conflicts if isinstance(item, dict)]
                     if isinstance(raw_conflicts, list) else []
                 )
+                raw_commercial_claims = payload.get("commercial_authority_claims", [])
+                allowed_claim_reasons = {
+                    "cited_frozen_evidence_does_not_support_claim",
+                    "valid_frozen_evidence_citation_missing",
+                }
+                evaluation["commercial_authority_claims"] = (
+                    [
+                        {
+                            "category": item["category"],
+                            "claim": item["claim"],
+                            "reason": item["reason"],
+                        }
+                        for item in raw_commercial_claims[:8]
+                        if (
+                            isinstance(item, dict)
+                            and item.get("category") in _HIGH_RISK_CLAIM_PATTERNS
+                            and isinstance(item.get("claim"), str)
+                            and 0 < len(item["claim"]) <= 280
+                            and item.get("reason") in allowed_claim_reasons
+                        )
+                    ]
+                    if isinstance(raw_commercial_claims, list) else []
+                )
                 manifest_reason = payload.get("manifest_reason")
                 evaluation["manifest_reason"] = (
                     manifest_reason if isinstance(manifest_reason, str) else None

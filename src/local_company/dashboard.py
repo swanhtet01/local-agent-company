@@ -2570,6 +2570,7 @@ def render_mission_detail(company: Company, job_id: str) -> str:
             if failed else "<p>No automated gates failed.</p>"
         )
         conflicts = evaluation.get("source_conflicts", [])
+        commercial_claims = evaluation.get("commercial_authority_claims", [])
         incomplete_roles = evaluation.get("incomplete_specialist_roles", [])
         incomplete_html = (
             '<p class="warning"><strong>Degraded specialist output safely withheld:</strong> '
@@ -2586,6 +2587,21 @@ def render_mission_detail(company: Company, job_id: str) -> str:
                 f"<p><strong>Source:</strong> <code>{cell(item.get('source', ''))}</code></p></article>"
                 for item in conflicts
             )
+        commercial_claim_html = ""
+        if commercial_claims:
+            commercial_claim_html = (
+                "<h3>Unsupported commercial or authority claims</h3>"
+                "<p class=\"warning\">These claims require exact supporting frozen evidence "
+                "before they may be used for an owner, customer, market, or release decision.</p>"
+                + "".join(
+                    "<article class=\"conflict\">"
+                    f"<p><strong>Category:</strong> {cell(item.get('category', ''))}</p>"
+                    f"<p><strong>Claim:</strong> {cell(item.get('claim', ''))}</p>"
+                    f"<p><strong>Reason:</strong> <code>{cell(item.get('reason', ''))}</code></p>"
+                    "</article>"
+                    for item in commercial_claims
+                )
+            )
         quality_html = (
             f'<p class="outcome {"pass" if evaluation["passed"] else "fail"}">Automated checks {outcome}: '
             f'{cell(evaluation["score"])}/100</p>'
@@ -2595,6 +2611,7 @@ def render_mission_detail(company: Company, job_id: str) -> str:
             '<p class="warning">This is a deterministic format, safety, and evidence-consistency screen. '
             'It is not factual, customer, production, or revenue verification.</p>'
             f"{incomplete_html}<h3>Failed gates</h3>{failed_html}{conflict_html}"
+            f"{commercial_claim_html}"
         )
     else:
         quality_html = '<p class="warning">This report has not been evaluated.</p>'

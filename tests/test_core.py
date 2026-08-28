@@ -1380,6 +1380,14 @@ class CompanyTests(unittest.TestCase):
                 if event[0] == "quality_evaluated"
             ]
             self.assertTrue(quality_events[-1]["commercial_authority_claims"])
+            detail = company.job_detail(job_id)
+            self.assertEqual(
+                {item["category"] for item in detail["evaluation"]["commercial_authority_claims"]},
+                {"owner_approval", "market_demand", "baseline_proof", "market_presence"},
+            )
+            page = render_mission_detail(company, job_id)
+            self.assertIn("Unsupported commercial or authority claims", page)
+            self.assertIn("valid_frozen_evidence_citation_missing", page)
 
     def test_default_local_runtime_releases_idle_model_memory(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -8122,6 +8130,19 @@ class CompanyTests(unittest.TestCase):
                     },
                     "invalid conflict",
                 ],
+                "commercial_authority_claims": [
+                    {
+                        "category": "owner_approval",
+                        "claim": "Owner approval was received without frozen support.",
+                        "reason": "valid_frozen_evidence_citation_missing",
+                    },
+                    {
+                        "category": "owner_approval",
+                        "claim": "<script>unsafe</script>",
+                        "reason": "invalid_reason",
+                    },
+                    "invalid commercial claim",
+                ],
             }
             with closing(sqlite3.connect(company.db_path)) as db, db:
                 db.execute(
@@ -8144,10 +8165,13 @@ class CompanyTests(unittest.TestCase):
                 detail["evaluation"]["incomplete_specialist_roles"], ["operations"],
             )
             self.assertEqual(len(detail["evaluation"]["source_conflicts"]), 1)
+            self.assertEqual(len(detail["evaluation"]["commercial_authority_claims"]), 1)
             self.assertIsNone(detail["evaluation"]["manifest_reason"])
             page = render_mission_detail(company, job_id)
             self.assertIn("Degraded specialist output safely withheld", page)
             self.assertIn("A bounded local claim", page)
+            self.assertIn("Unsupported commercial or authority claims", page)
+            self.assertIn("Owner approval was received without frozen support.", page)
             self.assertNotIn("&lt;script&gt;", page)
 
             with closing(sqlite3.connect(company.db_path)) as db, db:
@@ -8159,6 +8183,7 @@ class CompanyTests(unittest.TestCase):
             fallback = company.job_detail(job_id)["evaluation"]
             self.assertEqual(fallback["incomplete_specialist_roles"], [])
             self.assertEqual(fallback["source_conflicts"], [])
+            self.assertEqual(fallback["commercial_authority_claims"], [])
             render_mission_detail(company, job_id)
 
     def test_dashboard_can_recheck_completed_job_quality(self):
