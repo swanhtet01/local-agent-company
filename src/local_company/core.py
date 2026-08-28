@@ -221,7 +221,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-30.21"
+EVALUATOR_VERSION = "local-quality-2026-07-30.22"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
@@ -356,6 +356,76 @@ _LIMITATION_PATTERN = re.compile(
 _COMPLETION_CLAIM_PATTERN = re.compile(
     r"\b(?:verified|confirmed|validated|established|operational|ready|successful|"
     r"active|completed|connected|wired|working|passed)\b",
+    flags=re.IGNORECASE,
+)
+_HIGH_RISK_CLAIM_PATTERNS = {
+    "owner_approval": (
+        re.compile(
+            r"\bowner\s+approvals?\s+(?:(?:has|have|had|was|were|is|are)\s+)?"
+            r"(?:been\s+)?(?:received|granted|secured|confirmed|approved)\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bowner\s+(?:has|have|had)\s+approved\b|"
+            r"\bapproved\s+by\s+(?:the\s+)?owner\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    "market_demand": (
+        re.compile(
+            r"\b(?:proven|confirmed|validated|established|demonstrated)\s+"
+            r"(?:(?:market|buyer|customer|commercial)\s+)?demand\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:(?:market|buyer|customer|commercial)\s+)?demand\s+"
+            r"(?:has|have|is|was)\s+(?:been\s+)?"
+            r"(?:proven|confirmed|validated|established|demonstrated)\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:provides?|shows?|demonstrates?|establishes?)\s+"
+            r"(?:concrete\s+)?(?:proof|evidence)\s+of\s+(?:the\s+)?"
+            r"(?:market(?:['\u2019]s)?\s+|buyer\s+|customer\s+|commercial\s+)?demand\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:proof|evidence)\s+of\s+(?:the\s+)?"
+            r"(?:market(?:['\u2019]s)?\s+|buyer\s+|customer\s+|commercial\s+)?demand\s+"
+            r"(?:exists|is\s+(?:proven|confirmed|validated|established)|"
+            r"has\s+been\s+(?:proven|confirmed|validated|established))\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    "baseline_proof": (
+        re.compile(
+            r"\b(?:baseline|baseline\s+proof|proof\s+baseline)\s+"
+            r"(?:has|have|is|was)\s+(?:been\s+)?"
+            r"(?:proven|completed|complete|validated|verified|accepted|established|ready)\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:proven|validated|verified|established)\s+"
+            r"(?:through|by|with)\s+(?:an?\s+)?(?:proof\s+)?baseline\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    "market_presence": (
+        re.compile(
+            r"\b(?:strong|established|leading|dominant|significant|substantial)\s+"
+            r"(?:market\s+)?presence(?:\s+in\s+myanmar)?\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+}
+_HIGH_RISK_CLAIM_BOUNDARY_PATTERN = re.compile(
+    r"[;]|\b(?:and|but|however|yet|while|whereas)\b",
+    flags=re.IGNORECASE,
+)
+_HIGH_RISK_CLAIM_NEGATION_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|unproven|unverified|unknown|missing|pending|blocked|"
+    r"cannot|can't|doesn't|isn't|aren't|hasn't|haven't|hadn't|requires?|required|"
+    r"needs?|needed|seeks?|target|goal|proposed)\b",
     flags=re.IGNORECASE,
 )
 _DANGLING_LIMITATION_WORDS = {
@@ -513,6 +583,93 @@ def source_limitation_conflicts(
             })
             if len(findings) >= limit:
                 return findings
+    return findings
+
+
+def _high_risk_claim_match_is_negated(
+    fragment: str, match_start: int, match_end: int,
+) -> bool:
+    boundaries = list(_HIGH_RISK_CLAIM_BOUNDARY_PATTERN.finditer(fragment))
+    clause_start = max(
+        (boundary.end() for boundary in boundaries if boundary.end() <= match_start),
+        default=0,
+    )
+    clause_end = min(
+        (boundary.start() for boundary in boundaries if boundary.start() >= match_end),
+        default=len(fragment),
+    )
+    return bool(_HIGH_RISK_CLAIM_NEGATION_PATTERN.search(
+        fragment[clause_start:clause_end],
+    ))
+
+
+def unsupported_commercial_authority_claims(
+    model_output: str, evidence_quotes: dict[str, str], limit: int = 8,
+) -> list[dict[str, str]]:
+    """Require frozen evidence for positive authority, demand, and proof claims."""
+    normalized_quotes = {
+        evidence_id.casefold(): quote
+        for evidence_id, quote in evidence_quotes.items()
+        if isinstance(evidence_id, str) and isinstance(quote, str)
+    }
+    findings: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    fragments = re.split(r"(?<=[.!?])\s+|[\r\n]+", model_output)
+    for raw_fragment in fragments:
+        claim = " ".join(raw_fragment.split()).strip()
+        if not claim:
+            continue
+        semantic_claim = re.sub(
+            r"\[EVIDENCE:[^\]]+\]", "", claim, flags=re.IGNORECASE,
+        )
+        cited_ids = {
+            evidence_id.casefold() for evidence_id in re.findall(
+                r"\[EVIDENCE:([^\]\s]+)\]", claim, flags=re.IGNORECASE,
+            )
+            if evidence_id.casefold() in normalized_quotes
+        }
+        for category, patterns in _HIGH_RISK_CLAIM_PATTERNS.items():
+            for pattern in patterns:
+                for match in pattern.finditer(semantic_claim):
+                    if _high_risk_claim_match_is_negated(
+                        semantic_claim, match.start(), match.end(),
+                    ):
+                        continue
+                    claim_terms = _grounding_terms(
+                        semantic_claim[max(0, match.start() - 80):match.end() + 80],
+                    )
+                    supported = False
+                    for evidence_id in cited_ids:
+                        quote = normalized_quotes[evidence_id]
+                        for quote_fragment in _source_sentence_fragments(quote):
+                            quote_terms = _grounding_terms(quote_fragment)
+                            if len(claim_terms & quote_terms) < 2:
+                                continue
+                            if any(
+                                not _high_risk_claim_match_is_negated(
+                                    quote_fragment, quote_match.start(), quote_match.end(),
+                                )
+                                for quote_pattern in patterns
+                                for quote_match in quote_pattern.finditer(quote_fragment)
+                            ):
+                                supported = True
+                                break
+                        if supported:
+                            break
+                    key = (category, claim[:280])
+                    if supported or key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append({
+                        "category": category,
+                        "claim": claim[:280],
+                        "reason": (
+                            "cited_frozen_evidence_does_not_support_claim"
+                            if cited_ids else "valid_frozen_evidence_citation_missing"
+                        ),
+                    })
+                    if len(findings) >= limit:
+                        return findings
     return findings
 
 
@@ -6440,6 +6597,15 @@ class Company:
             for item in (evidence_manifest or {}).get("evidence", [])
             if isinstance(item, dict) and isinstance(item.get("evidence_id"), str)
         }
+        evidence_quotes = {
+            str(item.get("evidence_id")).lower(): str(item.get("quote"))
+            for item in (evidence_manifest or {}).get("evidence", [])
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("evidence_id"), str)
+                and isinstance(item.get("quote"), str)
+            )
+        }
         source_paths = re.findall(r"(?m)^- `([^`]+)`\s*$", report)
         source_documents: list[tuple[str, str]] = []
         if source_paths:
@@ -6712,6 +6878,10 @@ class Company:
             evidence_source_names=evidence_source_names,
         )
         checks["source_limitations_respected"] = not source_conflicts
+        commercial_authority_claims = unsupported_commercial_authority_claims(
+            model_output, evidence_quotes,
+        )
+        checks["commercial_authority_claims_evidence_bound"] = not commercial_authority_claims
         if facts_required and "using" in objective_lower and "imported" in objective_lower:
             positive_claims = []
             for fragment in re.split(r"(?<=[.!?])\s+|[\r\n;]+", model_output):
@@ -6827,6 +6997,7 @@ class Company:
                             "incomplete_specialist_roles": incomplete_specialist_roles,
                             "manifest_reason": manifest_reason,
                             "source_conflicts": source_conflicts,
+                            "commercial_authority_claims": commercial_authority_claims,
                         },
                         sort_keys=True,
                     ),
@@ -6846,6 +7017,8 @@ class Company:
             }
             if source_conflicts:
                 quality_detail["source_conflicts"] = source_conflicts
+            if commercial_authority_claims:
+                quality_detail["commercial_authority_claims"] = commercial_authority_claims
             self._event(
                 db, job_id, "quality_evaluated",
                 json.dumps(quality_detail, sort_keys=True),
@@ -6878,6 +7051,7 @@ class Company:
         return {
             "job_id": job_id, "passed": passed, "score": score, "checks": checks,
             "source_conflicts": source_conflicts, "evaluator_version": EVALUATOR_VERSION,
+            "commercial_authority_claims": commercial_authority_claims,
             "incomplete_specialist_roles": incomplete_specialist_roles,
             "report_sha256": current_report_sha256, "manifest_sha256": job[5],
             "manifest_reason": manifest_reason, "evaluated_at": evaluated_at,

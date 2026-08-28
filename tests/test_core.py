@@ -53,6 +53,7 @@ from local_company.core import (
     sequential_numbered_items,
     source_limitation_conflicts,
     truncate_words,
+    unsupported_commercial_authority_claims,
 )
 from local_company.dashboard import (
     LocalQueueWorker, build_status_snapshot, create_dashboard_server, dashboard_snapshot,
@@ -233,6 +234,17 @@ class ContradictingSourceModel(MockModel):
             "Verified facts: PostHog and Sentry are confirmed ready and connected for scaling client "
             "templates. Assumptions: operator adoption remains unmeasured and requires owner review. "
             "Proposed work stays internal and reversible. Owner review required."
+        )
+
+
+class UnsupportedCommercialClaimModel(MockModel):
+    def complete(self, system, prompt):
+        return (
+            "Verified facts: The following owner approvals have been received. "
+            "The current packet provides concrete proof of the market's demand and SuperMega "
+            "has a strong presence in Myanmar. The Shop pilot has been proven through proof "
+            "baseline. Assumptions: pricing remains unmeasured. Proposed work stays internal "
+            "and reversible. Owner review required."
         )
 
 
@@ -1303,6 +1315,71 @@ class CompanyTests(unittest.TestCase):
             evidence_source_names={"aaaaaaaaaaaaaaaa": "CURRENT.md"},
         )
         self.assertTrue(piggyback)
+
+    def test_high_risk_claims_require_supporting_frozen_evidence(self):
+        evidence_id = "a" * 16
+        supported = unsupported_commercial_authority_claims(
+            "Owner approval for GitHub main protection has been received "
+            f"[EVIDENCE:{evidence_id}].",
+            {
+                evidence_id: (
+                    "Owner approval for GitHub main protection has been received."
+                ),
+            },
+        )
+        self.assertEqual(supported, [])
+
+        negative_boundaries = unsupported_commercial_authority_claims(
+            "No owner approval has been received. Public evidence does not prove market "
+            "demand. Baseline proof is missing. Myanmar market presence is unverified.",
+            {},
+        )
+        self.assertEqual(negative_boundaries, [])
+
+        findings = unsupported_commercial_authority_claims(
+            "The following owner approvals have been received. This provides concrete proof "
+            "of the market's demand. The pilot has been proven through proof baseline. "
+            "SuperMega has a strong presence in Myanmar.",
+            {},
+        )
+        self.assertEqual(
+            {finding["category"] for finding in findings},
+            {"owner_approval", "market_demand", "baseline_proof", "market_presence"},
+        )
+
+    def test_quality_rejects_unsupported_commercial_and_authority_claims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "status.md"
+            source.write_text(
+                "No owner approval has been received. Public evidence does not prove market "
+                "demand. Baseline proof is missing. Myanmar market presence is unverified.",
+                encoding="utf-8",
+            )
+            company = Company(root / "state", UnsupportedCommercialClaimModel())
+            project_id = company.create_project("Commercial grounding")
+            company.add_knowledge(source, project=project_id)
+
+            job_id, _ = company.run(
+                "Assess owner approval, market demand, and Shop baseline readiness using "
+                "imported status evidence.",
+                project=project_id,
+            )
+            evaluation = company.evaluate_job(job_id)
+
+            self.assertFalse(evaluation["passed"])
+            self.assertFalse(
+                evaluation["checks"]["commercial_authority_claims_evidence_bound"],
+            )
+            self.assertEqual(
+                {finding["category"] for finding in evaluation["commercial_authority_claims"]},
+                {"owner_approval", "market_demand", "baseline_proof", "market_presence"},
+            )
+            quality_events = [
+                json.loads(event[1]) for event in company.job_detail(job_id)["events"]
+                if event[0] == "quality_evaluated"
+            ]
+            self.assertTrue(quality_events[-1]["commercial_authority_claims"])
 
     def test_default_local_runtime_releases_idle_model_memory(self):
         with patch.dict(os.environ, {}, clear=True):
