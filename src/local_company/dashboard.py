@@ -9,9 +9,13 @@ import re
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import __version__
+from .agent_api import (
+    MAX_JSON_BYTES, AgentAPI, AgentAPIError, agent_card, decode_json_body,
+)
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
     Company, LOOPBACK_OLLAMA_HOST, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
@@ -427,6 +431,39 @@ class LocalQueueWorker:
     def cancel_shutdown(self) -> None:
         """Release a shutdown reservation when the response could not be accepted."""
         self._run_lock.release()
+
+    def run_exclusive(
+        self, kind: str, target: str, operation: Callable[[], dict[str, object]],
+    ) -> dict[str, object]:
+        """Run one non-model local worker operation under the same global slot."""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("A local agent operation is already running")
+        try:
+            self._set_state(
+                status="running", kind=kind, target=target, started_at=_utc_now(),
+            )
+            result = operation()
+            result_status = str(result.get("status", "unknown"))
+            self._set_state(
+                status=(
+                    "complete"
+                    if result_status in {"complete", "completed", "passed", "ready"}
+                    else "failed"
+                ),
+                kind=kind,
+                target=target,
+                result_status=result_status,
+                finished_at=_utc_now(),
+            )
+            return result
+        except Exception as exc:
+            self._set_state(
+                status="failed", kind=kind, target=target,
+                error=f"{type(exc).__name__}: {exc}"[:500], finished_at=_utc_now(),
+            )
+            raise
+        finally:
+            self._run_lock.release()
 
     def _run(self, claim: QueueClaim) -> None:
         try:
@@ -2759,6 +2796,7 @@ def create_dashboard_server(
     ) is None:
         raise ValueError("Service instance ID must be 32 lowercase hexadecimal characters")
     worker = LocalQueueWorker(company) if service_token else None
+    agent_api = AgentAPI(company, worker)
     build_identity = runtime_build_identity()
     runtime_identity = runtime_model_identity(company)
     company_identity = company.company_identity()
@@ -2787,6 +2825,39 @@ def create_dashboard_server(
             self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_json(self, status: int, payload: dict[str, object]) -> None:
+            body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._send_security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _agent_api_authorized(self) -> bool:
+            if not service_token:
+                return False
+            prefix = "Bearer "
+            authorization = self.headers.get("Authorization", "")
+            return (
+                authorization.startswith(prefix)
+                and hmac.compare_digest(authorization[len(prefix):], service_token)
+            )
+
+        def _read_json(self) -> object:
+            if self.headers.get_content_type() != "application/json":
+                raise AgentAPIError(415, "json_required", "Content-Type application/json is required")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as exc:
+                raise AgentAPIError(400, "invalid_content_length", "Content-Length is invalid") from exc
+            if length < 1 or length > MAX_JSON_BYTES:
+                raise AgentAPIError(413, "invalid_body_size", "JSON body is empty or too large")
+            return decode_json_body(self.rfile.read(length))
+
+        def _agent_api_error(self, error: AgentAPIError) -> None:
+            self._send_json(error.status, error.payload())
 
         def _send_security_headers(self) -> None:
             self.send_header("Cache-Control", "no-store")
@@ -2830,6 +2901,35 @@ def create_dashboard_server(
                 self._reject(421, "Local Host header required")
                 return
             parsed = urlsplit(self.path)
+            if not parsed.query and parsed.path == "/.well-known/local-agent.json":
+                port = self.server.server_address[1]
+                self._send_json(
+                    200, agent_card(f"http://127.0.0.1:{port}/api/v1"),
+                )
+                return
+            if parsed.path.startswith("/api/v1/"):
+                if parsed.query:
+                    self._agent_api_error(AgentAPIError(
+                        400, "query_not_supported", "Agent API query strings are not supported",
+                    ))
+                    return
+                if not self._agent_api_authorized():
+                    self._agent_api_error(AgentAPIError(
+                        401, "authentication_required", "Valid local Bearer token required",
+                    ))
+                    return
+                try:
+                    response = agent_api.get(parsed.path)
+                except AgentAPIError as error:
+                    self._agent_api_error(error)
+                    return
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    self._agent_api_error(AgentAPIError(
+                        409, "agent_api_unavailable", "Agent API state is not currently readable",
+                    ))
+                    return
+                self._send_json(response.status, response.body)
+                return
             if parsed.path == "/":
                 notice = parse_qs(parsed.query, max_num_fields=4).get("notice", [""])[0]
                 body = render_dashboard(
@@ -3057,6 +3157,32 @@ def create_dashboard_server(
                 return
             if not self._valid_local_origin():
                 self._reject(403, "Cross-site mutation refused")
+                return
+            parsed = urlsplit(self.path)
+            if parsed.path.startswith("/api/v1/"):
+                if parsed.query:
+                    self._agent_api_error(AgentAPIError(
+                        400, "query_not_supported", "Agent API query strings are not supported",
+                    ))
+                    return
+                if not self._agent_api_authorized():
+                    self._agent_api_error(AgentAPIError(
+                        401, "authentication_required", "Valid local Bearer token required",
+                    ))
+                    return
+                try:
+                    payload = self._read_json()
+                    response = agent_api.post(parsed.path, payload)
+                except AgentAPIError as error:
+                    self._agent_api_error(error)
+                    return
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    self._agent_api_error(AgentAPIError(
+                        409, "agent_api_operation_failed",
+                        "Agent API operation failed without an accepted result",
+                    ))
+                    return
+                self._send_json(response.status, response.body)
                 return
             if (
                 self.path == "/__service/stop" and service_token

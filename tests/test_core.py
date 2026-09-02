@@ -23,10 +23,16 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from local_company import __version__
+from local_company.agent_api import (
+    AGENT_CARD_SCHEMA, AGENT_CATALOG_SCHEMA, AGENT_COMPUTER_RUN_SCHEMA,
+    AGENT_MISSION_SCHEMA, MISSION_RUN_CONFIRMATION, AgentAPI, AgentAPIError,
+    _unsafe_agent_authority_claims, decode_json_body, main as agent_api_main,
+)
 from local_company.build_info import (
     BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256,
 )
 from local_company.cli import main as cli_main, parser
+from local_company.computer_use import RUN_CONFIRMATION
 from local_company.config import (
     COMPANY_DB_SCHEMA_VERSION, COMPANY_STORE_SCHEMA, default_company_home,
     restrict_file_to_current_user, valid_company_instance_id,
@@ -4606,7 +4612,8 @@ class CompanyTests(unittest.TestCase):
                 "scripts/run_scheduled_cycle.py",
                 "scripts/runtime_guard.py", "scripts/setup_local_ai.py",
                 "scripts/stamp_build_manifest.py",
-                "src/local_company/__init__.py", "src/local_company/cli.py",
+                "src/local_company/__init__.py", "src/local_company/agent_api.py",
+                "src/local_company/cli.py",
                 "src/local_company/browser_operator.py",
                 "src/local_company/capacity.py",
                 "src/local_company/computer_use.py",
@@ -8257,6 +8264,278 @@ class CompanyTests(unittest.TestCase):
             detail = company.job_detail(job_id)
             self.assertTrue(detail["job"][7].endswith("OWNER REVIEW REQUIRED"))
             self.assertTrue(any(event[0] == "objective_constraint_applied" for event in detail["events"]))
+
+
+class AgentAPIServerTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.company = Company(Path(temporary.name) / "company", MockModel())
+        self.company.initialize()
+        self.token = "test-agent-api-token-123456"
+        self.server = create_dashboard_server(
+            self.company, 0, service_token=self.token,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop_server)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def _stop_server(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+
+    def request(self, method, path, payload=None, *, token=None, raw=None):
+        data = raw
+        headers = {"Accept": "application/json"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            self.base + path, data=data, headers=headers, method=method,
+        )
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read().decode("utf-8"))
+            finally:
+                error.close()
+
+    def test_agent_api_card_is_public_but_catalog_requires_private_token(self):
+        status, card = self.request("GET", "/.well-known/local-agent.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(card["schema"], AGENT_CARD_SCHEMA)
+        self.assertEqual(card["compatibility"]["a2a"], "not_claimed")
+        self.assertEqual(card["limits"]["physicalConcurrentExecutions"], 1)
+        self.assertFalse(card["capabilities"]["externalActions"])
+
+        status, denied = self.request("GET", "/api/v1/catalog")
+        self.assertEqual(status, 401)
+        self.assertEqual(denied["error"], "authentication_required")
+
+        status, catalog = self.request("GET", "/api/v1/catalog", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(catalog["schema"], AGENT_CATALOG_SCHEMA)
+        self.assertGreaterEqual(len(catalog["profiles"]), 11)
+        self.assertEqual(catalog["runtime"]["physicalConcurrentExecutions"], 1)
+        self.assertIn("product-build", {item["id"] for item in catalog["profiles"]})
+        self.assertIn("research", {item["id"] for item in catalog["roles"]})
+
+    def test_agent_api_submit_start_and_read_result_over_http(self):
+        status, accepted = self.request(
+            "POST", "/api/v1/missions",
+            {
+                "profile": "decision-brief",
+                "objective": "Compare two local-only agent architectures and state uncertainties.",
+                "priority": 70,
+                "start": False,
+            },
+            token=self.token,
+        )
+        self.assertEqual(status, 202)
+        mission_id = accepted["missionId"]
+        self.assertTrue(accepted["queued"])
+        self.assertFalse(accepted["started"])
+
+        status, mission = self.request(
+            "GET", f"/api/v1/missions/{mission_id}", token=self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(mission["schema"], AGENT_MISSION_SCHEMA)
+        self.assertEqual(mission["profile"], "decision-brief")
+        self.assertEqual(mission["status"], "queued")
+
+        status, listing = self.request("GET", "/api/v1/missions", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(listing["returnedCount"], 1)
+        self.assertNotIn("result", listing["missions"][0])
+
+        status, refused = self.request(
+            "POST", f"/api/v1/missions/{mission_id}/run",
+            {"confirmation": "wrong"}, token=self.token,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(refused["error"], "run_confirmation_required")
+
+        status, running = self.request(
+            "POST", f"/api/v1/missions/{mission_id}/run",
+            {"confirmation": MISSION_RUN_CONFIRMATION}, token=self.token,
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(running["status"], "running")
+
+        deadline = time.monotonic() + 10
+        while True:
+            status, mission = self.request(
+                "GET", f"/api/v1/missions/{mission_id}", token=self.token,
+            )
+            if mission.get("terminal") is True or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        self.assertEqual(status, 200)
+        self.assertTrue(mission["terminal"])
+        self.assertIn(mission["status"], {"complete", "quality_failed"})
+        self.assertIsInstance(mission["jobId"], str)
+        self.assertTrue(mission["resultAvailable"])
+        self.assertTrue(mission["resultUsable"])
+        self.assertTrue(mission["result"]["safety"]["passed"])
+        self.assertEqual(mission["result"]["safety"]["alerts"], [])
+        self.assertFalse(mission["result"]["safety"]["modelCalled"])
+        self.assertIsInstance(mission["result"]["reportSha256"], str)
+
+    def test_agent_api_flags_claimed_sensitive_authority_without_model_review(self):
+        alerts = _unsafe_agent_authority_claims(
+            "I can initiate transactions and perform system access-related actions."
+        )
+        self.assertEqual(alerts, ["claimed_sensitive_action_authority_1"])
+        self.assertEqual(
+            _unsafe_agent_authority_claims(
+                "I cannot initiate transactions or perform system access actions."
+            ),
+            [],
+        )
+
+    def test_agent_api_sensitive_and_malformed_requests_fail_before_queueing(self):
+        status, blocked = self.request(
+            "POST", "/api/v1/missions",
+            {
+                "profile": "auto",
+                "objective": "Deploy this service to production now.",
+                "start": False,
+            },
+            token=self.token,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(blocked["error"], "mission_preflight_blocked")
+        self.assertEqual(self.company.queue_items(), [])
+
+        status, malformed = self.request(
+            "POST", "/api/v1/missions", token=self.token,
+            raw=b'{"objective":"one","objective":"two"}',
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(malformed["error"], "malformed_json")
+        self.assertEqual(self.company.queue_items(), [])
+
+    def test_agent_api_computer_workflow_list_does_not_run_ui(self):
+        status, result = self.request(
+            "GET", "/api/v1/computer-workflows", token=self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["schema"], "local-company.computer-workflow-list.v1")
+        self.assertEqual(result["physicalConcurrentExecutions"], 1)
+        self.assertFalse(result["networkAppsAllowedByApi"])
+        self.assertFalse(result["shellsAllowedByApi"])
+
+
+class AgentAPIComputerRunTests(unittest.TestCase):
+    def test_agent_launcher_up_reuses_live_service(self):
+        status = {"status": "running", "live": True, "pid": 123}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.service.service_status", return_value=status,
+        ), patch("local_company.service.start_service") as start, patch(
+            "sys.stdout", new_callable=io.StringIO,
+        ) as output:
+            code = agent_api_main(["--home", tmp, "up"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), status)
+        start.assert_not_called()
+
+    def test_agent_launcher_up_starts_scale_to_zero_service(self):
+        started = {"status": "running", "live": True, "pid": 456}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.service.service_status",
+            return_value={"status": "stopped", "live": False},
+        ), patch(
+            "local_company.service.start_service", return_value=started,
+        ) as start, patch("sys.stdout", new_callable=io.StringIO):
+            code = agent_api_main([
+                "--home", tmp, "up", "--port", "8877", "--num-predict", "640",
+            ])
+        self.assertEqual(code, 0)
+        start.assert_called_once_with(
+            Path(tmp).resolve(), 8877, "ollama", "llama3.2:1b", 4096, 640, "0s",
+        )
+
+    def test_agent_api_computer_run_shares_slot_and_stays_supervised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp) / "company", MockModel())
+            company.initialize()
+            worker = LocalQueueWorker(company)
+            api = AgentAPI(company, worker)
+            preview = {
+                "schema": "local-company.computer-workflow-preview.v1",
+                "status": "ready", "requiredSecretInputs": [], "blockers": [],
+            }
+            receipt = {
+                "schema": "local-company.computer-workflow-run.v1",
+                "status": "completed", "outcomeVerified": True,
+            }
+            with patch(
+                "local_company.agent_api.preview_workflow", return_value=preview,
+            ), patch(
+                "local_company.agent_api.run_workflow", return_value=receipt,
+            ) as run:
+                response = api.run_computer_workflow("safe-demo", {
+                    "confirmation": RUN_CONFIRMATION, "captureEvidence": True,
+                })
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.body["schema"], AGENT_COMPUTER_RUN_SCHEMA)
+            self.assertEqual(response.body["status"], "completed")
+            self.assertEqual(worker.snapshot()["status"], "complete")
+            self.assertFalse(response.body["networkAppsAllowed"])
+            self.assertFalse(response.body["shellsAllowed"])
+            self.assertFalse(run.call_args.kwargs["allow_network_apps"])
+            self.assertFalse(run.call_args.kwargs["allow_shells"])
+
+    def test_agent_api_computer_refuses_private_interactive_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp) / "company", MockModel())
+            company.initialize()
+            api = AgentAPI(company, LocalQueueWorker(company))
+            with patch("local_company.agent_api.preview_workflow", return_value={
+                "status": "ready", "requiredSecretInputs": ["password"], "blockers": [],
+            }):
+                with self.assertRaisesRegex(AgentAPIError, "local terminal"):
+                    api.run_computer_workflow("private-demo", {
+                        "confirmation": RUN_CONFIRMATION,
+                    })
+
+    def test_agent_api_json_decoder_rejects_non_finite_numbers(self):
+        with self.assertRaisesRegex(AgentAPIError, "strict JSON"):
+            decode_json_body(b'{"priority":NaN}')
+
+    def test_agent_api_computer_and_model_work_share_one_execution_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp) / "company", MockModel())
+            company.initialize()
+            worker = LocalQueueWorker(company)
+            operation_started = threading.Event()
+            release_operation = threading.Event()
+
+            def operation():
+                operation_started.set()
+                self.assertTrue(release_operation.wait(timeout=3))
+                return {"status": "completed"}
+
+            thread = threading.Thread(
+                target=lambda: worker.run_exclusive("computer-use", "demo", operation),
+            )
+            thread.start()
+            self.assertTrue(operation_started.wait(timeout=3))
+            self.assertFalse(worker.reserve_shutdown())
+            release_operation.set()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(worker.reserve_shutdown())
+            worker.cancel_shutdown()
 
 
 if __name__ == "__main__":
