@@ -73,6 +73,7 @@ def create_opportunity(
     machine_checkable_outcome: bool = True,
     external_effect_risk: str = "none",
     credentials_required: bool = False,
+    setup_price: float = 500,
 ) -> dict[str, object]:
     return create_workflow_opportunity(
         home,
@@ -92,7 +93,7 @@ def create_opportunity(
         environment=environment,
         external_effect_risk=external_effect_risk,
         credentials_required=credentials_required,
-        setup_price=500,
+        setup_price=setup_price,
         monthly_support_price=50,
         delivery_hours=10,
         delivery_cost_per_hour=20,
@@ -101,11 +102,19 @@ def create_opportunity(
     )
 
 
-def passing_pilot(workflow: dict[str, object], *, total_minutes: float = 30) -> dict[str, object]:
+def passing_pilot(
+    workflow: dict[str, object],
+    *,
+    total_minutes: float = 30,
+    net_minutes: float = 195.5,
+) -> dict[str, object]:
+    value_gate = net_minutes > 0
     return {
-        "status": "passed",
+        "status": "passed" if value_gate else "collecting",
         "workflowSha256": workflow["workflowSha256"],
-        "promotionGatePassed": True,
+        "reliabilityGatePassed": True,
+        "valueGatePassed": value_gate,
+        "promotionGatePassed": value_gate,
         "consecutivePassingRuns": 20,
         "requiredConsecutivePassingRuns": 20,
         "baseline": {
@@ -116,8 +125,17 @@ def passing_pilot(workflow: dict[str, object], *, total_minutes: float = 30) -> 
             "observedErrorCostTotal": 30,
         },
         "outcome": {"label": "Invoice status is Completed locally"},
-        "metrics": {"verifiedNetMinutesSaved": 195.5},
-        "nextAction": "package_owner_review_offer_from_verified_pilot",
+        "metrics": {
+            "verifiedNetMinutesSaved": net_minutes,
+            "verifiedPromotionWindowRunCount": 20,
+            "verifiedPromotionWindowNetMinutesSaved": net_minutes,
+            "meanVerifiedNetMinutesSavedPerRun": net_minutes / 20,
+        },
+        "nextAction": (
+            "package_owner_review_offer_from_verified_pilot"
+            if value_gate
+            else "redesign_or_reject_nonpositive_savings_workflow"
+        ),
         "nextCommand": "local-ai.cmd automate pilot-status invoice-entry",
     }
 
@@ -153,7 +171,9 @@ class WorkflowValueTests(unittest.TestCase):
             home = Path(directory)
             workflow = workflow_payload()
             store_workflow(home, workflow)
-            opportunity_id = str(create_opportunity(home)["opportunityId"])
+            opportunity_id = str(create_opportunity(
+                home, setup_price=300,
+            )["opportunityId"])
             bind_workflow_opportunity(home, opportunity_id, "invoice-entry")
 
             with patch(
@@ -165,6 +185,13 @@ class WorkflowValueTests(unittest.TestCase):
             self.assertTrue(status["pilotOpportunityEvidenceMatch"])
             self.assertTrue(status["pilotQualified"])
             self.assertTrue(status["offerCandidate"])
+            self.assertTrue(status["measuredEconomics"]["qualified"])
+            self.assertEqual(
+                status["measuredEconomics"]["monthlyMeasuredErrorValue"], 0,
+            )
+            self.assertFalse(
+                status["measuredEconomics"]["measuredErrorValueIncluded"],
+            )
             self.assertFalse(status["customerQuoteAuthorized"])
             self.assertFalse(status["paidDemandProven"])
 
@@ -178,6 +205,71 @@ class WorkflowValueTests(unittest.TestCase):
             self.assertEqual(
                 mismatch["nextAction"],
                 "review_pilot_opportunity_evidence_mismatch",
+            )
+
+    def test_nonpositive_missing_or_unviable_measured_value_never_offers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            workflow = workflow_payload()
+            store_workflow(home, workflow)
+            opportunity_id = str(create_opportunity(home)["opportunityId"])
+            bind_workflow_opportunity(home, opportunity_id, "invoice-entry")
+
+            for net_minutes in (0, -1):
+                with self.subTest(net_minutes=net_minutes), patch(
+                    "local_company.workflow_value.workflow_pilot_status",
+                    return_value=passing_pilot(
+                        workflow, net_minutes=net_minutes,
+                    ),
+                ):
+                    status = workflow_value_status(home, opportunity_id)
+                self.assertFalse(status["pilotQualified"])
+                self.assertFalse(status["offerCandidate"])
+                self.assertFalse(status["pilotEvidence"]["valueGatePassed"])
+                self.assertFalse(status["measuredEconomics"]["qualified"])
+                self.assertEqual(
+                    status["nextAction"],
+                    "redesign_or_reject_nonpositive_savings_workflow",
+                )
+
+            missing = passing_pilot(workflow)
+            missing["metrics"].pop("meanVerifiedNetMinutesSavedPerRun")
+            with patch(
+                "local_company.workflow_value.workflow_pilot_status",
+                return_value=missing,
+            ):
+                status = workflow_value_status(home, opportunity_id)
+            self.assertIsNone(status["measuredEconomics"])
+            self.assertFalse(status["pilotQualified"])
+            self.assertFalse(status["offerCandidate"])
+            self.assertEqual(
+                status["nextAction"],
+                "inspect_incomplete_measured_value_evidence",
+            )
+
+            nonfinite = passing_pilot(workflow)
+            nonfinite["metrics"]["verifiedPromotionWindowNetMinutesSaved"] = float("nan")
+            nonfinite["metrics"]["meanVerifiedNetMinutesSavedPerRun"] = float("nan")
+            with patch(
+                "local_company.workflow_value.workflow_pilot_status",
+                return_value=nonfinite,
+            ):
+                status = workflow_value_status(home, opportunity_id)
+            self.assertIsNone(status["measuredEconomics"])
+            self.assertFalse(status["pilotQualified"])
+            self.assertFalse(status["offerCandidate"])
+
+            with patch(
+                "local_company.workflow_value.workflow_pilot_status",
+                return_value=passing_pilot(workflow),
+            ):
+                unviable = workflow_value_status(home, opportunity_id)
+            self.assertTrue(unviable["pilotQualified"])
+            self.assertFalse(unviable["measuredEconomics"]["qualified"])
+            self.assertFalse(unviable["offerCandidate"])
+            self.assertEqual(
+                unviable["nextAction"],
+                "repair_measured_value_or_pricing_gates",
             )
 
     def test_unsafe_or_unverifiable_work_never_qualifies(self) -> None:
@@ -204,7 +296,9 @@ class WorkflowValueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             workflow_path = store_workflow(home, workflow_payload())
-            opportunity_id = str(create_opportunity(home)["opportunityId"])
+            opportunity_id = str(create_opportunity(
+                home, setup_price=300,
+            )["opportunityId"])
             bind_workflow_opportunity(home, opportunity_id, "invoice-entry")
 
             pilot_path = workflow_path.parent / "pilot" / "pilot.json"
@@ -253,7 +347,9 @@ class WorkflowValueTests(unittest.TestCase):
             home = Path(directory)
             workflow = workflow_payload()
             store_workflow(home, workflow)
-            opportunity_id = str(create_opportunity(home)["opportunityId"])
+            opportunity_id = str(create_opportunity(
+                home, setup_price=300,
+            )["opportunityId"])
             bind_workflow_opportunity(home, opportunity_id, "invoice-entry")
             with patch(
                 "local_company.workflow_value.workflow_pilot_status",
@@ -264,8 +360,10 @@ class WorkflowValueTests(unittest.TestCase):
             receipt_path = Path(str(pack["receiptPath"]))
             brief = brief_path.read_text(encoding="utf-8")
             self.assertIn("not a market quote", brief)
-            self.assertIn("Setup price: 500.0 USD", brief)
+            self.assertIn("Setup price: 300.0 USD", brief)
             self.assertIn("Monthly support price: 50.0 USD", brief)
+            self.assertIn("Measured economics qualified: `true`", brief)
+            self.assertIn("Measured error value included: `false`", brief)
             self.assertIn("Paid demand proven: `false`", brief)
             self.assertIn("Customer quote authorized: `false`", brief)
             self.assertNotIn(str(home), brief)

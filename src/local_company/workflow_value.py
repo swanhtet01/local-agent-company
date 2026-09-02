@@ -355,6 +355,127 @@ def _economics(opportunity: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _measured_economics(
+    opportunity: dict[str, object],
+    pilot: dict[str, object],
+) -> dict[str, object] | None:
+    metrics = pilot.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    run_count = metrics.get("verifiedPromotionWindowRunCount")
+    net_minutes = metrics.get("verifiedPromotionWindowNetMinutesSaved")
+    mean_net_minutes = metrics.get("meanVerifiedNetMinutesSavedPerRun")
+    required_runs = pilot.get("requiredConsecutivePassingRuns")
+    if (
+        type(run_count) is not int
+        or run_count <= 0
+        or type(required_runs) is not int
+        or required_runs <= 0
+        or run_count != required_runs
+        or isinstance(net_minutes, bool)
+        or not isinstance(net_minutes, (int, float))
+        or not math.isfinite(float(net_minutes))
+        or isinstance(mean_net_minutes, bool)
+        or not isinstance(mean_net_minutes, (int, float))
+        or not math.isfinite(float(mean_net_minutes))
+        or not math.isclose(
+            float(mean_net_minutes) * run_count,
+            float(net_minutes),
+            rel_tol=1e-6,
+            abs_tol=0.01,
+        )
+    ):
+        return None
+
+    baseline = opportunity["baseline"]
+    mean_baseline_minutes = (
+        float(baseline["observedHumanMinutesTotal"])
+        / int(baseline["observedRuns"])
+    )
+    if float(mean_net_minutes) > mean_baseline_minutes:
+        return None
+    scenario = opportunity["pricingScenario"]
+    policy = opportunity["decisionPolicy"]
+    monthly_runs = float(baseline["runsPerWeek"]) * WEEKS_PER_MONTH
+    measured_labor_value_month = (
+        float(mean_net_minutes) * monthly_runs / 60
+        * float(baseline["operatorValuePerHour"])
+    )
+    support_price = float(scenario["monthlySupportPrice"])
+    setup_price = float(scenario["setupPrice"])
+    customer_monthly_value_after_support = measured_labor_value_month - support_price
+    payback_months = (
+        setup_price / customer_monthly_value_after_support
+        if customer_monthly_value_after_support > 0 else None
+    )
+    customer_first_year_net = (
+        measured_labor_value_month * 12 - setup_price - support_price * 12
+    )
+    setup_delivery_cost = (
+        float(scenario["deliveryHours"]) * float(scenario["deliveryCostPerHour"])
+    )
+    annual_support_cost = (
+        float(scenario["monthlySupportHours"])
+        * float(scenario["deliveryCostPerHour"]) * 12
+    )
+    first_year_revenue = setup_price + support_price * 12
+    first_year_cost = setup_delivery_cost + annual_support_cost
+    first_year_gross_profit = first_year_revenue - first_year_cost
+    gross_margin_percent = (
+        first_year_gross_profit / first_year_revenue * 100
+        if first_year_revenue > 0 else None
+    )
+    gates = {
+        "reliabilityGatePassed": pilot.get("reliabilityGatePassed") is True,
+        "valueGatePassed": pilot.get("valueGatePassed") is True,
+        "positiveVerifiedPromotionWindowSavings": float(net_minutes) > 0,
+        "positiveMeanVerifiedSavingsPerRun": float(mean_net_minutes) > 0,
+        "positiveCustomerFirstYearNetValue": customer_first_year_net > 0,
+        "customerPaybackWithinPolicy": (
+            payback_months is not None
+            and payback_months <= float(policy["maximumCustomerPaybackMonths"])
+        ),
+        "positiveSuperMegaFirstYearGrossProfit": first_year_gross_profit > 0,
+        "superMegaGrossMarginAtOrAbovePolicy": (
+            gross_margin_percent is not None
+            and gross_margin_percent
+            >= float(policy["minimumSuperMegaGrossMarginPercent"])
+        ),
+    }
+    return {
+        "currency": opportunity["currency"],
+        "promotionWindowRuns": run_count,
+        "verifiedPromotionWindowNetMinutesSaved": round(float(net_minutes), 4),
+        "meanVerifiedNetMinutesSavedPerRun": round(float(mean_net_minutes), 4),
+        "monthlyRuns": round(monthly_runs, 4),
+        "monthlyMeasuredLaborCapacityValue": round(measured_labor_value_month, 2),
+        "monthlyMeasuredErrorValue": 0.0,
+        "measuredErrorValueIncluded": False,
+        "monthlyGrossWorkflowValue": round(measured_labor_value_month, 2),
+        "setupPrice": round(setup_price, 2),
+        "monthlySupportPrice": round(support_price, 2),
+        "customerMonthlyValueAfterSupport": round(customer_monthly_value_after_support, 2),
+        "customerPaybackMonths": round(payback_months, 2) if payback_months is not None else None,
+        "customerFirstYearNetValue": round(customer_first_year_net, 2),
+        "superMegaFirstYearRevenue": round(first_year_revenue, 2),
+        "superMegaFirstYearDeliveryCost": round(first_year_cost, 2),
+        "superMegaFirstYearGrossProfit": round(first_year_gross_profit, 2),
+        "superMegaFirstYearGrossMarginPercent": (
+            round(gross_margin_percent, 2) if gross_margin_percent is not None else None
+        ),
+        "mutualFirstYearNetValue": round(
+            customer_first_year_net + first_year_gross_profit, 2,
+        ),
+        "gates": gates,
+        "qualified": all(gates.values()),
+        "pricingBasis": (
+            "verified_trailing_promotion_window_time_savings_"
+            "with_owner_supplied_prices"
+        ),
+        "demandProven": False,
+    }
+
+
 def create_workflow_opportunity(
     company_home: Path,
     name: str,
@@ -535,6 +656,7 @@ def workflow_value_status(company_home: Path, opportunity_id: str) -> dict[str, 
     pilot_status = "not_started"
     pilot_evidence_match = False
     pilot_qualified = False
+    measured_economics: dict[str, object] | None = None
     if binding is not None:
         if (
             binding["opportunitySha256"] != opportunity["opportunitySha256"]
@@ -590,13 +712,34 @@ def workflow_value_status(company_home: Path, opportunity_id: str) -> dict[str, 
                             and pilot_outcome.get("label")
                             == opportunity["technical"]["outcomeLabel"]
                         )
+                        if pilot_evidence_match:
+                            measured_economics = _measured_economics(
+                                opportunity, pilot,
+                            )
+                        metrics = pilot.get("metrics")
+                        verified_window_savings = (
+                            metrics.get("verifiedPromotionWindowNetMinutesSaved")
+                            if isinstance(metrics, dict) else None
+                        )
                         pilot_qualified = (
                             pilot_status == "passed"
+                            and pilot.get("reliabilityGatePassed") is True
+                            and pilot.get("valueGatePassed") is True
                             and pilot.get("promotionGatePassed") is True
                             and pilot.get("workflowSha256") == binding["workflowSha256"]
                             and pilot_evidence_match
+                            and isinstance(verified_window_savings, (int, float))
+                            and not isinstance(verified_window_savings, bool)
+                            and math.isfinite(float(verified_window_savings))
+                            and float(verified_window_savings) > 0
+                            and measured_economics is not None
                         )
-    offer_candidate = economics["scenarioQualified"] is True and pilot_qualified
+    offer_candidate = (
+        economics["scenarioQualified"] is True
+        and pilot_qualified
+        and measured_economics is not None
+        and measured_economics["qualified"] is True
+    )
     if economics["scenarioQualified"] is not True:
         next_action = "repair_value_or_safety_gates"
         next_command = f"local-ai.cmd value status {opportunity_id}"
@@ -614,6 +757,39 @@ def workflow_value_status(company_home: Path, opportunity_id: str) -> dict[str, 
         next_command = f"local-ai.cmd value status {opportunity_id}"
     elif pilot_status == "passed" and not pilot_evidence_match:
         next_action = "review_pilot_opportunity_evidence_mismatch"
+        next_command = f"local-ai.cmd value status {opportunity_id}"
+    elif (
+        pilot_evidence_match
+        and pilot is not None
+        and pilot.get("reliabilityGatePassed") is True
+        and pilot.get("valueGatePassed") is not True
+    ):
+        next_action = str(
+            pilot.get(
+                "nextAction",
+                "redesign_or_reject_nonpositive_savings_workflow",
+            )
+        )
+        next_command = str(
+            pilot.get(
+                "nextCommand",
+                f"local-ai.cmd automate pilot-status {binding['workflow']}",
+            )
+        )
+    elif (
+        pilot_evidence_match
+        and pilot is not None
+        and pilot.get("reliabilityGatePassed") is True
+        and measured_economics is None
+    ):
+        next_action = "inspect_incomplete_measured_value_evidence"
+        next_command = f"local-ai.cmd value status {opportunity_id}"
+    elif (
+        pilot_evidence_match
+        and measured_economics is not None
+        and measured_economics["qualified"] is not True
+    ):
+        next_action = "repair_measured_value_or_pricing_gates"
         next_command = f"local-ai.cmd value status {opportunity_id}"
     elif not pilot_qualified:
         next_action = str(pilot.get("nextAction", "continue_measured_workflow_pilot"))
@@ -637,6 +813,7 @@ def workflow_value_status(company_home: Path, opportunity_id: str) -> dict[str, 
         "createdAt": opportunity["createdAt"],
         "opportunitySha256": opportunity["opportunitySha256"],
         "economics": economics,
+        "measuredEconomics": measured_economics,
         "bindingStatus": binding_status,
         "workflow": binding.get("workflow") if binding else None,
         "workflowSha256": binding.get("workflowSha256") if binding else None,
@@ -645,12 +822,34 @@ def workflow_value_status(company_home: Path, opportunity_id: str) -> dict[str, 
         "pilotQualified": pilot_qualified,
         "pilotEvidence": {
             "promotionGatePassed": pilot.get("promotionGatePassed") if pilot else False,
+            "reliabilityGatePassed": (
+                pilot.get("reliabilityGatePassed") if pilot else False
+            ),
+            "valueGatePassed": pilot.get("valueGatePassed") if pilot else False,
             "consecutivePassingRuns": pilot.get("consecutivePassingRuns") if pilot else 0,
             "requiredConsecutivePassingRuns": (
                 pilot.get("requiredConsecutivePassingRuns") if pilot else 20
             ),
             "verifiedNetMinutesSaved": (
                 pilot.get("metrics", {}).get("verifiedNetMinutesSaved")
+                if pilot and isinstance(pilot.get("metrics"), dict) else None
+            ),
+            "verifiedPromotionWindowNetMinutesSaved": (
+                pilot.get("metrics", {}).get(
+                    "verifiedPromotionWindowNetMinutesSaved",
+                )
+                if pilot and isinstance(pilot.get("metrics"), dict) else None
+            ),
+            "verifiedPromotionWindowRunCount": (
+                pilot.get("metrics", {}).get(
+                    "verifiedPromotionWindowRunCount",
+                )
+                if pilot and isinstance(pilot.get("metrics"), dict) else 0
+            ),
+            "meanVerifiedNetMinutesSavedPerRun": (
+                pilot.get("metrics", {}).get(
+                    "meanVerifiedNetMinutesSavedPerRun",
+                )
                 if pilot and isinstance(pilot.get("metrics"), dict) else None
             ),
         },
@@ -781,6 +980,7 @@ def next_workflow_opportunity(
 
 def _pack_markdown(status: dict[str, object]) -> str:
     economics = status["economics"]
+    measured = status["measuredEconomics"]
     project = _markdown_text(status["project"])
     task = _markdown_text(status["task"])
     application = _markdown_text(status["application"])
@@ -797,9 +997,34 @@ def _pack_markdown(status: dict[str, object]) -> str:
         f"- Consecutive accepted runs: "
         f"{status['pilotEvidence']['consecutivePassingRuns']}/"
         f"{status['pilotEvidence']['requiredConsecutivePassingRuns']}\n"
-        f"- Verified net minutes saved in pilot: "
-        f"{status['pilotEvidence']['verifiedNetMinutesSaved']}"
+        f"- Reliability gate passed: "
+        f"`{str(status['pilotEvidence']['reliabilityGatePassed']).lower()}`\n"
+        f"- Positive-value gate passed: "
+        f"`{str(status['pilotEvidence']['valueGatePassed']).lower()}`\n"
+        f"- Verified trailing-window net minutes saved: "
+        f"{status['pilotEvidence']['verifiedPromotionWindowNetMinutesSaved']}\n"
+        f"- Mean verified net minutes saved per run: "
+        f"{status['pilotEvidence']['meanVerifiedNetMinutesSavedPerRun']}"
     )
+    if isinstance(measured, dict):
+        measured_failed_gates = [
+            key for key, passed in measured["gates"].items() if passed is not True
+        ]
+        measured_lines = f"""- Basis: `{measured['pricingBasis']}`
+- Promotion window: {measured['promotionWindowRuns']} runs
+- Monthly measured labor-capacity value: {measured['monthlyMeasuredLaborCapacityValue']} {measured['currency']}
+- Measured error value included: `false`
+- Customer first-year net value: {measured['customerFirstYearNetValue']} {measured['currency']}
+- Customer payback: {measured['customerPaybackMonths']} months
+- SuperMega first-year gross profit: {measured['superMegaFirstYearGrossProfit']} {measured['currency']}
+- SuperMega gross margin: {measured['superMegaFirstYearGrossMarginPercent']}%
+- Measured economics qualified: `{str(measured['qualified']).lower()}`
+- Failed measured gates: {', '.join(measured_failed_gates) if measured_failed_gates else 'none'}"""
+    else:
+        measured_lines = (
+            "Measured economics are unavailable until a matching, complete "
+            "trailing reliability window exists."
+        )
     return f"""# Owner-review workflow business case
 
 Status: **{status['status']}**
@@ -838,6 +1063,10 @@ Failed gates: {', '.join(failed_gates) if failed_gates else 'none'}
 ## Technical and measured evidence
 
 {evidence_lines}
+
+## Measured economics
+
+{measured_lines}
 
 ## Commercial boundary
 

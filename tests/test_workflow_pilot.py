@@ -118,13 +118,18 @@ def run_once(home: Path) -> dict[str, object]:
     )
 
 
-def review_correct(home: Path, run_id: str) -> dict[str, object]:
+def review_correct(
+    home: Path,
+    run_id: str,
+    *,
+    correction_minutes: float = 0,
+) -> dict[str, object]:
     return review_workflow_pilot_run(
         home,
         "invoice-entry",
         run_id,
         observed_outcome="correct",
-        correction_minutes=0,
+        correction_minutes=correction_minutes,
         wrong_target_actions=0,
         external_effect_observed=False,
         confirmation=REVIEW_CONFIRMATION,
@@ -204,11 +209,98 @@ class WorkflowPilotTests(unittest.TestCase):
             self.assertEqual(status["reviewedRuns"], 20)
             self.assertEqual(status["acceptedRuns"], 20)
             self.assertEqual(status["consecutivePassingRuns"], 20)
+            self.assertTrue(status["reliabilityGatePassed"])
+            self.assertTrue(status["valueGatePassed"])
             self.assertTrue(status["promotionGatePassed"])
             self.assertEqual(status["commercialEvidenceStatus"], "qualified")
             self.assertGreater(status["metrics"]["verifiedNetMinutesSaved"], 99)
+            self.assertEqual(
+                status["metrics"]["verifiedPromotionWindowRunCount"], 20,
+            )
+            self.assertGreater(
+                status["metrics"]["verifiedPromotionWindowNetMinutesSaved"], 99,
+            )
+            self.assertGreater(
+                status["metrics"]["meanVerifiedNetMinutesSavedPerRun"], 4,
+            )
             self.assertNotIn(str(home), serialized)
             self.assertNotIn("receiptPath", serialized)
+
+    def test_twenty_correct_runs_require_positive_measured_savings(self) -> None:
+        scenarios = (
+            ("zero", True),
+            ("negative", False),
+        )
+        for label, exact_zero in scenarios:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                store_workflow(home, workflow_payload())
+                start_pilot(home)
+                for _index in range(20):
+                    run = run_once(home)
+                    wall_minutes = float(run["wallSeconds"]) / 60
+                    correction = 5 - wall_minutes if exact_zero else 6
+                    review_correct(
+                        home,
+                        str(run["runId"]),
+                        correction_minutes=correction,
+                    )
+
+                status = workflow_pilot_status(home, "invoice-entry")
+                self.assertTrue(status["reliabilityGatePassed"])
+                self.assertFalse(status["valueGatePassed"])
+                self.assertFalse(status["promotionGatePassed"])
+                self.assertEqual(status["commercialEvidenceStatus"], "not_yet_proven")
+                self.assertEqual(
+                    status["qualificationFailureReason"],
+                    "non_positive_or_incomplete_verified_savings",
+                )
+                measured = status["metrics"]["verifiedPromotionWindowNetMinutesSaved"]
+                if exact_zero:
+                    self.assertEqual(measured, 0)
+                else:
+                    self.assertLess(measured, 0)
+                self.assertEqual(
+                    status["nextAction"],
+                    "redesign_or_reject_nonpositive_savings_workflow",
+                )
+
+    def test_only_the_trailing_twenty_accepted_runs_form_the_value_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            store_workflow(home, workflow_payload())
+            start_pilot(home)
+
+            first = run_once(home)
+            review_workflow_pilot_run(
+                home,
+                "invoice-entry",
+                str(first["runId"]),
+                observed_outcome="incorrect",
+                correction_minutes=0,
+                wrong_target_actions=1,
+                external_effect_observed=False,
+                confirmation=REVIEW_CONFIRMATION,
+            )
+            for _index in range(19):
+                run = run_once(home)
+                review_correct(home, str(run["runId"]))
+
+            incomplete = workflow_pilot_status(home, "invoice-entry")
+            self.assertEqual(incomplete["consecutivePassingRuns"], 19)
+            self.assertFalse(incomplete["reliabilityGatePassed"])
+            self.assertEqual(
+                incomplete["metrics"]["verifiedPromotionWindowRunCount"], 0,
+            )
+
+            final_run = run_once(home)
+            review_correct(home, str(final_run["runId"]))
+            qualified = workflow_pilot_status(home, "invoice-entry")
+            self.assertEqual(qualified["consecutivePassingRuns"], 20)
+            self.assertTrue(qualified["reliabilityGatePassed"])
+            self.assertEqual(
+                qualified["metrics"]["verifiedPromotionWindowRunCount"], 20,
+            )
 
     def test_human_rejection_breaks_the_streak_and_reviews_are_append_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
