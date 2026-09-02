@@ -90,6 +90,12 @@ Use one command for local coding, business teams, research, planning, and queued
   local-ai.cmd automate pilot-status NAME     Inspect measured acceptance and value
   local-ai.cmd automate pilot-review NAME RUN_ID ...
                                               Bind a human outcome review to one run
+  local-ai.cmd value add                       Guided local value and pricing scorecard
+  local-ai.cmd value add NAME ...              Scriptable version; use --help for fields
+  local-ai.cmd value next [--project NAME]     Rank the next mutual-profit workflow
+  local-ai.cmd value bind ID WORKFLOW          Bind value to sealed automation evidence
+  local-ai.cmd value status ID                 Inspect economics plus the 20-run gate
+  local-ai.cmd value pack ID                   Write an owner-review business case locally
   local-ai.cmd web doctor                     Check the local browser runtime
   local-ai.cmd web install                    Install the pinned local browser CLI
   local-ai.cmd web URL [--expect-text TEXT]   Audit a website and save evidence
@@ -151,6 +157,7 @@ Examples:
   local-ai.cmd supermega park-next
   local-ai.cmd supermega mission-candidate
   local-ai.cmd supermega mission-review
+  local-ai.cmd supermega value
   local-ai.cmd supermega plan "Choose one verified internal next action"
   local-ai.cmd supermega later "Draft one evidence-grounded release gap brief"
   local-ai.cmd supermega code --check
@@ -172,6 +179,7 @@ Examples:
   local-ai.cmd automate windows --limit 10
   local-ai.cmd automate learn invoice-entry --seconds 60
   local-ai.cmd automate preview invoice-entry
+  local-ai.cmd value next --project SuperMega
   local-ai.cmd web https://supermega.dev --expect-text SuperMega
   local-ai.cmd web template .\example-suite.json
   local-ai.cmd web suite .\example-suite.json
@@ -263,6 +271,22 @@ def translate(argv: list[str]) -> LaunchAction | None:
         return LaunchAction(
             ("computer", *values), "automate",
             "Learn, inspect, preview, or replay one local Windows workflow.",
+            False, mutating,
+        )
+    if name == "value":
+        values = tail or ["next"]
+        operation = values[0].lower()
+        if operation not in {"add", "list", "next", "bind", "status", "pack"}:
+            raise ValueError("value_operation_unknown")
+        mutating = operation in {"add", "bind", "pack"}
+        command = (
+            ("computer", "value-add-interactive")
+            if operation == "add" and len(values) == 1
+            else ("computer", f"value-{operation}", *values[1:])
+        )
+        return LaunchAction(
+            command, "value",
+            "Rank measured local workflows by customer value and SuperMega delivery profit.",
             False, mutating,
         )
     if name == "web":
@@ -411,6 +435,15 @@ def translate(argv: list[str]) -> LaunchAction | None:
                 (SUPERMEGA_PROJECT_NAME,), "mission-review",
                 "Inspect and explicitly record one actual human review of a sealed SuperMega mission.",
                 False, True,
+            )
+        if operation == "value":
+            if values:
+                raise ValueError("supermega_value_accepts_no_arguments")
+            return LaunchAction(
+                ("computer", "value-next", "--project", SUPERMEGA_PROJECT_NAME),
+                "value",
+                "Select SuperMega's highest comparable measured workflow opportunity.",
+                False, False,
             )
         if operation == "ask":
             return LaunchAction(

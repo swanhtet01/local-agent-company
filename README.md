@@ -135,6 +135,62 @@ All state lives under `~/.local-company` by default: `company.db` for the ledger
 and `outputs/` for the Markdown reports. Use `--home /some/path` to put it
 somewhere else.
 
+## Choose work that can pay for itself
+
+The workcell includes a model-free opportunity scorecard. It combines a real
+owner-observed task baseline with a pricing scenario, ranks comparable
+opportunities, and refuses to call one an offer candidate until the bound
+workflow also passes its matching 20-run pilot. It does not prove demand or
+authorize a customer quote.
+
+The easiest entry point is the guided local wizard. It asks for observations
+and economics, calls no model, and sends nothing:
+
+```powershell
+.\local-ai.cmd value add
+```
+
+For scripting, start with the help and replace every example number below with
+observations from at least three real manual runs:
+
+```powershell
+.\local-ai.cmd value add --help
+
+# Fictional example only. This writes a local scenario, not a quote.
+.\local-ai.cmd value add invoice-processing `
+  --project SuperMega `
+  --task "Mark a verified local invoice as completed" `
+  --application "Business App" `
+  --observed-runs 3 --observed-human-minutes-total 30 `
+  --runs-per-week 6 --observed-errors 1 `
+  --observed-error-cost-total 30 --operator-value-per-hour 30 `
+  --currency USD --machine-checkable-outcome `
+  --outcome "Invoice status is Completed locally" `
+  --environment local --external-effect-risk none `
+  --setup-price 500 --monthly-support-price 50 `
+  --delivery-hours 10 --delivery-cost-per-hour 20 `
+  --monthly-support-hours 1 `
+  --confirm "RECORD MEASURED WORKFLOW OPPORTUNITY"
+```
+
+The result returns an `opportunityId` and the calculated customer payback,
+first-year customer value, SuperMega gross profit, margin, and every failed
+gate. Continue with:
+
+```powershell
+.\local-ai.cmd value next --project SuperMega --currency USD
+.\local-ai.cmd automate learn invoice-entry --seconds 60 `
+  --expect-window-title "Completed locally"
+.\local-ai.cmd value bind OPPORTUNITY_ID invoice-entry
+.\local-ai.cmd value status OPPORTUNITY_ID
+```
+
+The status returns the next exact command. Start the pilot with the same
+baseline and outcome, run and review 20 supervised local/test executions, then
+use `value pack OPPORTUNITY_ID`. The generated business case remains local,
+hash-bound, and owner-review-only. A passing pack still does not send outreach,
+set a customer price, collect payment, deploy, or grant production authority.
+
 ## The safety model
 
 This is the most distinctive thing about the project, so read it before you use
@@ -201,6 +257,7 @@ output into one decision-ready synthesis.
 | [`computer_use.py`](src/local_company/computer_use.py) | Windows teach-and-replay desktop workcell (ctypes/WinAPI) |
 | [`browser_operator.py`](src/local_company/browser_operator.py) | Read-only browser QA and sealed suite manifests |
 | [`workflow_pilot.py`](src/local_company/workflow_pilot.py) | Sealed pilot runs over learned workflows, with human review |
+| [`workflow_value.py`](src/local_company/workflow_value.py) | Owner-observed economics, mutual-value ranking, pilot binding, and local business-case packs |
 | [`model_policy.py`](src/local_company/model_policy.py) | The two-model allowlist and its enforcement |
 | [`focus.py`](src/local_company/focus.py) | Execution focus: one project, a role budget, digest-bound handoff |
 | [`capacity.py`](src/local_company/capacity.py) | Memory and listener admission checks before any model loads |

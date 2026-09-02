@@ -4617,6 +4617,7 @@ class CompanyTests(unittest.TestCase):
                 "src/local_company/supermega.py", "src/local_company/mcp_server.py",
                 "src/local_company/workflow_lab.py",
                 "src/local_company/workflow_pilot.py",
+                "src/local_company/workflow_value.py",
             },
         )
         expected = hashlib.sha256()
