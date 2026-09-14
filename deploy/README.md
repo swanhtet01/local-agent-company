@@ -163,8 +163,10 @@ One JSON object, exit 0 on pass and 1 on anything else. It checks:
   container's ephemeral writable layer), and is not inside a cloud-sync
   directory;
 - the Ollama endpoint answers and has a policy-supported model installed;
-- `computer_use` is correctly *not* importable, and `local_company.cli` still
-  imports anyway.
+- `computer_use` and `local_company.cli` both import, but a desktop entrypoint
+  fails closed with `computer_use_requires_windows` before any UI operation;
+- the configured Ollama host is either exact loopback or the admitted Compose
+  sidecar (`http://ollama:11434`), not an arbitrary network endpoint.
 
 **Why the memory check is first among equals.** Before its POSIX branch landed,
 `observe_memory()` returned `{"status": "unavailable"}` on Linux. Nothing
@@ -202,13 +204,10 @@ Emits a `local-company.tests.v3` summary object; exit 0 on pass.
 
 Two things to expect:
 
-1. **`tests/test_computer_use.py`, `tests/test_workflow_pilot.py` and
-   `tests/test_browser_operator.py` currently fail at *import* on Linux**, not
-   at assertion — they import Windows-only modules at module scope with no
-   `skipUnless` guard, so unittest discovery raises before a single test runs.
-   Until those files grow platform guards, a green run on Linux is not
-   achievable and a red run is not necessarily a regression. Read the failure
-   list, do not just read the exit code.
+1. The Windows-only entrypoints must import safely and then fail closed at
+   call time. Repository Ubuntu CI has run the full suite, but that does not
+   verify this particular container, model sidecar, state volume, or mission.
+   Require exit 0 and inspect the reported test count on this exact build.
 2. `/app` is root-owned and read-only to the runtime user by design (the source
    tree is immutable so the build-manifest digest cannot drift). Tests write
    through `TMPDIR`, which is a 512 MB tmpfs. If a test ever needs to write to
@@ -495,19 +494,13 @@ Ordered by what stops you first.
    `http://ollama:11434`, which satisfies that validator. Verify with
    `docker compose exec coordinator python -c "from local_company.core import
    default_ollama_host; print(default_ollama_host())"`.
-3. **The readiness gate rejects a non-loopback Ollama host** — and gap 2
-   landing makes this the one that actually bites you now.
-   `dashboard.runtime_model_identity()` labels any host other than
-   `LOOPBACK_OLLAMA_HOST` as `"nonlocal"`, and
-   `check_readiness._runtime_status()` turns `"nonlocal"` into
-   `endpoint_mismatch` → blocker `service_runtime_endpoint_mismatch` →
-   `action_required`, exit 1. The gap-2 fix extracted the constant but did not
-   change that semantics, so a working compose deployment now *connects* to
-   Ollama and *fails readiness* for connecting to it. Either
-   `runtime_model_identity()` needs a third endpoint label for a validated
-   configured host, or `_runtime_status()` needs to accept it.
-   `verify_linux_port.py` flags this as the advisory
-   `ollama_host_reports_nonlocal_to_readiness` so it does not ambush you.
+3. ~~**The readiness gate rejects the Compose Ollama sidecar.**~~ **Landed
+   (`local-build-20260914.1`).** Runtime attestation now distinguishes exact
+   `http://ollama:11434` from arbitrary nonlocal hosts. The readiness checker
+   requires its local configuration to agree with that live attestation and
+   probes the same sidecar instead of its old hard-coded loopback. The Linux
+   port verifier no longer emits the obsolete mismatch advisory. These are
+   contract tests, not a passed mission in a real Linux container.
 4. **The dashboard has no authentication and cannot safely be exposed.** Its
    mutation token is in the HTML; read access is write access whenever a
    service token is set. SSH tunnel or Tailscale only, read-only mode only. A
@@ -517,9 +510,10 @@ Ordered by what stops you first.
    outside the container's netns even for legitimate local access. A
    `LOCAL_COMPANY_DASHBOARD_BIND` env var (defaulting to `127.0.0.1`, with the
    Host allowlist extended to match the configured authority) is the clean fix.
-6. **The test suite cannot go green on Linux** until the three Windows-only
-   test modules get platform guards. You currently cannot prove a Linux build
-   is good with the tool that exists to prove builds are good.
+6. **The exact Linux container still needs a full acceptance run.** The
+   import guards and Ubuntu CI are in place; run the full suite, Linux port
+   verifier, authoritative readiness, and one evidence-bound queued mission
+   against this specific built image before calling it an Ally replacement.
 7. **Browser QA acceptance must be re-rehearsed** on the replacement substrate
    before anything produced by it is sold. See §9.
 8. **`ollama/ollama:latest` is unpinned.** Pin a digest before you call any of
