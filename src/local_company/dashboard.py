@@ -18,7 +18,8 @@ from .agent_api import (
 )
 from .build_info import BUILD_ID, RUNTIME_BUILD_SCHEMA, SOURCE_SHA256
 from .core import (
-    Company, LOOPBACK_OLLAMA_HOST, MockModel, OllamaModel, OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
+    COMPOSE_OLLAMA_HOST, Company, LOOPBACK_OLLAMA_HOST, MockModel, OllamaModel,
+    OPERATOR_BRIEF_SCHEMA, PLAYBOOKS,
     QUEUE_RETRY_PREFLIGHT_SCHEMA,
     QUALITY_RECOVERY_LIST_SCHEMA, QUALITY_RECHECK_PREVIEW_SCHEMA,
     QUALITY_SUPERSESSION_LIST_SCHEMA,
@@ -373,9 +374,9 @@ def runtime_model_identity(company: Company) -> dict[str, object]:
                 else None
             ),
             "endpoint": (
-                "loopback_default"
-                if company.model.host == LOOPBACK_OLLAMA_HOST
-                else "nonlocal"
+                "loopback_default" if company.model.host == LOOPBACK_OLLAMA_HOST
+                else "configured_compose_sidecar"
+                if company.model.host == COMPOSE_OLLAMA_HOST else "nonlocal"
             ),
         }
     if isinstance(company.model, MockModel):

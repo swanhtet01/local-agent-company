@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from local_company.config import COMPANY_STORE_SCHEMA
-from local_company.core import Company, MockModel
+from local_company.core import COMPOSE_OLLAMA_HOST, Company, MockModel, OllamaModel
+from local_company.dashboard import runtime_model_identity
 from scripts.check_live_build import LiveBuildError
 from scripts.check_readiness import (
     MAX_OLLAMA_BYTES, CompanyIdentityError,
@@ -162,6 +163,30 @@ class ReadinessTests(unittest.TestCase):
             INSTANCE_ID,
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_compose_sidecar_requires_matching_local_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"LOCAL_COMPANY_OLLAMA_HOST": COMPOSE_OLLAMA_HOST},
+        ):
+            runtime = runtime_model_identity(Company(Path(tmp), OllamaModel(MODEL)))
+            self.assertEqual(runtime["endpoint"], "configured_compose_sidecar")
+            health = _health()
+            health["runtime"] = runtime
+            payload, code = self._run(health=health)
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ready"])
+
+        with patch.dict(os.environ, {"LOCAL_COMPANY_OLLAMA_HOST": ""}):
+            payload, code = self._run(health=health)
+            self.assertEqual(code, 1)
+            self.assertIn("service_runtime_endpoint_mismatch", payload["blockers"])
+
+        with patch.dict(
+            os.environ, {"LOCAL_COMPANY_OLLAMA_HOST": COMPOSE_OLLAMA_HOST},
+        ):
+            payload, code = self._run()
+            self.assertEqual(code, 1)
+            self.assertIn("service_runtime_endpoint_mismatch", payload["blockers"])
 
     def test_real_build_comparison_preserves_disabled_worker_blocker(self):
         health = _health()
@@ -550,6 +575,28 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(request.get_method(), "GET")
         self.assertIsNone(request.data)
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 5)
+
+        sidecar_opener = Mock()
+        sidecar_opener.open.return_value = _Response(payload)
+        with patch.dict(
+            os.environ, {"LOCAL_COMPANY_OLLAMA_HOST": COMPOSE_OLLAMA_HOST}, clear=True,
+        ), patch(
+            "scripts.check_readiness.urllib.request.build_opener",
+            return_value=sidecar_opener,
+        ):
+            self.assertTrue(ollama_model_installed(MODEL))
+        self.assertEqual(
+            sidecar_opener.open.call_args.args[0].full_url,
+            "http://ollama:11434/api/tags",
+        )
+
+        for unsafe_host in ("https://example.invalid", "http://ollama:11435"):
+            with self.subTest(unsafe_host=unsafe_host), patch.dict(
+                os.environ, {"LOCAL_COMPANY_OLLAMA_HOST": unsafe_host}, clear=True,
+            ), patch("scripts.check_readiness.urllib.request.build_opener") as forbidden:
+                with self.assertRaisesRegex(OllamaProbeError, "invalid_endpoint"):
+                    ollama_model_installed(MODEL)
+                forbidden.assert_not_called()
 
         opener.open.side_effect = urllib.error.URLError("SENTINEL unavailable")
         with patch(

@@ -24,6 +24,9 @@ from local_company.config import (  # noqa: E402
     COMPANY_STORE_SCHEMA, default_company_home,
     read_validated_company_instance_id, valid_company_instance_id,
 )
+from local_company.core import (  # noqa: E402
+    COMPOSE_OLLAMA_HOST, LOOPBACK_OLLAMA_HOST, default_ollama_host,
+)
 from local_company.model_policy import (  # noqa: E402
     DEFAULT_LOCAL_MODEL, is_supported_local_model, require_local_llama_model,
 )
@@ -172,17 +175,27 @@ def read_company_identity(home: Path) -> dict[str, str]:
 
 
 def ollama_model_installed(required_model: str) -> bool:
-    """Check one exact model name through a bounded fixed loopback request."""
+    """Check one exact model through the selected, admitted local Ollama endpoint."""
     if not _valid_model_name(required_model):
         raise OllamaProbeError("invalid_model_name")
     if not is_supported_local_model(required_model):
         raise OllamaProbeError("unsupported_model")
     required_model = require_local_llama_model(required_model)
+    try:
+        host = default_ollama_host()
+    except ValueError as exc:
+        raise OllamaProbeError("invalid_endpoint") from exc
+    if host == LOOPBACK_OLLAMA_HOST:
+        tags_url = OLLAMA_TAGS_URL
+    elif host == COMPOSE_OLLAMA_HOST:
+        tags_url = f"{COMPOSE_OLLAMA_HOST}/api/tags"
+    else:
+        raise OllamaProbeError("invalid_endpoint")
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _NoRedirectHandler(),
     )
     request = urllib.request.Request(
-        OLLAMA_TAGS_URL,
+        tags_url,
         headers={"Accept": "application/json", "User-Agent": "local-company-readiness/1"},
         method="GET",
     )
@@ -289,9 +302,18 @@ def _runtime_status(health: dict[str, object], required_model: str) -> str:
     if provider == "ollama":
         if not _valid_model_name(model) or not is_supported_local_model(model):
             return "invalid"
-        if type(endpoint) is not str or endpoint not in {"loopback_default", "nonlocal"}:
+        if type(endpoint) is not str or endpoint not in {
+            "loopback_default", "configured_compose_sidecar", "nonlocal",
+        }:
             return "invalid"
-        if endpoint != "loopback_default":
+        try:
+            selected_host = default_ollama_host()
+        except ValueError:
+            return "endpoint_mismatch"
+        if not (
+            (endpoint == "loopback_default" and selected_host == LOOPBACK_OLLAMA_HOST)
+            or (endpoint == "configured_compose_sidecar" and selected_host == COMPOSE_OLLAMA_HOST)
+        ):
             return "endpoint_mismatch"
     elif model is not None or endpoint is not None:
         return "invalid"
