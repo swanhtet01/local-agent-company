@@ -25,7 +25,8 @@ from unittest.mock import Mock, patch
 from local_company import __version__
 from local_company.agent_api import (
     AGENT_CARD_SCHEMA, AGENT_CATALOG_SCHEMA, AGENT_COMPUTER_RUN_SCHEMA,
-    AGENT_MISSION_SCHEMA, MISSION_RUN_CONFIRMATION, AgentAPI, AgentAPIError,
+    AGENT_MISSION_SCHEMA, MAX_SYNTHESIS_CHARS, MISSION_RUN_CONFIRMATION,
+    AgentAPI, AgentAPIError,
     _unsafe_agent_authority_claims, decode_json_body, main as agent_api_main,
 )
 from local_company.build_info import (
@@ -6260,6 +6261,46 @@ class CompanyTests(unittest.TestCase):
             self.assertEqual(evaluation[0], company.queue_items("complete")[0][7])
             self.assertEqual(evaluation[1:3], (1, 100))
 
+    def test_stated_assumptions_require_a_substantive_labeled_section(self):
+        objective = "Draft a local review checklist. State assumptions. End with OWNER REVIEW REQUIRED"
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), ConstraintModel(False))
+            job_id, _ = company.run(objective, roles=["operations", "quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertFalse(evaluation["checks"]["requested_concepts_present"])
+            self.assertFalse(evaluation["passed"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), ConstraintModel(True))
+            job_id, _ = company.run(objective, roles=["operations", "quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["checks"]["requested_concepts_present"])
+            self.assertTrue(evaluation["checks"]["required_ending_present"])
+
+        class AssumptionRevisionModel(MockModel):
+            def complete(self, system, prompt):
+                if "report editor" in system:
+                    return (
+                        "Review checklist: 1. Read the local queue. 2. Check one report. "
+                        "3. Record the owner's decision. "
+                        "Assumptions: the owner will inspect each draft before relying on it. "
+                        "OWNER REVIEW REQUIRED"
+                    )
+                if "executive chair" in system:
+                    return "Review checklist: read the queue and record a decision. OWNER REVIEW REQUIRED"
+                return super().complete(system, prompt)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), AssumptionRevisionModel())
+            job_id, _ = company.run(objective, roles=["operations", "quality"])
+            evaluation = company.evaluate_job(job_id)
+            self.assertTrue(evaluation["checks"]["requested_concepts_present"])
+            self.assertTrue(evaluation["checks"]["required_ending_present"])
+            self.assertTrue(any(
+                kind == "synthesis_revision_started"
+                for kind, _, _ in company.job_detail(job_id)["events"]
+            ))
+
     def test_quality_summary_is_bounded_pathless_and_read_only(self):
         objective = (
             "Define three task templates, a daily review cadence, success checks, failure modes, "
@@ -8063,6 +8104,16 @@ class CompanyTests(unittest.TestCase):
             ),
             "OWNER REVIEW REQUIRED",
         )
+        self.assertEqual(
+            _required_ending_from_objective(
+                "Plan inventory. End with OWNER REVIEW REQUIRED"
+            ),
+            "OWNER REVIEW REQUIRED",
+        )
+        self.assertEqual(
+            _required_ending_from_objective("Plan inventory and end with clarity"),
+            "",
+        )
 
     def test_matching_evidence_filename_gate_rejects_mismatched_pair(self):
         mapping = {
@@ -8402,6 +8453,56 @@ class AgentAPIServerTests(unittest.TestCase):
             [],
         )
 
+    def test_agent_api_requires_complete_untruncated_sealed_result(self):
+        mission_id = self.company.enqueue("Draft a local operating checklist.")
+        _, job_id, _, passed = self.company.run_next_queue_item(mission_id)
+        self.assertTrue(passed)
+        api = AgentAPI(self.company, None)
+        self.assertTrue(api.mission(mission_id)["resultUsable"])
+        detail = self.company.job_detail(job_id)
+
+        for field, changed in (
+            (7, "a" * (MAX_SYNTHESIS_CHARS + 1)),
+            (8, "invalid-report-digest"),
+            (9, "invalid-manifest-digest"),
+        ):
+            with self.subTest(field=field):
+                job = list(detail["job"])
+                job[field] = changed
+                with patch.object(
+                    self.company, "job_detail",
+                    return_value={**detail, "job": tuple(job)},
+                ):
+                    mission = api.mission(mission_id)
+                self.assertTrue(mission["resultAvailable"])
+                self.assertFalse(mission["resultUsable"])
+                if field == 7:
+                    self.assertTrue(mission["result"]["synthesisTruncated"])
+
+        row = list(api._queue_row(self.company, mission_id))
+        row[1] = "quality_failed"
+        self.assertFalse(api._mission(tuple(row))["resultUsable"])
+
+        for changed in (
+            {**detail, "evaluation": {
+                **detail["evaluation"], "evaluator_version": "superseded-evaluator",
+            }},
+            {**detail, "evaluation": {
+                **detail["evaluation"], "report_sha256": "0" * 64,
+            }},
+            {**detail, "report": detail["report"] + "\nTampered after evaluation."},
+        ):
+            with self.subTest(changed=list(changed.keys())), patch.object(
+                self.company, "job_detail", return_value=changed,
+            ):
+                self.assertFalse(api.mission(mission_id)["resultUsable"])
+
+        with patch.object(
+            self.company, "_validate_evidence_manifest",
+            return_value=(False, None, "digest_mismatch"),
+        ):
+            self.assertFalse(api.mission(mission_id)["resultUsable"])
+
     def test_agent_api_sensitive_and_malformed_requests_fail_before_queueing(self):
         status, blocked = self.request(
             "POST", "/api/v1/missions",
@@ -8436,6 +8537,90 @@ class AgentAPIServerTests(unittest.TestCase):
 
 
 class AgentAPIComputerRunTests(unittest.TestCase):
+    def test_agent_start_rejects_missing_ollama_focus_before_queueing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), OllamaModel(
+                "llama3.2:1b", num_predict=768, keep_alive="0s",
+            ))
+            company.initialize()
+            api = AgentAPI(company, LocalQueueWorker(company))
+            with self.assertRaises(AgentAPIError) as context:
+                api.submit({
+                    "profile": "operations-improvement",
+                    "objective": "Review a local operating checklist and list risks.",
+                    "start": True,
+                    "runConfirmation": MISSION_RUN_CONFIRMATION,
+                })
+            self.assertEqual(context.exception.code, "mission_focus_blocked")
+            self.assertEqual(company.queue_items(), [])
+
+    def test_agent_ask_prints_only_accepted_local_draft(self):
+        mission_id = "123456789abc"
+        accepted = {"missionId": mission_id, "started": True}
+        completed = {
+            "missionId": mission_id, "terminal": True, "status": "complete",
+            "resultAvailable": True, "resultUsable": True,
+            "result": {
+                "synthesis": "Three checked local steps.",
+                "synthesisTruncated": False,
+                "quality": {"passed": True}, "safety": {"passed": True},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.agent_api._client_request", side_effect=[accepted, completed],
+        ) as client, patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = agent_api_main([
+                "--home", tmp, "ask", "operations-improvement",
+                "Draft a local checklist", "--timeout", "2",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIn(f"Mission {mission_id} accepted.", output.getvalue())
+        self.assertIn("Three checked local steps.", output.getvalue())
+        self.assertIn("not independently verified fact", output.getvalue())
+        self.assertTrue(client.call_args_list[0].args[3]["start"])
+        self.assertEqual(client.call_args_list[0].args[3]["runConfirmation"],
+                         MISSION_RUN_CONFIRMATION)
+
+    def test_agent_ask_withholds_unusable_draft_and_preserves_mission_id(self):
+        mission_id = "123456789abc"
+        unsafe_text = "I can initiate transactions and perform system access actions."
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.agent_api._client_request", side_effect=[
+                {"missionId": mission_id, "started": True},
+                {
+                    "missionId": mission_id, "terminal": True, "status": "complete",
+                    "resultUsable": False,
+                    "result": {
+                        "synthesis": unsafe_text,
+                        "safety": {"alerts": ["claimed_sensitive_action_authority_1"]},
+                    },
+                },
+            ],
+        ), patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = agent_api_main([
+                "--home", tmp, "ask", "operations-improvement", "Review local steps",
+            ])
+        self.assertEqual(code, 1)
+        self.assertIn(mission_id, output.getvalue())
+        self.assertIn("claimed_sensitive_action_authority_1", output.getvalue())
+        self.assertNotIn(unsafe_text, output.getvalue())
+
+    def test_agent_ask_does_not_hide_queued_but_unstarted_mission(self):
+        mission_id = "123456789abc"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "local_company.agent_api._client_request", return_value={
+                "missionId": mission_id, "started": False,
+                "startReason": "another_due_mission_is_ahead",
+            },
+        ) as client, patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = agent_api_main([
+                "--home", tmp, "ask", "operations-improvement", "Review local steps",
+            ])
+        self.assertEqual(code, 1)
+        self.assertEqual(client.call_count, 1)
+        self.assertIn(mission_id, output.getvalue())
+        self.assertIn("another_due_mission_is_ahead", output.getvalue())
+
     def test_agent_launcher_up_reuses_live_service(self):
         status = {"status": "running", "live": True, "pid": 123}
         with tempfile.TemporaryDirectory() as tmp, patch(

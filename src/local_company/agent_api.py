@@ -8,6 +8,7 @@ model-backed or computer-use operation is admitted at a time on the Ally.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -23,7 +24,11 @@ from typing import Callable, Protocol
 from . import __version__
 from .computer_use import RUN_CONFIRMATION, list_workflows, preview_workflow, run_workflow
 from .config import default_company_home
-from .core import Company, PLAYBOOKS, ROLES
+from .core import Company, EVALUATOR_VERSION, OllamaModel, PLAYBOOKS, ROLES
+from .focus import (
+    enforce_execution_focus, enforce_execution_resource_envelope,
+    read_execution_focus,
+)
 from .model_policy import DEFAULT_LOCAL_MODEL
 
 
@@ -267,16 +272,43 @@ class AgentAPI:
                 safety_alerts = _unsafe_agent_authority_claims(synthesis)
                 quality_passed = bool(
                     isinstance(evaluation, dict) and evaluation.get("passed") is True
+                    and evaluation.get("evaluator_version") == EVALUATOR_VERSION
                 )
+                report_sha = job[8] if isinstance(job[8], str) else None
+                manifest_sha = job[9] if isinstance(job[9], str) else None
+                seals_present = bool(
+                    report_sha and re.fullmatch(r"[0-9a-f]{64}", report_sha)
+                    and manifest_sha and re.fullmatch(r"[0-9a-f]{64}", manifest_sha)
+                )
+                evidence_current = False
+                if str(row[1]) == "complete" and quality_passed and seals_present:
+                    report = detail.get("report")
+                    report_current = bool(
+                        detail.get("report_error") == ""
+                        and isinstance(report, str)
+                        and hashlib.sha256(report.encode("utf-8")).hexdigest() == report_sha
+                        and evaluation.get("report_sha256") == report_sha
+                        and evaluation.get("manifest_sha256") == manifest_sha
+                    )
+                    if report_current:
+                        try:
+                            evidence_current = self.company._validate_evidence_manifest(
+                                job_id, manifest_sha,
+                            )[0]
+                        except (OSError, RuntimeError, ValueError):
+                            evidence_current = False
                 item["resultAvailable"] = bool(synthesis)
                 item["resultUsable"] = bool(
-                    synthesis and quality_passed and not safety_alerts
+                    str(row[1]) == "complete" and synthesis
+                    and len(synthesis) <= MAX_SYNTHESIS_CHARS
+                    and quality_passed and not safety_alerts and seals_present
+                    and evidence_current
                 )
                 item["result"] = {
                     "synthesis": synthesis[:MAX_SYNTHESIS_CHARS] if synthesis else None,
                     "synthesisTruncated": len(synthesis) > MAX_SYNTHESIS_CHARS,
-                    "reportSha256": job[8] if isinstance(job[8], str) else None,
-                    "evidenceManifestSha256": job[9] if isinstance(job[9], str) else None,
+                    "reportSha256": report_sha,
+                    "evidenceManifestSha256": manifest_sha,
                     "quality": (
                         {
                             "passed": evaluation.get("passed"),
@@ -368,6 +400,24 @@ class AgentAPI:
                 "Mission cannot enter autonomous local execution: "
                 + (", ".join(str(item) for item in reason) or "not_ready"),
             )
+        if start:
+            try:
+                focus = read_execution_focus(self.company.home)
+                enforce_execution_focus(
+                    focus, preflight.get("project_id"),
+                    preflight.get("team", {}).get("roles", []), "agent-api mission",
+                )
+                if isinstance(self.company.model, OllamaModel):
+                    enforce_execution_resource_envelope(
+                        focus, "ollama", self.company.model.num_ctx,
+                        self.company.model.num_predict, self.company.model.keep_alive,
+                        "agent-api mission",
+                    )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise AgentAPIError(
+                    409, "mission_focus_blocked",
+                    "Local execution focus or resource envelope is not ready; inspect focus locally",
+                ) from exc
         if self.worker is None:
             raise AgentAPIError(503, "worker_disabled", "Local agent worker is disabled")
         try:
@@ -613,6 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""examples:
   local-agent.cmd up
   local-agent.cmd catalog
+  local-agent.cmd ask decision-brief "Compare two local options" --project MyProject
   local-agent.cmd submit decision-brief "Compare two local options"
   local-agent.cmd submit product-build "Design an offline workflow" --start
   local-agent.cmd missions
@@ -636,6 +687,12 @@ No endpoint sends, spends, deploys, publishes, or enables network computer use.
     sub.add_parser("server-status", help="Check process and endpoint identity")
     sub.add_parser("catalog", help="List deployable knowledge teams and computer workflows")
     sub.add_parser("missions", help="List local agent missions")
+    ask = sub.add_parser("ask", help="Run one local mission and show only an accepted draft")
+    ask.add_argument("profile", choices=("auto", *sorted(PLAYBOOKS)))
+    ask.add_argument("objective")
+    ask.add_argument("--project")
+    ask.add_argument("--priority", type=int, default=50)
+    ask.add_argument("--timeout", type=int, default=900)
     submit = sub.add_parser("submit", help="Queue one local knowledge-worker mission")
     submit.add_argument("profile", choices=("auto", *sorted(PLAYBOOKS)))
     submit.add_argument("objective")
@@ -658,6 +715,21 @@ No endpoint sends, spends, deploys, publishes, or enables network computer use.
     computer_run.add_argument("name")
     computer_run.add_argument("--no-evidence", action="store_true")
     return parser
+
+
+def _wait_for_mission(home: Path, mission_id: str, timeout: int) -> dict[str, object]:
+    if timeout < 1 or timeout > 86_400:
+        raise ValueError("--timeout must be between 1 and 86400 seconds")
+    if MISSION_ID_PATTERN.fullmatch(mission_id) is None:
+        raise RuntimeError("Local agent server returned an invalid mission ID")
+    deadline = time.monotonic() + timeout
+    while True:
+        result = _client_request(home, "GET", f"/api/v1/missions/{mission_id}", timeout=30)
+        if result.get("missionId") != mission_id:
+            raise RuntimeError("Local agent server returned the wrong mission")
+        if result.get("terminal") is True or time.monotonic() >= deadline:
+            return result
+        time.sleep(1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -692,6 +764,59 @@ def main(argv: list[str] | None = None) -> int:
             result = _client_request(home, "GET", "/api/v1/catalog")
         elif args.command == "missions":
             result = _client_request(home, "GET", "/api/v1/missions")
+        elif args.command == "ask":
+            accepted = _client_request(home, "POST", "/api/v1/missions", {
+                "profile": args.profile,
+                "objective": args.objective,
+                "project": args.project,
+                "priority": args.priority,
+                "start": True,
+                "runConfirmation": MISSION_RUN_CONFIRMATION,
+            })
+            mission_id = accepted.get("missionId")
+            if not isinstance(mission_id, str) or MISSION_ID_PATTERN.fullmatch(mission_id) is None:
+                raise RuntimeError("Local agent server returned an invalid mission ID")
+            print(f"Mission {mission_id} accepted.", flush=True)
+            if accepted.get("started") is not True:
+                print(
+                    "Queued, but not started: "
+                    f"{accepted.get('startReason') or 'worker_not_available'}. "
+                    f"Inspect with local-agent.cmd status {mission_id}."
+                )
+                return 1
+            mission = _wait_for_mission(home, mission_id, args.timeout)
+            if mission.get("terminal") is not True:
+                print(f"Mission {mission_id} is still running; inspect it with local-agent.cmd status {mission_id}.")
+                return 1
+            result_detail = mission.get("result")
+            synthesis = (
+                result_detail.get("synthesis") if isinstance(result_detail, dict) else None
+            )
+            quality = result_detail.get("quality") if isinstance(result_detail, dict) else None
+            safety = result_detail.get("safety") if isinstance(result_detail, dict) else None
+            if not (
+                mission.get("status") == "complete"
+                and mission.get("resultAvailable") is True
+                and mission.get("resultUsable") is True
+                and isinstance(result_detail, dict)
+                and result_detail.get("synthesisTruncated") is False
+                and isinstance(synthesis, str) and synthesis.strip()
+                and isinstance(quality, dict) and quality.get("passed") is True
+                and isinstance(safety, dict) and safety.get("passed") is True
+            ):
+                alerts = safety.get("alerts", []) if isinstance(safety, dict) else []
+                print(
+                    f"Mission {mission_id} ended as {mission.get('status', 'unknown')}; "
+                    "no accepted draft is available."
+                )
+                if alerts:
+                    print("Safety review flags: " + ", ".join(str(item) for item in alerts))
+                print(f"Inspect with local-agent.cmd status {mission_id}; owner review required.")
+                return 1
+            print(f"Mission {mission_id}: local draft for owner review.\n")
+            print(synthesis)
+            print("\nThis is a model draft, not independently verified fact.")
+            return 0
         elif args.command == "submit":
             result = _client_request(home, "POST", "/api/v1/missions", {
                 "profile": args.profile,
@@ -708,16 +833,7 @@ def main(argv: list[str] | None = None) -> int:
                 "confirmation": MISSION_RUN_CONFIRMATION,
             })
         elif args.command == "wait":
-            if args.timeout < 1 or args.timeout > 86_400:
-                raise ValueError("--timeout must be between 1 and 86400 seconds")
-            deadline = time.monotonic() + args.timeout
-            while True:
-                result = _client_request(
-                    home, "GET", f"/api/v1/missions/{args.mission_id}", timeout=30,
-                )
-                if result.get("terminal") is True or time.monotonic() >= deadline:
-                    break
-                time.sleep(1)
+            result = _wait_for_mission(home, args.mission_id, args.timeout)
             if result.get("terminal") is not True:
                 print(json.dumps(result, indent=2))
                 print("ERROR: timed out waiting for local mission", file=sys.stderr)

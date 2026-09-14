@@ -24,8 +24,9 @@ neither.
 - **No data leaves the machine.** The model is local, the database is a local
   SQLite file, the dashboard binds to `127.0.0.1`, and the only outbound traffic
   is to the local model and to URLs you explicitly ask it to read.
-- **Nothing runs on its own.** There is no daemon that decides to act. Every
-  mission is started by a person typing a command.
+- **No self-initiated outside actions.** A local worker can execute an accepted
+  mission while you do other work, but it cannot invent a new mission or act
+  externally without an owner-controlled handoff.
 - **Everything is receipted.** Reports, evidence files, and taught workflows are
   sealed with SHA-256 and recorded in an append-only audit ledger, so you can
   check afterwards what actually happened.
@@ -48,7 +49,7 @@ state, not a plan.
 | MCP server (25 governed actions) | Works | stdio JSON-RPC; mutations need exact confirmation strings |
 | Localhost dashboard and task intake | Works | **No authentication.** Loopback only. See [Safety](#the-safety-model). |
 | Read-only browser QA with evidence | Works on Windows | Needs an npm package and installed Edge; drives no clicks or forms |
-| Windows teach-and-replay desktop automation | Works on Windows only | ctypes/WinAPI; not portable |
+| Windows teach-and-replay desktop automation | Works on Windows only | Recorded/window-bound replay, not a general visual computer-use agent |
 | Local dataset profiling (CSV / JSON / XLSX) | Works | Stdlib reader, read-only, path-allowlisted |
 | Running on Linux (Docker / VPS) | Works | CI-verified: full suite green on Ubuntu, Python 3.11-3.13 |
 | Browser QA on Linux | Does not work | Needs a substrate swap and a fresh acceptance run |
@@ -82,12 +83,18 @@ Four more things you should know before you invest time:
    other systems, no users to cite, and no testimonials.
 4. **This is pre-1.0.** Only the latest commit is supported. Interfaces change.
 
-## Quickstart
+This is an **agent runtime around a local LLM**, not a newly trained foundation
+model. Today one machine can queue many role-based knowledge missions but runs
+only one local worker at a time to protect memory. Distributed workers and a
+general vision-driven computer-use agent are future product milestones, not
+capabilities to assume from the current queue or desktop replay.
+
+## Quickstart (Windows PowerShell, fresh local store)
 
 You need **Python 3.11 or newer** and, for anything model-backed,
 **[Ollama](https://ollama.com)**.
 
-```bash
+```powershell
 # 1. A local model. The 1b model is the default and the smallest.
 ollama pull llama3.2:1b
 
@@ -98,19 +105,27 @@ cd local-agent-company
 #    No network, no model, no state created. Around 70 seconds.
 python scripts/run_tests.py
 
-# 4. Create the local store. This is the first real command.
-python -m local_company.cli init
+# 4. Create an isolated project and its bounded execution focus.
+.\local-company.cmd init
+.\local-company.cmd projects create "Local Lab"
+.\local-company.cmd focus set --project "Local Lab" --max-roles 4
 
-# 5. Check that the runtime is actually ready.
+# 5. Start or reuse the one loopback server, then check actual readiness.
+.\local-agent.cmd up
 python scripts/check_readiness.py --model llama3.2:1b
 
-# 6. Run one mission.
-python -m local_company.cli run "Design a 30-day launch plan for a local tyre shop"
+# 6. Ask one local team. It shows the mission ID immediately for recovery.
+.\local-agent.cmd ask operations-improvement "Draft a local-only task review checklist; label assumptions" --project "Local Lab"
 ```
 
-Launchers in the repository root wrap those commands on both platforms. On
-Windows use the `.cmd` files — `.\local-company.cmd init`, `.\local-ai.cmd help`.
-On Linux and macOS use the extensionless shell scripts beside them:
+`ask` prints a draft only when the current quality and safety gates pass. It
+returns nonzero and keeps the mission ID visible if the result is unusable,
+another mission is ahead, or execution times out. A passing draft is still for
+owner review, not independently verified fact. If this store already has an
+active focus, inspect `.\local-company.cmd focus show`; do not overwrite it to
+follow the fresh-store example. Changed knowledge must be audited before a run.
+
+On Linux and macOS, use the extensionless shell scripts for coordinator work:
 
 ```bash
 ./local-ai brief        # friendly status: one next action, in plain English
@@ -120,16 +135,17 @@ On Linux and macOS use the extensionless shell scripts beside them:
 ```
 
 Each one prefers `.venv/bin/python` if present and otherwise falls back to
-`python3`. `./local-ai brief` is the best first command: it reads the current
-state, prints one recommended next action, and calls no model.
+`python3`. `./local-ai brief` reads the current state and calls no model. The
+Linux container deployment remains subject to the separate acceptance steps
+in [`deploy/README.md`](deploy/README.md); Windows desktop workflows do not run there.
 
 If you install the package with `pip install -e .`, the console script
 `local-company` becomes available and is equivalent to
 `python -m local_company.cli`. Note that the friendly `local-ai` launchpad lives
 in `scripts/` and is not installed by pip — run it from a clone.
 
-The test suite is around 490 tests, takes a minute or two, and prints the exact
-count when it finishes. Run it before you file a bug.
+The test suite takes a minute or two and prints its current count when it
+finishes. Run it before you file a bug.
 
 All state lives under `~/.local-company` by default: `company.db` for the ledger
 and `outputs/` for the Markdown reports. Use `--home /some/path` to put it

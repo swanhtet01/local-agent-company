@@ -221,7 +221,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-07-30.22"
+EVALUATOR_VERSION = "local-quality-2026-09-14.1"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
@@ -1315,7 +1315,10 @@ def _structured_validation_code(error: BaseException) -> str:
 def _required_ending_from_objective(objective: str) -> str:
     match = re.search(r"\bend with:\s*", objective, flags=re.IGNORECASE)
     if not match:
-        return ""
+        literal = re.search(
+            r"(?i:\bend with)\s+([A-Z][A-Z0-9 _-]{5,})[.!?]?\s*$", objective,
+        )
+        return " ".join(literal.group(1).split()) if literal else ""
     tail = objective[match.end():].strip()
     if not tail:
         return ""
@@ -6756,7 +6759,14 @@ class Company:
             )
         if re.search(r"\btask templates?\b", objective_lower) and "Task templates" not in requested_labels:
             requested_labels.append("Task templates")
-        all_labels = (["Verified facts", "Assumptions"] if facts_required else []) + requested_labels
+        if re.search(
+            r"\b(?:state|label|list|identify|name)\s+(?:(?:all|the|any|your)\s+)?assumptions\b",
+            objective_lower,
+        ):
+            requested_labels.append("Assumptions")
+        all_labels = list(dict.fromkeys(
+            (["Verified facts", "Assumptions"] if facts_required else []) + requested_labels
+        ))
         labeled_sections = extract_labeled_sections(synthesis, all_labels)
         if "facts from assumptions" in objective_lower:
             checks["facts_assumptions_separated"] = bool(
@@ -8453,6 +8463,15 @@ class Company:
                 and "Task templates" not in required_labels
             ):
                 required_labels.append("Task templates")
+            if (
+                re.search(
+                    r"\b(?:state|label|list|identify|name)\s+"
+                    r"(?:(?:all|the|any|your)\s+)?assumptions\b",
+                    objective_lower,
+                )
+                and "Assumptions" not in required_labels
+            ):
+                required_labels.append("Assumptions")
             source_names = sorted({Path(hit.path).name for hit in sources})
             source_citation_required = bool(
                 strict_evidence_pairs_required
