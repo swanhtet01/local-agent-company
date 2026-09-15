@@ -298,6 +298,16 @@ class AgentAPI:
                         except (OSError, RuntimeError, ValueError):
                             evidence_current = False
                 item["resultAvailable"] = bool(synthesis)
+                metric_events = sum(
+                    1 for event in detail.get("events", [])
+                    if isinstance(event, (list, tuple)) and event
+                    and event[0] == "model_metrics"
+                )
+                item["execution"] = {
+                    "modelCalled": True if metric_events else None,
+                    "recordedModelMetricEvents": metric_events,
+                    "evidence": "job_events" if metric_events else "not_recorded",
+                }
                 item["resultUsable"] = bool(
                     str(row[1]) == "complete" and synthesis
                     and len(synthesis) <= MAX_SYNTHESIS_CHARS
@@ -319,6 +329,7 @@ class AgentAPI:
                         if isinstance(evaluation, dict) else None
                     ),
                     "safety": {
+                        "scope": "deterministic_synthesis_review",
                         "passed": not safety_alerts,
                         "alerts": safety_alerts,
                         "modelCalled": False,

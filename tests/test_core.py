@@ -8441,6 +8441,26 @@ class AgentAPIServerTests(unittest.TestCase):
         self.assertFalse(mission["result"]["safety"]["modelCalled"])
         self.assertIsInstance(mission["result"]["reportSha256"], str)
 
+    def test_agent_api_execution_evidence_is_distinct_from_safety_review(self):
+        mission_id = self.company.enqueue("Draft a local operating checklist.")
+        _, job_id, _, passed = self.company.run_next_queue_item(mission_id)
+        self.assertTrue(passed)
+        detail = self.company.job_detail(job_id)
+        api = AgentAPI(self.company, None)
+        for events, expected in (
+            ([], None),
+            ([("assignment_started", "operations", "now")], None),
+            ([("model_metrics", "{}", "now")], True),
+        ):
+            with self.subTest(events=events), patch.object(
+                self.company, "job_detail", return_value={**detail, "events": events},
+            ):
+                mission = api.mission(mission_id)
+            self.assertIs(mission["execution"]["modelCalled"], expected)
+            self.assertEqual(mission["execution"]["recordedModelMetricEvents"], int(expected is True))
+            self.assertFalse(mission["result"]["safety"]["modelCalled"])
+            self.assertEqual(mission["result"]["safety"]["scope"], "deterministic_synthesis_review")
+
     def test_agent_api_flags_claimed_sensitive_authority_without_model_review(self):
         alerts = _unsafe_agent_authority_claims(
             "I can initiate transactions and perform system access-related actions."
