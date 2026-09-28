@@ -10,6 +10,21 @@ before you promise anything to anybody. This packaging makes the coordinator
 
 ---
 
+## Existing Windows VPS
+
+The founder's existing Contabo order identifies Windows Server, not Linux.
+Preserve its OS, applications and data. Do not run the Linux installation or
+reimage instructions on it. First inventory the target from an authenticated
+operator session using `deploy/inspect_windows_host.ps1`. The script reports
+capacity, tools on PATH and selected listener bindings only; it installs
+nothing, starts no model, and does not collect credentials or command lines.
+Follow the host's script execution policy; do not weaken it to run this check.
+
+A local syntax check is not a remote inventory. An RDP port responding is not
+proof of login, free RAM, backup coverage or a usable worker. Confirm those on
+the server before selecting a native Windows worker versus a separately
+approved Linux host. Do not assume Docker Linux containers work on Windows Server.
+
 ## 1. The box
 
 Start with a private CPU VPS for the coordinator, queue and bounded inference.
