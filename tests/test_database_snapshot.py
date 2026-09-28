@@ -3,6 +3,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("snapshot_database", Path(__file__).resolve().parents[1] / "deploy/snapshot_database.py")
 module = importlib.util.module_from_spec(spec)
@@ -10,6 +12,19 @@ spec.loader.exec_module(module)
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_permission_failure_prevents_data_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'company.db'
+            target = Path(directory) / 'snapshot.db'
+            with closing(sqlite3.connect(source)) as db:
+                db.execute('CREATE TABLE private_records(value TEXT)')
+                db.execute("INSERT INTO private_records VALUES ('private fixture')")
+                db.commit()
+            with patch.object(module, 'protect_destination', side_effect=PermissionError):
+                with self.assertRaises(PermissionError):
+                    module.snapshot(source, target)
+            self.assertEqual(target.stat().st_size, 0)
+
     def test_hot_wal_restores_latest_committed_record(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "company.db"

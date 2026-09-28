@@ -5,6 +5,39 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+
+
+def protect_destination(path: Path) -> None:
+    """Fail before copying data if owner-only access cannot be established."""
+    if os.name != 'nt':
+        os.chmod(path, 0o600)
+        return
+    # Pass the path as data, never interpolate it into PowerShell source.
+    script = r'''
+$ErrorActionPreference = 'Stop'
+$path = $env:SUPERMEGA_SNAPSHOT_DESTINATION
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')
+$acl.AddAccessRule($rule)
+[System.IO.File]::SetAccessControl($path, $acl)
+$actual = [System.IO.File]::GetAccessControl($path)
+$rules = @($actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+if (!$actual.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+    $rules[0].IdentityReference.Value -ne $sid.Value -or
+    $rules[0].AccessControlType -ne 'Allow' -or
+    $rules[0].FileSystemRights -ne 'FullControl') { throw 'Snapshot ACL verification failed' }
+'''
+    result = subprocess.run(
+        ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+        env={**os.environ, 'SUPERMEGA_SNAPSHOT_DESTINATION': str(path)},
+        capture_output=True, timeout=30, check=False,
+    )
+    if result.returncode != 0:
+        raise PermissionError('Snapshot permissions could not be verified')
 
 
 def snapshot(source: Path, destination: Path) -> dict:
@@ -16,6 +49,7 @@ def snapshot(source: Path, destination: Path) -> dict:
     fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
     try:
+        protect_destination(destination)
         with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as reader:
             with closing(sqlite3.connect(destination)) as writer:
                 reader.backup(writer)
