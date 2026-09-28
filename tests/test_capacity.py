@@ -55,6 +55,19 @@ def ready_inputs() -> dict[str, dict[str, object]]:
 
 
 class CapacityTests(unittest.TestCase):
+    def test_coordinator_ready_does_not_claim_local_inference_memory(self):
+        values = ready_inputs()
+        values["memory"]["available_bytes"] = 1536 * 1024**2
+        result = build_capacity_snapshot(**values)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["status_scope"], "coordinator_capacity_not_model_acceptance")
+        self.assertEqual(result["local_1b_memory"]["status"], "insufficient")
+        self.assertFalse(result["local_1b_memory"]["model_execution_authorized"])
+        values["memory"]["available_bytes"] = 5 * 1024**3 // 2
+        self.assertEqual(build_capacity_snapshot(**values)["local_1b_memory"]["status"], "sufficient")
+        values["memory"]["status"] = "unavailable"
+        self.assertEqual(build_capacity_snapshot(**values)["local_1b_memory"]["status"], "unknown")
+
     def test_ready_snapshot_proves_serial_zero_resident_role_contract(self) -> None:
         result = build_capacity_snapshot(**ready_inputs())
         self.assertEqual(result["schema"], "local-company.machine-capacity.v1")
