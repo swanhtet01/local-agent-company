@@ -555,9 +555,16 @@ Ordered by what stops you first.
    against this specific built image before calling it an Ally replacement.
 7. **Browser QA acceptance must be re-rehearsed** on the replacement substrate
    before anything produced by it is sold. See §9.
-8. **`ollama/ollama:latest` is unpinned.** Pin a digest before you call any of
-   this production; a silent base-image bump is a silent change to the thing
-   generating customer deliverables.
+8. **Ollama is pinned, but target runtime acceptance remains outstanding.**
+   Compose uses registry index
+   `sha256:8262851b2846b87c649eddf3e76beb270c52f4d1bc94559f47efde16b0841551`,
+   resolved from the official `ollama/ollama` repository on 2026-09-28 and
+   re-fetched by digest; the index includes Linux amd64 and arm64. This
+   verifies the reference, not runtime compatibility or image security.
+   For upgrades, resolve and inspect a new immutable digest, retain the old
+   reference for rollback, then verify cloud-disabled startup, model loading,
+   idle unload and one accepted queued mission on the target host before
+   promotion. Never replace this reference with `latest` for unattended updates.
 9. **No restore has been tested yet.** Until you have restored into a scratch
    container and seen `local-company health` come back with the identity you
    expect, you do not have backups. See §7.
