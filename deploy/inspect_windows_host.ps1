@@ -27,6 +27,26 @@ try {
     # Missing permission or cmdlet must not be reported as zero listeners.
     $portStatus = 'unavailable'
 }
+# Count only recognized trading executables; never expose process arguments,
+# account identifiers, window titles or executable paths. Absence is not proof
+# that this host has no trading workload (services or renamed programs may exist).
+$tradingStatus = 'observed'
+$tradingCount = $null
+$tradingWorkingSet = $null
+try {
+    $trading = @(Get-Process -ErrorAction Stop | Where-Object {
+        $_.ProcessName -in @('terminal', 'terminal64', 'metaeditor', 'metaeditor64', 'metatester', 'metatester64')
+    })
+    $tradingCount = $trading.Count
+    $tradingWorkingSet = [long]0
+    foreach ($process in $trading) {
+        $tradingWorkingSet += [long]$process.WorkingSet64
+    }
+} catch {
+    $tradingStatus = 'unavailable'
+    $tradingCount = $null
+    $tradingWorkingSet = $null
+}
 [ordered]@{
     schema = 'local-company.windows-host-inventory.v1'
     observedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -40,6 +60,10 @@ try {
     toolsOnPath = $tools
     listenerObservation = $portStatus
     relevantListeners = $ports
+    tradingWorkloadObservation = $tradingStatus
+    recognizedTradingProcessCount = $tradingCount
+    recognizedTradingWorkingSetBytes = $tradingWorkingSet
+    tradingInventoryComplete = $false
     deploymentReady = $null
     effects = @{ installs = $false; settingsChanged = $false; modelLoaded = $false; remoteConnection = $false }
 } | ConvertTo-Json -Depth 6
