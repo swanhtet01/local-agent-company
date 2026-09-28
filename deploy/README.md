@@ -363,11 +363,23 @@ export RESTIC_REPOSITORY="s3:s3.eu-central-1.amazonaws.com/your-bucket/workcell"
 export RESTIC_PASSWORD_FILE=/root/.restic-pass   # chmod 600, and keep a copy
                                                  # somewhere that is not this box
 restic init
+# Before capture: finish active jobs, stop queue dispatch, and exclude other
+# CLI/operator writers. Do not interrupt an in-flight mission for a backup.
+(
+set -eu
+docker compose stop coordinator
+# Restore service on failure too. Run from the accepted Compose directory.
+trap 'docker compose start coordinator' EXIT
 restic backup /var/lib/docker/volumes/local-workcell_company-state/_data
-restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+)
+# Retain the snapshot ID printed by restic with the accepted image/source ID.
+# Prune only under an approved retention policy after a successful restore drill.
 ```
 
-Put it on a timer:
+Automate only after the drain/stop/capture/restart sequence and restore drill
+have passed on the target host. A timer calling only `restic backup` does not
+coordinate the database with output/evidence writes. The following is a timer
+example, not an installed or accepted backup service:
 
 ```bash
 # /etc/systemd/system/workcell-backup.timer -> OnCalendar=daily, Persistent=true
@@ -387,14 +399,15 @@ acceptable start.
 > ```bash
 > (
 > set -eu
-> restic restore latest --target /tmp/restore-test
+> : "${RESTORE_SNAPSHOT_ID:?Set the exact accepted backup snapshot ID}"
+> restore_root=$(mktemp -d /tmp/workcell-restore.XXXXXX)
+> restic restore "$RESTORE_SNAPSHOT_ID" --target "$restore_root"
 > # Restic preserves the original absolute path beneath its target.
-> restored=/tmp/restore-test/var/lib/docker/volumes/local-workcell_company-state/_data
+> restored="$restore_root/var/lib/docker/volumes/local-workcell_company-state/_data"
 > scratch=$(mktemp -d /tmp/workcell-recovery.XXXXXX)
 > cp -a "$restored/." "$scratch/"
-> # Use the accepted snapshot, not the raw database captured during live writes.
-> rm -f "$scratch/company.db-wal" "$scratch/company.db-shm"
-> cp "$scratch/backup/company-20260928.db" "$scratch/company.db"
+> # Keep database, WAL and evidence from this same quiesced capture together.
+> # Never substitute an older database snapshot or discard its WAL.
 > sudo chown -R 10001:10001 "$scratch"
 > docker run --rm -v "$scratch:/state" local-workcell/coordinator:0.1.0 \
 >     local-company health
