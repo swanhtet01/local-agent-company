@@ -50,6 +50,10 @@ price estimates have been removed. Current provider references:
 - Start with the currently admitted 1B/3B model policy. Record task quality,
   latency, peak memory and cost per accepted result before changing models or
   adding a separate GPU inference host. No unmeasured throughput promises.
+- The Compose Ollama service sets `OLLAMA_NO_CLOUD=1`, disabling cloud models
+  and Ollama web search in addition to the coordinator's local-only policy.
+  Verify `Ollama cloud disabled: true` on the target after startup. This source
+  setting is not evidence that an existing Windows or VPS runtime has changed.
 - Keep customer product data and production credentials out of the worker by
   default. Supply only task-scoped inputs; preserve explicit external-action gates.
 

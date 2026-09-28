@@ -76,6 +76,8 @@ services:
       # from the coordinator. This is safe only because no port is published
       # and the network is not routable from outside the host.
       OLLAMA_HOST: 0.0.0.0:11434
+      # Enforce local inference at the runtime as well as in the coordinator.
+      OLLAMA_NO_CLOUD: "1"
       # Mirror the single-runtime discipline in AGENTS.md: one model resident,
       # one request in flight, scale to zero quickly.
       OLLAMA_KEEP_ALIVE: 30s
