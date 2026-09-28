@@ -12,23 +12,35 @@ before you promise anything to anybody. This packaging makes the coordinator
 
 ## 1. The box
 
-| | Hetzner CX32 | Contabo VPS S |
-|---|---|---|
-| vCPU / RAM | 4 / 8 GB | 4 / 8 GB |
-| Disk | 80 GB NVMe | 200 GB NVMe |
-| Price | ~€6.80/mo | ~€6–9/mo |
-| Location | Nuremberg / Helsinki / Ashburn / Singapore | EU / US / Asia |
+Start with a private CPU VPS for the coordinator, queue and bounded inference.
+8 GiB is the existing Compose floor (2 GiB coordinator, 5 GiB Ollama, 1 GiB
+host reserve); 16 GiB is a planning target for headroom, not authorization to
+increase concurrency or admit larger models. Recheck the provider quote,
+region, tax, storage and backup charges before purchase. Old CX32/Contabo
+price estimates have been removed. Current provider references:
+[Hetzner plans](https://www.hetzner.com/cloud/cost-optimized/) and
+[2026 price changes](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/).
 
-**8 GB is the floor, not the target.** The compose file splits it 5 GB Ollama /
-2 GB coordinator / ~1 GB host. `llama3.2:1b` at q4 sits around 1.5 GB resident
-and fits comfortably; `llama3.2:3b` sits around 3.5 GB and fits, but only if
-nothing else on the box is doing anything. Those two are the only models
-`model_policy.py` will admit, so do not size for anything larger.
+### Operating architecture
 
-CPU-only inference. A 1b model on 4 shared vCPUs produces roughly 10–25
-tokens/sec — fine for the 512-token bounded completions this system issues,
-useless for anything interactive. Do not rent a GPU box for this; the
-bottleneck is the review loop, not the tokens.
+- Keep the Ally as the operator console and retain existing product hosting.
+- Put one coordinator, durable SQLite ledger, evidence store and one Ollama
+  worker on the private VPS. No public model/dashboard ports.
+- Engineering, QA, research and commercial roles share the queue; they are
+  task roles, not one resident model per employee. Deterministic jobs run
+  without inference; generated work stays draft until its acceptance checks pass.
+- Reuse OpenCode as the coding interface. The Windows launcher is not a proven
+  Linux coding worker: validate sandboxed file changes and protected tests on
+  Linux before assigning unattended coding jobs.
+- Start with the currently admitted 1B/3B model policy. Record task quality,
+  latency, peak memory and cost per accepted result before changing models or
+  adding a separate GPU inference host. No unmeasured throughput promises.
+- Keep customer product data and production credentials out of the worker by
+  default. Supply only task-scoped inputs; preserve explicit external-action gates.
+
+Self-hosted tools avoid per-token API billing; server, storage and backup costs
+remain. Cloud allocation, digest-pinned images, a restored state rehearsal and
+one accepted evidence-bound job are required before calling this operational.
 
 Pick Ubuntu 24.04 LTS. Add your SSH public key at provisioning time so the box
 never has a password-authenticated window.
@@ -316,15 +328,12 @@ approval, quality record, and export. `ollama-models` is regenerable from
 that restores clean and is missing the last transactions. Use the backup API:
 
 ```bash
-# Consistent hot snapshot, no service downtime, stdlib only.
-docker compose exec coordinator python - <<'EOF'
-import sqlite3
-source = sqlite3.connect("file:/state/company.db?mode=ro", uri=True)
-target = sqlite3.connect("/state/backup/company.db")
-with target:
-    source.backup(target)
-source.close(); target.close()
-EOF
+# Create a private destination, then a new verified snapshot (never overwrite).
+docker compose exec -T coordinator mkdir -p /state/backup
+docker compose exec -T coordinator python deploy/snapshot_database.py \
+  /state/company.db /state/backup/company-20260928.db
+# Choose a unique dated filename for each run. A PASS verifies SQLite integrity
+# only; outputs/evidence files still require the encrypted full-volume backup.
 ```
 
 **restic — full volume, off-box, encrypted:**
@@ -357,11 +366,22 @@ acceptable start.
 > archiving a torn database for six months. Once a month:
 >
 > ```bash
+> (
+> set -eu
 > restic restore latest --target /tmp/restore-test
-> docker run --rm -v /tmp/restore-test:/state:ro local-workcell/coordinator:0.1.0 \
->     python /app/deploy/verify_linux_port.py --offline
-> docker run --rm -v /tmp/restore-test:/state:ro local-workcell/coordinator:0.1.0 \
+> # Restic preserves the original absolute path beneath its target.
+> restored=/tmp/restore-test/var/lib/docker/volumes/local-workcell_company-state/_data
+> scratch=$(mktemp -d /tmp/workcell-recovery.XXXXXX)
+> cp -a "$restored/." "$scratch/"
+> # Use the accepted snapshot, not the raw database captured during live writes.
+> rm -f "$scratch/company.db-wal" "$scratch/company.db-shm"
+> cp "$scratch/backup/company-20260928.db" "$scratch/company.db"
+> sudo chown -R 10001:10001 "$scratch"
+> docker run --rm -v "$scratch:/state" local-workcell/coordinator:0.1.0 \
 >     local-company health
+> # Compare restored store identity and receipt/evidence references with the
+> # recorded source. Never point this drill at the live company-state volume.
+> )
 > ```
 >
 > A restore that does not produce a readable store with the identity you expect
