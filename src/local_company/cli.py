@@ -97,6 +97,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    sub.add_parser("catalog-check", help="Validate catalog JSON from stdin without models or imports")
     computer = sub.add_parser(
         "computer", help="Learn, inspect, preview, and replay local Windows workflows"
     )
@@ -947,6 +948,11 @@ def _interactive_workflow_value(company_home: Path, *, input_fn=None) -> dict[st
 def main() -> int:
     try:
         args = parser().parse_args()
+        if args.command == "catalog-check":
+            from .spreadsheet import check_catalog_json
+            result = check_catalog_json(sys.stdin.read(1_000_001))
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result["valid"] else 1
         company_home = args.home if args.home is not None else default_company_home()
         company = Company(company_home.resolve(), selected_model(args))
         _enforce_cli_execution_focus(company, args)
