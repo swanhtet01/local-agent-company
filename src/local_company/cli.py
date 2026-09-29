@@ -97,7 +97,8 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
-    sub.add_parser("catalog-check", help="Validate catalog JSON from stdin without models or imports")
+    catalog = sub.add_parser("catalog-check", help="Validate catalog JSON from stdin without models or imports")
+    catalog.add_argument("--compare", action="store_true", help="Compare an expected/candidate JSON envelope without changing supplied fields")
     computer = sub.add_parser(
         "computer", help="Learn, inspect, preview, and replay local Windows workflows"
     )
@@ -949,8 +950,9 @@ def main() -> int:
     try:
         args = parser().parse_args()
         if args.command == "catalog-check":
-            from .spreadsheet import check_catalog_json
-            result = check_catalog_json(sys.stdin.read(1_000_001))
+            from .spreadsheet import check_catalog_json, compare_catalog_json
+            validator = compare_catalog_json if args.compare else check_catalog_json
+            result = validator(sys.stdin.read(1_000_001))
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result["valid"] else 1
         company_home = args.home if args.home is not None else default_company_home()

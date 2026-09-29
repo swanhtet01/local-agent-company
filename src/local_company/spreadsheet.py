@@ -522,3 +522,48 @@ def check_catalog_json(source: str) -> dict[str, object]:
     return {"schema": "supermega.catalog-check.v1", "valid": not errors,
             "rows": rows, "errors": errors, "model_called": False,
             "import_performed": False, "commercial_acceptance": False}
+
+
+def compare_catalog_json(source: str) -> dict[str, object]:
+    """Compare extracted records with explicit expected data, never model claims.
+
+    Exact agreement is distinct from import readiness: faithfully retained missing
+    prices pass preservation but still prevent a valid/import-ready receipt.
+    """
+    result = {"schema": "supermega.catalog-comparison.v1", "valid": False,
+              "preserved": False, "differences": [], "model_called": False,
+              "import_performed": False, "commercial_acceptance": False}
+
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate_key")
+            obj[key] = value
+        return obj
+
+    try:
+        if len(source) > 1_000_000:
+            raise ValueError("too_large")
+        envelope = json.loads(source, object_pairs_hook=unique)
+        if not isinstance(envelope, dict) or set(envelope) != {"expected", "candidate"}:
+            raise ValueError("invalid_envelope")
+        expected = check_catalog_json(json.dumps(envelope["expected"]))
+        candidate = check_catalog_json(json.dumps(envelope["candidate"]))
+    except (ValueError, RecursionError):
+        return {**result, "error": "invalid_comparison_envelope"}
+    # Missing source prices are legitimate unknowns, not malformed references.
+    if any(e["code"] != "owner_input_required" for e in expected["errors"]):
+        return {**result, "error": "invalid_expected_catalog"}
+    differences = []
+    expected_rows, candidate_rows = envelope["expected"], envelope["candidate"]
+    if not isinstance(candidate_rows, list) or len(expected_rows) != len(candidate_rows):
+        differences.append({"row": None, "field": "catalog", "code": "record_count_changed"})
+    else:
+        for index, (before, after) in enumerate(zip(expected_rows, candidate_rows), 1):
+            for field in ("name", "category", "currency", "price"):
+                if not isinstance(after, dict) or field not in after or type(before[field]) is not type(after[field]) or before[field] != after[field]:
+                    differences.append({"row": index, "field": field, "code": "source_value_changed"})
+    return {**result, "valid": not differences and candidate["valid"],
+            "preserved": not differences and not any(e["code"] != "owner_input_required" for e in candidate["errors"]),
+            "differences": differences, "candidate_errors": candidate["errors"]}

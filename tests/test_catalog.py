@@ -3,11 +3,41 @@ import json
 import unittest
 from unittest.mock import patch
 
-from local_company.spreadsheet import check_catalog_json
+from local_company.spreadsheet import check_catalog_json, compare_catalog_json
 from local_company.cli import main
 
 
 class CatalogTests(unittest.TestCase):
+    def test_comparison_preserves_unknowns_without_import_readiness(self):
+        rows = self.rows()
+        result = compare_catalog_json(json.dumps({"expected": rows, "candidate": rows}))
+        self.assertTrue(result["preserved"])
+        self.assertFalse(result["valid"])
+
+    def test_comparison_rejects_plausible_but_changed_values(self):
+        for field, value in [("price", "4600"), ("name", "latte"), ("currency", "THB"), ("category", "Bakery")]:
+            expected = self.rows()[:2]
+            candidate = [dict(row) for row in expected]
+            candidate[0][field] = value
+            result = compare_catalog_json(json.dumps({"expected": expected, "candidate": candidate}))
+            self.assertFalse(result["preserved"])
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["differences"][0]["field"], field)
+
+    def test_comparison_rejects_fabricated_missing_price_and_extra_records(self):
+        expected = self.rows()
+        for candidate in [[{**row, "price": "1000"} if row["price"] is None else row for row in expected], expected[:2], expected + [expected[0]], None]:
+            result = compare_catalog_json(json.dumps({"expected": expected, "candidate": candidate}))
+            self.assertFalse(result["preserved"])
+            self.assertFalse(result["valid"])
+
+    def test_comparison_accepts_exact_complete_catalog_only(self):
+        rows = self.rows()[:2]
+        result = compare_catalog_json(json.dumps({"expected": rows, "candidate": rows}))
+        self.assertTrue(result["valid"])
+        for source in ['{"expected":[],"expected":[],"candidate":[]}', '{}', '[]']:
+            self.assertFalse(compare_catalog_json(source)["valid"])
+
     def rows(self):
         return [dict(name=n, price=p, currency="MMK", category=c) for n, p, c in
                 [("Latte", "4500", "Drinks"), ("Croissant", "3500", "Bakery"),
