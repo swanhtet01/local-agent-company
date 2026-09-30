@@ -146,6 +146,17 @@ usermod -aG docker founder     # log out and back in for this to take effect
 
 ## 3. Deploy
 
+Before starting containers, run `python3 deploy/inspect_linux_capacity.py` from
+an existing checkout on the target host, on the filesystem intended for state
+and model storage. This reads capacity only: no network calls, installs or model
+launches. Exit 0 means at least 8 GiB currently available RAM and 20 GiB free disk;
+exit 2 means insufficient capacity; exit 1 means inspection unavailable. An
+advertised 8 GiB server may fail because the OS already uses some memory. Do not
+lower the reserve merely to pass. Reconcile existing workload peaks, container
+limits, backup/restore and isolation separately. This receipt never accepts a
+deployment, and measurements inside a container do not qualify its host.
+
+
 ```bash
 su - founder
 git clone <your-remote> ~/local-agent-company
