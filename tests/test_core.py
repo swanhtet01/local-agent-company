@@ -8772,3 +8772,60 @@ class BoundedTaskPromptTests(unittest.TestCase):
         from local_company.core import bounded_task_prompt
         with self.assertRaisesRegex(ValueError, 'split the task'):
             bounded_task_prompt('system', 'objective ' * 1000, ['reference'], num_ctx=4096, num_predict=768)
+
+class SingleTaskWorkerTests(unittest.TestCase):
+    def run_task(self, reply, objective='Write a reply using supplied facts. Use at most 80 words.'):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.model = RecordingModel()
+        self.model.complete = Mock(return_value=reply)
+        self.company = Company(Path(self.temp.name), self.model)
+        job, _ = self.company.run(objective, roles=PLAYBOOKS['task']['roles'])
+        return self.company.job_detail(job), self.company.evaluate_job(job)
+
+    def test_single_generation_preserves_actual_requested_deliverable(self):
+        reply = 'Sunday hours are 08:00 to 17:00. WiFi availability is unknown.'
+        detail, quality = self.run_task(reply)
+        self.assertEqual(self.model.complete.call_count, 1)
+        self.assertEqual(detail['job'][7], reply)
+        self.assertTrue(quality['passed'], quality)
+        system, prompt = self.model.complete.call_args.args
+        self.assertIn('Return only the deliverable', system)
+        self.assertNotIn('next three local actions', system.lower())
+        self.assertTrue(prompt.endswith('Use at most 80 words.'))
+
+    def test_model_output_is_not_shortened_to_fake_acceptance(self):
+        reply = 'word ' * 90
+        detail, quality = self.run_task(reply)
+        self.assertEqual(detail['job'][7], reply)
+        self.assertFalse(quality['checks']['task_within_word_limit'])
+        self.assertFalse(quality['passed'])
+
+    def test_invented_approval_is_rejected(self):
+        _, quality = self.run_task('Owner Approvals: Approved.')
+        self.assertFalse(quality['checks']['task_no_invented_approval'])
+        self.assertFalse(quality['passed'])
+
+    def test_task_mode_only_retrieves_explicitly_named_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp) / 'state', RecordingModel())
+            source = Path(tmp) / 'hours.md'
+            source.write_text('Sunday opening 08:00 closing 17:00. WiFi unknown.\n')
+            company.add_knowledge(source)
+            self.assertTrue(company.search_knowledge('Sunday opening'))
+            self.assertEqual(company.search_knowledge('Sunday opening', named_only=True), [])
+            self.assertTrue(company.search_knowledge('Use hours.md for Sunday opening', named_only=True))
+
+    def test_task_mode_does_not_authorize_external_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = RecordingModel()
+            company = Company(Path(tmp), model)
+            with self.assertRaises(PermissionError):
+                company.run('Send email to customers now', roles=PLAYBOOKS['task']['roles'])
+            self.assertEqual(model.prompts, [])
+
+
+    def test_empty_single_task_result_is_rejected(self):
+        _, quality = self.run_task('   ')
+        self.assertFalse(quality['checks']['synthesis_present'])
+        self.assertFalse(quality['passed'])
