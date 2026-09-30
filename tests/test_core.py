@@ -2398,6 +2398,19 @@ class CompanyTests(unittest.TestCase):
             replacement_job, _ = company.run("Review local inventory")
             self.assertNotEqual(replacement_job, job_id)
 
+    def test_quality_rejects_destructive_git_command_presented_as_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), MockModel())
+            job_id, report = company.run("Review local inventory")
+            report.write_text(
+                report.read_text(encoding="utf-8")
+                + "\nNext read-only command: `git checkout --force HEAD`\n",
+                encoding="utf-8",
+            )
+            evaluation = company.evaluate_job(job_id)
+            self.assertFalse(evaluation["passed"])
+            self.assertFalse(evaluation["checks"]["unperformed_action_claims_absent"])
+
     def test_recovery_finishes_prepared_report_without_model_rerun(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = CountingMockModel()

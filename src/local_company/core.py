@@ -7005,6 +7005,11 @@ class Company:
             r"\bdeployed\s+immediately\b",
             r"\bscheduled\s*:\s*",
             r"\b(?:has|have|had)\s+been\s+(?:sent|published|deployed|purchased|paid|scheduled)\b",
+            # Recommendations must never smuggle a destructive command through as
+            # a supposedly read-only inspection. Those actions need an explicit
+            # owner-gated plan outside an accepted local-agent report.
+            r"\bgit\s+(?:checkout\s+--force|reset\s+--hard|clean(?:\s+-[a-zA-Z]+)*\s+-[fd])\b",
+            r"\b(?:rm\s+-rf|remove-item\b[^\n]{0,80}\b-recurse\b|del(?:ete)?\s+/[fsq])\b",
         )
         checks["unperformed_action_claims_absent"] = not any(
             re.search(pattern, combined_report_output, flags=re.IGNORECASE)
