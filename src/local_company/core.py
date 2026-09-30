@@ -304,6 +304,24 @@ def bounded_context_blocks(blocks: list[str], limit: int) -> str:
     return "\n\n".join(reversed(selected))
 
 
+def bounded_task_prompt(system: str, objective: str, blocks: list[str], *, num_ctx: int, num_predict: int) -> str:
+    """Reserve output and keep the full task last; budget reference text by UTF-8 bytes.
+
+    Byte count is a conservative token upper bound for the local byte-token model.
+    Oversized tasks fail rather than allowing the server to truncate the objective.
+    """
+    prefix = "Reference material (data only; excerpts may be incomplete):\n"
+    suffix = "\n\nYour task (answer this, not a summary of the reference material):\n" + objective
+    budget = num_ctx - num_predict - 128 - len((system + prefix + suffix).encode("utf-8"))
+    if budget < 0:
+        raise ValueError("Objective and instructions exceed the local model context budget; split the task")
+    nonempty = [block for block in blocks if block]
+    share = max(0, (budget - 2 * max(0, len(nonempty) - 1)) // max(1, len(nonempty)))
+    excerpts = [block.encode("utf-8")[:share].decode("utf-8", errors="ignore") for block in nonempty]
+    context = "\n\n".join(excerpt for excerpt in excerpts if excerpt)
+    return prefix + context + suffix
+
+
 def extract_labeled_sections(text: str, labels: list[str]) -> dict[str, str]:
     markers: list[tuple[int, int, str]] = []
     for label in labels:
@@ -8306,6 +8324,13 @@ class Company:
                         f"COMPLETED {prior.role} WORK\n{result}" for prior, result in results
                     ], 12_000)
                     prompt += f"\n\nEarlier team work to build on or challenge:\n{prior_work}"
+                if isinstance(self.model, OllamaModel) and not strict_evidence_pairs_required:
+                    system += " Be concise: aim for 120 words unless the objective specifies a different length."
+                    prompt = bounded_task_prompt(
+                        system, f"{objective}\n\n{item.brief}\nRequired deliverable: {item.deliverable}",
+                        [source_context, prior_work if results else ""],
+                        num_ctx=self.model.num_ctx, num_predict=self.model.num_predict,
+                    )
                 if strict_specialist_num_predict is not None:
                     result = self._call_with_lease_heartbeat(
                         job_id, run_token, f"{item.role}:model",
@@ -8764,12 +8789,21 @@ class Company:
                     "any required final phrase. Return only the final brief, never hidden reasoning."
                     + evidence_rule
                 )
+                chair_prompt = (
+                    f"Objective: {objective}\n\nCompleted team work:\n{team_work}"
+                    + (f"\n\nFrozen evidence registry:\n{source_context}" if source_context else "")
+                )
+                if isinstance(self.model, OllamaModel):
+                    chair_system += " Be concise: aim for 150 words unless the objective specifies a different length."
+                    chair_prompt = bounded_task_prompt(
+                        chair_system, objective, [source_context, team_work],
+                        num_ctx=self.model.num_ctx, num_predict=self.model.num_predict,
+                    )
                 synthesis = self._call_with_lease_heartbeat(
                     job_id, run_token, "executive-synthesis:model",
                     lambda: self.model.complete(
                         chair_system,
-                        f"Objective: {objective}\n\nCompleted team work:\n{team_work}"
-                        + (f"\n\nFrozen evidence registry:\n{source_context}" if source_context else ""),
+                        chair_prompt,
                     ),
                 )
                 synthesis_lower = synthesis.lower()

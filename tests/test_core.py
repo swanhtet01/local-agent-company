@@ -8745,3 +8745,30 @@ class AgentAPIComputerRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BoundedTaskPromptTests(unittest.TestCase):
+    def test_long_references_cannot_push_objective_out_of_context(self):
+        from local_company.core import bounded_task_prompt
+        system = 'Follow the task and label assumptions.'
+        objective = 'Propose five checks for customer comprehension. Do not claim measured success.'
+        prompt = bounded_task_prompt(system, objective, ['SOURCE\n' + 'history ' * 4000, 'TEAM\n' + 'draft ' * 4000], num_ctx=4096, num_predict=768)
+        self.assertTrue(prompt.endswith(objective))
+        self.assertLessEqual(len((system + prompt).encode('utf-8')) + 768 + 128, 4096)
+        self.assertIn('SOURCE', prompt)
+        self.assertIn('TEAM', prompt)
+        self.assertEqual(prompt.count(objective), 1)
+
+    def test_unicode_reference_budget_and_tiny_remaining_budget(self):
+        from local_company.core import bounded_task_prompt
+        for budget in [0, 1, 2, 50, 300]:
+            empty = bounded_task_prompt('system', 'task', [], num_ctx=4096, num_predict=768)
+            context_size = len(('system' + empty).encode()) + 768 + 128 + budget
+            prompt = bounded_task_prompt('system', 'task', ['မြန်မာ' * 500, 'second' * 500], num_ctx=context_size, num_predict=768)
+            self.assertTrue(prompt.endswith('task'))
+            self.assertLessEqual(len(('system' + prompt).encode()) + 768 + 128, context_size)
+            self.assertNotIn('\ufffd', prompt)
+
+    def test_oversized_objective_is_not_silently_truncated(self):
+        from local_company.core import bounded_task_prompt
+        with self.assertRaisesRegex(ValueError, 'split the task'):
+            bounded_task_prompt('system', 'objective ' * 1000, ['reference'], num_ctx=4096, num_predict=768)
