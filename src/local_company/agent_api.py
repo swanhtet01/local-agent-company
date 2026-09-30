@@ -374,7 +374,7 @@ class AgentAPI:
 
     def submit(self, payload: object) -> AgentAPIResponse:
         value = _require_mapping(payload)
-        _strict_keys(value, {"objective", "profile", "project", "priority", "start", "runConfirmation"})
+        _strict_keys(value, {"objective", "profile", "project", "priority", "start", "runConfirmation", "selection"})
         objective = value.get("objective")
         profile = value.get("profile", "auto")
         project = value.get("project")
@@ -434,7 +434,7 @@ class AgentAPI:
         try:
             queue_id = self.company.enqueue(
                 objective, project.strip() if isinstance(project, str) else None,
-                playbook=playbook, priority=priority, source="agent-api",
+                playbook=playbook, priority=priority, source="agent-api", selection=value.get("selection"),
             )
         except ValueError as exc:
             raise AgentAPIError(400, "mission_submission_invalid", str(exc)) from exc

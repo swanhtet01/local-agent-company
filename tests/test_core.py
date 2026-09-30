@@ -8829,3 +8829,51 @@ class SingleTaskWorkerTests(unittest.TestCase):
         _, quality = self.run_task('   ')
         self.assertFalse(quality['checks']['synthesis_present'])
         self.assertFalse(quality['passed'])
+
+
+class QueuedSelectionTests(unittest.TestCase):
+    def test_persisted_selection_reaches_structured_model_and_survives_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = RecordingModel()
+            model.complete_structured = Mock(return_value={'selected': ['hours']})
+            company = Company(Path(tmp), model)
+            selection = {'choices': ['hours', 'menu'], 'max_choices': 1}
+            queue = company.enqueue('Choose the option matching opening hours.', playbook='task', selection=selection)
+            reopened = Company(Path(tmp), model)
+            _, job, _, passed = reopened.run_next_queue_item(queue)
+            self.assertTrue(passed)
+            self.assertEqual(json.loads(reopened.job_detail(job)['job'][7]), {'selected': ['hours']})
+            schema = model.complete_structured.call_args.args[2]
+            self.assertEqual(schema['properties']['selected']['items']['enum'], ['hours', 'menu'])
+            self.assertEqual(model.prompts, [])
+
+    def test_invalid_or_unsupported_contract_never_enters_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), RecordingModel())
+            for value in ({}, {'choices': ['hours', 'hours'], 'max_choices': 1},
+                          {'choices': ['hours'], 'max_choices': True},
+                          {'choices': [1], 'max_choices': 1},
+                          {'choices': ['hours'], 'max_choices': 2}):
+                with self.assertRaises(ValueError):
+                    company.enqueue('Choose one option.', playbook='task', selection=value)
+            with self.assertRaises(ValueError):
+                company.enqueue('Choose one option.', selection={'choices': ['hours'], 'max_choices': 1})
+            self.assertEqual(company.queue_items(), [])
+
+    def test_model_contract_violations_fail_closed(self):
+        from local_company.core import validate_selection
+        contract = {'choices': ['hours', 'menu'], 'max_choices': 1}
+        for value in ({'selected': ['closing']}, {'selected': ['hours', 'hours']},
+                      {'selected': []}, {'selected': ['hours'], 'prose': 'extra'},
+                      {'selected': [{}]}, {'selected': ['hours', 'menu']}, 'hours'):
+            with self.assertRaises(ValueError): validate_selection(value, contract)
+
+    def test_agent_api_persists_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            company = Company(Path(tmp), RecordingModel())
+            api = AgentAPI(company, LocalQueueWorker(company))
+            contract = {'choices': ['hours'], 'max_choices': 1}
+            response = api.submit({'objective': 'Choose opening hours.', 'profile': 'task', 'selection': contract})
+            with closing(company._connect()) as db:
+                stored = db.execute('SELECT selection_json FROM mission_queue').fetchone()[0]
+            self.assertEqual(json.loads(stored), contract)

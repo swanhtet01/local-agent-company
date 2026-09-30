@@ -309,6 +309,36 @@ def bounded_context_blocks(blocks: list[str], limit: int) -> str:
     return "\n\n".join(reversed(selected))
 
 
+def selection_schema(selection):
+    """Bounded, domain-independent selection contract for queued tasks."""
+    if selection is None:
+        return None
+    if not isinstance(selection, dict) or set(selection) != {'choices', 'max_choices'}:
+        raise ValueError('invalid selection contract')
+    choices, limit = selection['choices'], selection['max_choices']
+    if (not isinstance(choices, list) or not 1 <= len(choices) <= 32
+            or any(not isinstance(x, str) or re.fullmatch(r'[a-z][a-z0-9_.-]{0,63}', x) is None for x in choices)
+            or len(set(choices)) != len(choices)
+            or type(limit) is not int or not 1 <= limit <= len(choices)):
+        raise ValueError('invalid selection choices or limit')
+    return {'type': 'object', 'properties': {'selected': {'type': 'array',
+            'items': {'type': 'string', 'enum': choices}, 'minItems': 1,
+            'maxItems': limit, 'uniqueItems': True}},
+            'required': ['selected'], 'additionalProperties': False}
+
+
+def validate_selection(result, selection):
+    selection_schema(selection)
+    if not isinstance(result, dict) or set(result) != {'selected'}:
+        raise ValueError('invalid selection response')
+    values = result['selected']
+    if (not isinstance(values, list) or not 1 <= len(values) <= selection['max_choices']
+            or any(not isinstance(x, str) or x not in selection['choices'] for x in values)
+            or len(set(values)) != len(values)):
+        raise ValueError('invalid selected choices')
+    return json.dumps(result, sort_keys=True)
+
+
 def bounded_task_prompt(system: str, objective: str, blocks: list[str], *, num_ctx: int, num_predict: int) -> str:
     """Reserve output and keep the full task last; budget reference text by UTF-8 bytes.
 
@@ -2299,6 +2329,7 @@ class Company:
             self._ensure_column(db, "jobs", "evidence_manifest_sha256", "TEXT")
             self._ensure_column(db, "jobs", "run_token", "TEXT")
             self._ensure_column(db, "mission_queue", "run_token", "TEXT")
+            self._ensure_column(db, "mission_queue", "selection_json", "TEXT")
             self._ensure_column(db, "assignments", "deliverable", "TEXT")
             self._ensure_column(db, "assignments", "sequence", "INTEGER")
             self._ensure_column(db, "evaluation_history", "manifest_sha256", "TEXT")
@@ -5141,7 +5172,7 @@ class Company:
     def enqueue(
         self, objective: str, project: str | None = None, roles: list[str] | None = None,
         playbook: str | None = None, priority: int = 50, scheduled_at: str | None = None,
-        source: str = "cli",
+        source: str = "cli", selection: dict | None = None,
     ) -> str:
         self.initialize()
         objective = objective.strip()
@@ -5151,6 +5182,9 @@ class Company:
             raise ValueError(f"Queued objective cannot exceed {MAX_OBJECTIVE_CHARS} characters")
         if priority < 0 or priority > 100:
             raise ValueError("Priority must be between 0 and 100")
+        selection_schema(selection)
+        if selection is not None and playbook != 'task':
+            raise ValueError('selection requires task profile')
         source = " ".join(source.split())
         if not source or len(source) > 40:
             raise ValueError("Queue source must contain 1 to 40 characters")
@@ -5179,10 +5213,10 @@ class Company:
         with closing(self._connect(immediate=True)) as db, db:
             db.execute(
                 "INSERT INTO mission_queue("
-                "id, objective, project_id, roles_json, playbook, priority, status, scheduled_at, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+                "id, objective, project_id, roles_json, playbook, priority, status, scheduled_at, created_at, selection_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
                 (queue_id, objective, project_id, json.dumps(roles) if roles else None,
-                 playbook, priority, scheduled_text, utc_now()),
+                 playbook, priority, scheduled_text, utc_now(), json.dumps(selection) if selection is not None else None),
             )
             self._event(
                 db, None, "queue_enqueued",
@@ -7973,6 +8007,15 @@ class Company:
             raise ValueError(f"Objective cannot exceed {MAX_OBJECTIVE_CHARS} characters")
         project_id, project_name = self._resolve_project(project) if project else (None, None)
         assignments = self.plan(objective, roles)
+        selection = None
+        if _queue_id is not None:
+            with closing(self._connect()) as db:
+                selection_row = db.execute('SELECT selection_json FROM mission_queue WHERE id=?', (_queue_id,)).fetchone()
+            if selection_row and selection_row[0]:
+                selection = json.loads(selection_row[0])
+        output_schema = selection_schema(selection)
+        if selection is not None and [item.role for item in assignments] != ['task-worker']:
+            raise ValueError('selection requires single task execution')
         enforce_execution_focus(
             read_execution_focus(self.home), project_id,
             [assignment.role for assignment in assignments], "run",
@@ -8008,6 +8051,7 @@ class Company:
                 "objective": objective,
                 "project_id": project_id,
                 "execution_fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
+                "selection": selection,
                 "strict_specialist_num_predict_cap": STRICT_SPECIALIST_NUM_PREDICT_CAP,
                 "strict_synthesis_schema": STRICT_SYNTHESIS_SCHEMA,
                 "runtime": runtime_identity or {
@@ -8164,6 +8208,12 @@ class Company:
         defer_evaluation: bool = False, _queue_claim: QueueClaim | None = None,
     ) -> tuple[str, Path]:
         task_mode = [item.role for item in assignments] == ["task-worker"]
+        with closing(self._connect()) as db:
+            selection_row = db.execute('SELECT selection_json FROM mission_queue WHERE job_id=?', (job_id,)).fetchone()
+        selection = json.loads(selection_row[0]) if selection_row and selection_row[0] else None
+        output_schema = selection_schema(selection)
+        if output_schema is not None and not task_mode:
+            raise ValueError('selection requires single task execution')
         source_context = "\n\n".join(
             f"[EVIDENCE:{hit.evidence_id}] SOURCE {hit.path} lines {hit.line_start}-{hit.line_end} "
             f"sha256={hit.source_sha256}\n{hit.excerpt}" for hit in sources
@@ -8363,7 +8413,13 @@ class Company:
                         num_ctx=getattr(self.model, "num_ctx", 4096),
                         num_predict=getattr(self.model, "num_predict", 768),
                     )
-                if strict_specialist_num_predict is not None:
+                if output_schema is not None:
+                    structured = self._call_with_lease_heartbeat(
+                        job_id, run_token, f"{item.role}:model",
+                        lambda: self.model.complete_structured(system, prompt, output_schema),
+                    )
+                    result = validate_selection(structured, selection)
+                elif strict_specialist_num_predict is not None:
                     result = self._call_with_lease_heartbeat(
                         job_id, run_token, f"{item.role}:model",
                         lambda: self.model.complete_bounded(
