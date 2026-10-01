@@ -226,7 +226,7 @@ MAX_PROFILE_ROWS = 10_000
 MAX_OBJECTIVE_CHARS = 4_000
 RUN_KNOWLEDGE_HIT_LIMIT = 8
 RECENT_JOB_REUSE_SECONDS = 86_400
-EVALUATOR_VERSION = "local-quality-2026-09-30.1"
+EVALUATOR_VERSION = "local-quality-2026-10-01.1"
 EXECUTION_FINGERPRINT_VERSION = "local-run-2026-07-27.17"
 EVIDENCE_MANIFEST_SCHEMA = "local-company.evidence-manifest.v1"
 STRICT_SYNTHESIS_SCHEMA = "local-company.strict-synthesis.v10"
@@ -416,6 +416,10 @@ _COMPLETION_CLAIM_PATTERN = re.compile(
 )
 _HIGH_RISK_CLAIM_PATTERNS = {
     "owner_approval": (
+        re.compile(
+            r"\bowner\s+approvals?\s*:\s*(?:approved|granted|confirmed|received)\b",
+            flags=re.IGNORECASE,
+        ),
         re.compile(
             r"\bowner\s+approvals?\s+(?:(?:has|have|had|was|were|is|are)\s+)?"
             r"(?:been\s+)?(?:received|granted|secured|confirmed|approved)\b",

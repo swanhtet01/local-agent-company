@@ -1344,6 +1344,7 @@ class CompanyTests(unittest.TestCase):
         self.assertEqual(negative_boundaries, [])
 
         findings = unsupported_commercial_authority_claims(
+            "Owner Approval: Approved to run this job. "
             "The following owner approvals have been received. This provides concrete proof "
             "of the market's demand. The pilot has been proven through proof baseline. "
             "SuperMega has a strong presence in Myanmar.",
