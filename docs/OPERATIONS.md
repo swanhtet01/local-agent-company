@@ -5,6 +5,17 @@
 > README. It is written for someone already running the system. If you are new,
 > start with the [README](../README.md) first.
 
+## Mission execution evidence
+
+The agent mission endpoint separates job history from the current safety review.
+`execution.modelCalled=true` means the job contains recorded `model_metrics`
+events; `recordedModelMetricEvents` counts those events, not guaranteed unique
+requests. Without these events, `modelCalled` is null and evidence is
+`not_recorded`, since absent telemetry cannot prove no inference occurred.
+`result.safety.modelCalled=false` applies only to the deterministic synthesis
+review named by `result.safety.scope`. Neither field changes quality acceptance
+or makes an unusable result usable.
+
 ## Set up this Windows user
 
 From a repository checkout or an extracted private pilot bundle, run the

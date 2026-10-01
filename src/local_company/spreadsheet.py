@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+from decimal import Decimal
 import os
 import posixpath
 import re
@@ -459,3 +461,109 @@ def profile_xlsx(raw: bytes, *, sheet: str | None, max_rows: int) -> Spreadsheet
         formula_cells_ignored=formula_cells,
         error_cells_ignored=error_cells,
     )
+
+
+def check_catalog_json(source: str) -> dict[str, object]:
+    """Validate explicit records without inventing or silently converting fields."""
+    errors: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = []
+
+    def reject(index: int | None, field: str, code: str) -> None:
+        errors.append({"row": index, "field": field, "code": code})
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate_key")
+            result[key] = value
+        return result
+
+    try:
+        if len(source) > 1_000_000:
+            raise ValueError("too_large")
+        data = json.loads(source, object_pairs_hook=unique_object)
+        if not isinstance(data, list) or not 1 <= len(data) <= 1000:
+            raise ValueError("invalid_inventory")
+    except (ValueError, RecursionError):
+        data = []
+        reject(None, "catalog", "invalid_json_inventory")
+
+    seen: set[str] = set()
+    for index, row in enumerate(data, 1):
+        if not isinstance(row, dict) or set(row) != {"name", "category", "currency", "price"}:
+            reject(index, "record", "exact_fields_required")
+            continue
+        start = len(errors)
+        for field in ("name", "category"):
+            value = row[field]
+            if not isinstance(value, str) or not value.strip() or len(value) > 200 or any(ord(c) < 32 for c in value):
+                reject(index, field, "invalid_text")
+        name = row["name"]
+        if isinstance(name, str):
+            identity = name.strip().casefold()
+            if identity in seen:
+                reject(index, "name", "duplicate_name")
+            seen.add(identity)
+        currency = row["currency"]
+        precision = {"MMK": 0, "THB": 2, "USD": 2}.get(currency) if isinstance(currency, str) else None
+        if precision is None:
+            reject(index, "currency", "unsupported_currency")
+        price = row["price"]
+        if price is None or price == "":
+            reject(index, "price", "owner_input_required")
+        elif not isinstance(price, str) or not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,2})?", price):
+            reject(index, "price", "decimal_string_required")
+        elif Decimal(price) <= 0:
+            reject(index, "price", "positive_price_required")
+        elif precision is not None and len(price.partition(".")[2]) > precision:
+            reject(index, "price", "currency_precision_exceeded")
+        rows.append({**row, "valid": len(errors) == start})
+    return {"schema": "supermega.catalog-check.v1", "valid": not errors,
+            "rows": rows, "errors": errors, "model_called": False,
+            "import_performed": False, "commercial_acceptance": False}
+
+
+def compare_catalog_json(source: str) -> dict[str, object]:
+    """Compare extracted records with explicit expected data, never model claims.
+
+    Exact agreement is distinct from import readiness: faithfully retained missing
+    prices pass preservation but still prevent a valid/import-ready receipt.
+    """
+    result = {"schema": "supermega.catalog-comparison.v1", "valid": False,
+              "preserved": False, "differences": [], "model_called": False,
+              "import_performed": False, "commercial_acceptance": False}
+
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate_key")
+            obj[key] = value
+        return obj
+
+    try:
+        if len(source) > 1_000_000:
+            raise ValueError("too_large")
+        envelope = json.loads(source, object_pairs_hook=unique)
+        if not isinstance(envelope, dict) or set(envelope) != {"expected", "candidate"}:
+            raise ValueError("invalid_envelope")
+        expected = check_catalog_json(json.dumps(envelope["expected"]))
+        candidate = check_catalog_json(json.dumps(envelope["candidate"]))
+    except (ValueError, RecursionError):
+        return {**result, "error": "invalid_comparison_envelope"}
+    # Missing source prices are legitimate unknowns, not malformed references.
+    if any(e["code"] != "owner_input_required" for e in expected["errors"]):
+        return {**result, "error": "invalid_expected_catalog"}
+    differences = []
+    expected_rows, candidate_rows = envelope["expected"], envelope["candidate"]
+    if not isinstance(candidate_rows, list) or len(expected_rows) != len(candidate_rows):
+        differences.append({"row": None, "field": "catalog", "code": "record_count_changed"})
+    else:
+        for index, (before, after) in enumerate(zip(expected_rows, candidate_rows), 1):
+            for field in ("name", "category", "currency", "price"):
+                if not isinstance(after, dict) or field not in after or type(before[field]) is not type(after[field]) or before[field] != after[field]:
+                    differences.append({"row": index, "field": field, "code": "source_value_changed"})
+    return {**result, "valid": not differences and candidate["valid"],
+            "preserved": not differences and not any(e["code"] != "owner_input_required" for e in candidate["errors"]),
+            "differences": differences, "candidate_errors": candidate["errors"]}

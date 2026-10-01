@@ -2,7 +2,7 @@
 
 > Teach it once. Preview it safely. Run it locally. Prove what changed.
 
-Product review date: 2026-08-05
+Product review date: 2026-09-03
 
 ## Product decision
 
@@ -220,6 +220,64 @@ record task frequency, human minutes, error cost, application, external-effect
 risk, and a machine-checkable success state. Choose the highest-time task that
 has a stable local or test environment and no irreversible side effect.
 
+That selection is now executable instead of being a planning instruction:
+
+```powershell
+.\local-ai.cmd value add
+.\local-ai.cmd value next --project SuperMega
+.\local-ai.cmd value bind OPPORTUNITY_ID WORKFLOW_NAME
+.\local-ai.cmd value status OPPORTUNITY_ID
+.\local-ai.cmd value pack OPPORTUNITY_ID
+```
+
+`value add` without arguments opens the guided local wizard; `value add --help`
+shows the scriptable flags. It records at least three owner-observed manual
+runs, the task's frequency and error exposure, an hourly capacity value,
+technical safety facts, and an owner-supplied price/delivery-cost scenario.
+`value next` ranks only comparable currencies (`supermega value` is the optional
+configured-project shortcut). The gate requires positive first-year value for the
+customer, payback within policy, positive first-year gross profit for
+SuperMega, the configured minimum margin, a local/test machine-verifiable task,
+and a matching 20-run pilot bound to the unchanged sealed workflow. A different
+pilot baseline, changed workflow, corrupt record, irreversible effect,
+credential requirement, or mixed currency fails closed.
+
+## Commercial play
+
+The initial wedge is not a general agent subscription. It is a two-step service:
+
+1. **Private Web Release Proof:** sell supervised setup, assertions, a baseline,
+   ten fresh-browser checks, a failure review, and a receipt pack. The engine is
+   already repeatable; the remaining unknown is paid demand.
+2. **Private Workcell upsell:** during delivery, observe one expensive repeated
+   local/test workflow at least three times. Offer implementation only when the
+   scorecard and its matching 20-run supervised pilot both pass.
+
+This avoids competing on runtime alone. As of 2026-09-03, Microsoft's published
+Power Automate list prices start at USD 15/user/month for attended flows and USD
+150/bot/month for a Process license; Axiom lists USD 15/month for five runtime
+hours and USD 50/month for thirty; n8n lists EUR 20/month for 2,500 hosted
+executions and also offers a self-hosted community edition. Those products sell
+automation capacity. SuperMega's narrow value is private implementation on the
+customer's actual awkward workflow, deterministic outcome checks, local
+evidence, operator training, and bounded support—not cheaper generic tokens or
+executions. Prices change; verify the linked vendor pages before any proposal:
+[Power Automate pricing](https://www.microsoft.com/en-us/power-platform/products/power-automate/pricing),
+[Axiom pricing](https://axiom.ai/pricing/), and
+[n8n pricing](https://n8n.io/pricing/).
+
+Use the scorecard as a mutual-profit constraint, not as a pricing oracle:
+
+- Customer first-year net value must remain positive and setup payback must be
+  no longer than the owner policy (six months by default).
+- SuperMega first-year revenue is setup plus twelve months of support; delivery
+  cost includes setup hours and twelve months of support hours. Gross profit
+  must be positive and margin must meet policy (50% by default).
+- Pricing inputs are an owner scenario. They are not a market quote, customer
+  consent, or evidence that anyone will pay.
+- The business-case pack is for owner review. Outreach, quotation, payment,
+  deployment, credentials, and production writes remain separate owner actions.
+
 ## Sellable offer
 
 Do not sell "an AI army." The first offer available for supervised delivery is
@@ -313,6 +371,9 @@ isolated fresh install/live-launch rehearsal.
 
 ### P3 - first paid desktop-workflow candidate (current goal)
 
+- The local opportunity ledger, mutual-value calculation, safety gates,
+  comparable-currency ranking, workflow binding, pilot-evidence matching, and
+  owner-review business-case pack are implemented.
 - Measure one repeated operator task: runs per week, minutes, error cost,
   application, and machine-checkable final state.
 - Record a safe test-environment demonstration.
@@ -378,8 +439,10 @@ passed, an intentionally broken assertion failed closed, the portable report is
 hash-bound and path-free, and a fresh isolated install passed its live check.
 
 The active commercial goal is now one measured customer or internal SuperMega
-desktop workflow that passes 20 supervised runs and records actual operator
-minutes, correction time, and a machine-checkable outcome. Select it from an
-observed task log; do not invent it from a feature list. No new framework,
-model, role, dashboard, mobile adapter, or paper work outranks that outcome
-gate.
+desktop workflow that passes both sides of `value status`: customer/SuperMega
+economics and 20 supervised, integrity-bound runs with actual operator minutes,
+correction time, and a machine-checkable outcome. Select it from an observed
+task log; do not invent it from a feature list. Until that exists, the honest
+cash offer is supervised Private Web Release Proof, and `supermega value` should
+say that no measured desktop opportunity exists. No new framework, model, role,
+dashboard, mobile adapter, or paper work outranks that outcome gate.

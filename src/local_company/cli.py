@@ -41,6 +41,15 @@ from .workflow_pilot import (
     start_workflow_pilot,
     workflow_pilot_status,
 )
+from .workflow_value import (
+    OPPORTUNITY_CONFIRMATION,
+    bind_workflow_opportunity,
+    create_workflow_opportunity,
+    create_workflow_value_pack,
+    list_workflow_opportunities,
+    next_workflow_opportunity,
+    workflow_value_status,
+)
 from .config import default_company_home
 from .core import Company, MockModel, OllamaModel, PLAYBOOKS, ROLES
 from .focus import (
@@ -88,6 +97,8 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Create or upgrade the local company database")
     sub.add_parser("roles", help="List available company roles")
+    catalog = sub.add_parser("catalog-check", help="Validate catalog JSON from stdin without models or imports")
+    catalog.add_argument("--compare", action="store_true", help="Compare an expected/candidate JSON envelope without changing supplied fields")
     computer = sub.add_parser(
         "computer", help="Learn, inspect, preview, and replay local Windows workflows"
     )
@@ -176,6 +187,87 @@ def parser() -> argparse.ArgumentParser:
     computer_pilot_review.add_argument(
         "--confirm", required=True, choices=[REVIEW_CONFIRMATION],
     )
+    computer_value_add = computer_sub.add_parser(
+        "value-add",
+        help="Record owner-observed workflow economics and safety gates",
+    )
+    computer_value_add.add_argument("name")
+    computer_value_add.add_argument("--project", required=True)
+    computer_value_add.add_argument("--task", required=True)
+    computer_value_add.add_argument("--application", required=True)
+    computer_value_add.add_argument("--observed-runs", type=int, required=True)
+    computer_value_add.add_argument(
+        "--observed-human-minutes-total", type=float, required=True,
+    )
+    computer_value_add.add_argument("--runs-per-week", type=float, required=True)
+    computer_value_add.add_argument("--observed-errors", type=int, default=0)
+    computer_value_add.add_argument(
+        "--observed-error-cost-total", type=float, default=0,
+    )
+    computer_value_add.add_argument(
+        "--operator-value-per-hour", type=float, required=True,
+    )
+    computer_value_add.add_argument("--currency", required=True)
+    computer_value_add.add_argument(
+        "--machine-checkable-outcome", action="store_true",
+    )
+    computer_value_add.add_argument("--outcome", required=True)
+    computer_value_add.add_argument(
+        "--environment", required=True,
+        choices=("local", "test", "staging", "production"),
+    )
+    computer_value_add.add_argument(
+        "--external-effect-risk", required=True,
+        choices=("none", "reversible", "irreversible"),
+    )
+    computer_value_add.add_argument("--credentials-required", action="store_true")
+    computer_value_add.add_argument("--setup-price", type=float, required=True)
+    computer_value_add.add_argument(
+        "--monthly-support-price", type=float, required=True,
+    )
+    computer_value_add.add_argument("--delivery-hours", type=float, required=True)
+    computer_value_add.add_argument(
+        "--delivery-cost-per-hour", type=float, required=True,
+    )
+    computer_value_add.add_argument(
+        "--monthly-support-hours", type=float, required=True,
+    )
+    computer_value_add.add_argument(
+        "--maximum-customer-payback-months", type=float, default=6,
+    )
+    computer_value_add.add_argument(
+        "--minimum-supermega-gross-margin-percent", type=float, default=50,
+    )
+    computer_value_add.add_argument(
+        "--confirm", required=True, choices=[OPPORTUNITY_CONFIRMATION],
+    )
+    computer_sub.add_parser(
+        "value-add-interactive",
+        help="Record a measured workflow opportunity through local prompts",
+    )
+    computer_value_list = computer_sub.add_parser(
+        "value-list", help="List integrity-checked workflow opportunities",
+    )
+    computer_value_list.add_argument("--project")
+    computer_value_list.add_argument("--currency")
+    computer_value_next = computer_sub.add_parser(
+        "value-next", help="Select the highest comparable mutual-value opportunity",
+    )
+    computer_value_next.add_argument("--project")
+    computer_value_next.add_argument("--currency")
+    computer_value_bind = computer_sub.add_parser(
+        "value-bind", help="Bind an opportunity to one sealed workflow",
+    )
+    computer_value_bind.add_argument("opportunity_id")
+    computer_value_bind.add_argument("workflow")
+    computer_value_status = computer_sub.add_parser(
+        "value-status", help="Inspect economics and measured pilot qualification",
+    )
+    computer_value_status.add_argument("opportunity_id")
+    computer_value_pack = computer_sub.add_parser(
+        "value-pack", help="Write a local owner-review business-case pack",
+    )
+    computer_value_pack.add_argument("opportunity_id")
     browser = sub.add_parser(
         "browser", help="Run model-free, read-only website checks with local evidence"
     )
@@ -769,9 +861,100 @@ def _interactive_vision_sales_intake(sales_root: Path | None, *, input_fn=None) 
     return create_vision_sales_intake_fields(fields, sales_root)
 
 
+def _interactive_workflow_value(company_home: Path, *, input_fn=None) -> dict[str, object]:
+    reader = input_fn or input
+
+    def ask(prompt: str, *, default: str | None = None) -> str:
+        try:
+            value = reader(prompt).strip()
+        except (EOFError, KeyboardInterrupt) as error:
+            raise ValueError("workflow_value_interactive_cancelled") from error
+        if not value and default is not None:
+            return default
+        if not value:
+            raise ValueError("workflow_value_interactive_value_required")
+        return value
+
+    def whole_number(prompt: str, *, default: int | None = None) -> int:
+        value = ask(prompt, default=str(default) if default is not None else None)
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ValueError("workflow_value_interactive_integer_invalid") from error
+
+    def decimal_number(prompt: str, *, default: float | None = None) -> float:
+        value = ask(prompt, default=str(default) if default is not None else None)
+        try:
+            return float(value)
+        except ValueError as error:
+            raise ValueError("workflow_value_interactive_number_invalid") from error
+
+    def yes_no(prompt: str, *, default: bool | None = None) -> bool:
+        default_value = None
+        if default is not None:
+            default_value = "yes" if default else "no"
+        value = ask(prompt, default=default_value).lower()
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        raise ValueError("workflow_value_interactive_yes_no_required")
+
+    return create_workflow_opportunity(
+        company_home,
+        ask("Short opportunity name (letters, numbers, - or _): "),
+        project=ask("Project: "),
+        task=ask("Exact repeated task and successful outcome: "),
+        application=ask("Application: "),
+        observed_runs=whole_number("Manual runs observed (minimum 3): "),
+        observed_human_minutes_total=decimal_number(
+            "Total human minutes across those runs: ",
+        ),
+        runs_per_week=decimal_number("Expected runs per week: "),
+        observed_errors=whole_number("Observed errors [0]: ", default=0),
+        observed_error_cost_total=decimal_number(
+            "Total cost/exposure of observed errors [0]: ", default=0,
+        ),
+        operator_value_per_hour=decimal_number("Operator capacity value per hour: "),
+        currency=ask("Three-letter currency (for example USD): "),
+        machine_checkable_outcome=yes_no(
+            "Can software verify the final outcome? (yes/no): ",
+        ),
+        outcome_label=ask("Machine-checkable final outcome: "),
+        environment=ask("Environment [local]: ", default="local").lower(),
+        external_effect_risk=ask(
+            "External-effect risk (none/reversible/irreversible) [none]: ",
+            default="none",
+        ).lower(),
+        credentials_required=yes_no(
+            "Does this workflow require credentials? (yes/no) [no]: ", default=False,
+        ),
+        setup_price=decimal_number("Proposed setup price: "),
+        monthly_support_price=decimal_number("Proposed monthly support price: "),
+        delivery_hours=decimal_number("Expected setup/delivery hours: "),
+        delivery_cost_per_hour=decimal_number("SuperMega delivery cost per hour: "),
+        monthly_support_hours=decimal_number("Expected support hours per month: "),
+        maximum_customer_payback_months=decimal_number(
+            "Maximum customer payback months [6]: ", default=6,
+        ),
+        minimum_supermega_gross_margin_percent=decimal_number(
+            "Minimum SuperMega gross margin percent [50]: ", default=50,
+        ),
+        confirmation=ask(
+            f'Type "{OPPORTUNITY_CONFIRMATION}" to save this local scenario: ',
+        ),
+    )
+
+
 def main() -> int:
     try:
         args = parser().parse_args()
+        if args.command == "catalog-check":
+            from .spreadsheet import check_catalog_json, compare_catalog_json
+            validator = compare_catalog_json if args.compare else check_catalog_json
+            result = validator(sys.stdin.read(1_000_001))
+            print(json.dumps(result, ensure_ascii=False))
+            return 0 if result["valid"] else 1
         company_home = args.home if args.home is not None else default_company_home()
         company = Company(company_home.resolve(), selected_model(args))
         _enforce_cli_execution_focus(company, args)
@@ -848,6 +1031,58 @@ def main() -> int:
                     external_effect_observed=args.external_effect_observed,
                     confirmation=args.confirm,
                 )
+            elif args.computer_command == "value-add":
+                result = create_workflow_opportunity(
+                    company.home,
+                    args.name,
+                    project=args.project,
+                    task=args.task,
+                    application=args.application,
+                    observed_runs=args.observed_runs,
+                    observed_human_minutes_total=args.observed_human_minutes_total,
+                    runs_per_week=args.runs_per_week,
+                    observed_errors=args.observed_errors,
+                    observed_error_cost_total=args.observed_error_cost_total,
+                    operator_value_per_hour=args.operator_value_per_hour,
+                    currency=args.currency,
+                    machine_checkable_outcome=args.machine_checkable_outcome,
+                    outcome_label=args.outcome,
+                    environment=args.environment,
+                    external_effect_risk=args.external_effect_risk,
+                    credentials_required=args.credentials_required,
+                    setup_price=args.setup_price,
+                    monthly_support_price=args.monthly_support_price,
+                    delivery_hours=args.delivery_hours,
+                    delivery_cost_per_hour=args.delivery_cost_per_hour,
+                    monthly_support_hours=args.monthly_support_hours,
+                    maximum_customer_payback_months=(
+                        args.maximum_customer_payback_months
+                    ),
+                    minimum_supermega_gross_margin_percent=(
+                        args.minimum_supermega_gross_margin_percent
+                    ),
+                    confirmation=args.confirm,
+                )
+            elif args.computer_command == "value-add-interactive":
+                result = _interactive_workflow_value(company.home)
+            elif args.computer_command == "value-list":
+                result = list_workflow_opportunities(
+                    company.home, project=args.project, currency=args.currency,
+                )
+            elif args.computer_command == "value-next":
+                result = next_workflow_opportunity(
+                    company.home, project=args.project, currency=args.currency,
+                )
+            elif args.computer_command == "value-bind":
+                result = bind_workflow_opportunity(
+                    company.home, args.opportunity_id, args.workflow,
+                )
+            elif args.computer_command == "value-status":
+                result = workflow_value_status(company.home, args.opportunity_id)
+            elif args.computer_command == "value-pack":
+                result = create_workflow_value_pack(
+                    company.home, args.opportunity_id,
+                )
             else:
                 result = run_workflow(
                     company.home, args.name, args.confirm,
@@ -867,6 +1102,8 @@ def main() -> int:
                 args.computer_command == "prove" and result["status"] != "passed"
             ) or (
                 args.computer_command == "pilot-status" and result["status"] == "blocked"
+            ) or (
+                args.computer_command == "value-next" and result["status"] == "blocked"
             ) or (
                 args.computer_command == "doctor" and result["status"] != "ready"
             ):

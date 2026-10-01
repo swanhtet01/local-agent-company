@@ -639,6 +639,13 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
         anchor, anchor_error = _load_anchor(
             workflow_path, pilot, run_id, receipt_sha,
         )
+        wall_seconds = receipt.get("wallSeconds") if receipt else None
+        wall_measurement_valid = (
+            isinstance(wall_seconds, (int, float))
+            and not isinstance(wall_seconds, bool)
+            and math.isfinite(float(wall_seconds))
+            and float(wall_seconds) >= 0
+        )
         item: dict[str, object] = {
             "runId": run_id,
             "receiptIntegrity": "valid" if receipt is not None else "invalid",
@@ -650,7 +657,8 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
             "executionStatus": receipt.get("status") if receipt else None,
             "machineOutcomeVerified": receipt.get("outcomeVerified") is True
             if receipt else False,
-            "wallSeconds": receipt.get("wallSeconds") if receipt else None,
+            "wallSeconds": wall_seconds,
+            "measurementIntegrity": "valid" if wall_measurement_valid else "invalid",
             "reviewStatus": "unavailable",
             "humanObservedOutcome": None,
             "correctionMinutes": None,
@@ -674,18 +682,24 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
                 item["accepted"] = (
                     receipt.get("status") == "completed"
                     and receipt.get("outcomeVerified") is True
+                    and wall_measurement_valid
                     and human["observedOutcome"] == "correct"
                     and human["wrongTargetActions"] == 0
                     and human["externalEffectObserved"] is False
                 )
         run_items.append(item)
 
-    consecutive = 0
+    consecutive_items: list[dict[str, object]] = []
     for item in reversed(run_items):
         if item["accepted"] is not True:
             break
-        consecutive += 1
-    promotion = consecutive >= required_runs
+        consecutive_items.append(item)
+    consecutive_items.reverse()
+    consecutive = len(consecutive_items)
+    reliability_gate = consecutive >= required_runs
+    promotion_window = (
+        consecutive_items[-required_runs:] if reliability_gate else []
+    )
     valid_receipts = [item for item in run_items if item["receiptIntegrity"] == "valid"]
     reviewed = [item for item in run_items if item["reviewStatus"] == "valid"]
     accepted = [item for item in run_items if item["accepted"] is True]
@@ -694,6 +708,9 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
     invalid_reviews = [
         item for item in run_items
         if item["reviewStatus"] not in {"valid", "missing"}
+    ]
+    invalid_measurements = [
+        item for item in run_items if item["measurementIntegrity"] != "valid"
     ]
     pending_review = next((
         str(item["runId"]) for item in run_items
@@ -706,6 +723,8 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
         for item in valid_receipts
         if isinstance(item.get("wallSeconds"), (int, float))
         and not isinstance(item.get("wallSeconds"), bool)
+        and math.isfinite(float(item["wallSeconds"]))
+        and float(item["wallSeconds"]) >= 0
     )
     correction_minutes = sum(
         float(item["correctionMinutes"])
@@ -717,8 +736,62 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
     completed_baseline_minutes = mean_human_minutes * len(accepted)
     verified_net_minutes = completed_baseline_minutes - automation_seconds / 60 - correction_minutes
 
+    promotion_window_automation_seconds = sum(
+        float(item["wallSeconds"])
+        for item in promotion_window
+        if isinstance(item.get("wallSeconds"), (int, float))
+        and not isinstance(item.get("wallSeconds"), bool)
+        and math.isfinite(float(item["wallSeconds"]))
+        and float(item["wallSeconds"]) >= 0
+    )
+    promotion_window_correction_minutes = sum(
+        float(item["correctionMinutes"])
+        for item in promotion_window
+        if isinstance(item.get("correctionMinutes"), (int, float))
+        and not isinstance(item.get("correctionMinutes"), bool)
+        and math.isfinite(float(item["correctionMinutes"]))
+        and float(item["correctionMinutes"]) >= 0
+    )
+    promotion_window_measurements_complete = (
+        reliability_gate
+        and len(promotion_window) == required_runs
+        and all(
+            isinstance(item.get("wallSeconds"), (int, float))
+            and not isinstance(item.get("wallSeconds"), bool)
+            and math.isfinite(float(item["wallSeconds"]))
+            and float(item["wallSeconds"]) >= 0
+            and isinstance(item.get("correctionMinutes"), (int, float))
+            and not isinstance(item.get("correctionMinutes"), bool)
+            and math.isfinite(float(item["correctionMinutes"]))
+            and float(item["correctionMinutes"]) >= 0
+            for item in promotion_window
+        )
+    )
+    promotion_window_baseline_minutes = mean_human_minutes * len(promotion_window)
+    promotion_window_net_minutes = (
+        promotion_window_baseline_minutes
+        - promotion_window_automation_seconds / 60
+        - promotion_window_correction_minutes
+    )
+    mean_promotion_window_net_minutes = (
+        promotion_window_net_minutes / len(promotion_window)
+        if promotion_window else None
+    )
+    value_gate = (
+        promotion_window_measurements_complete
+        and math.isfinite(promotion_window_net_minutes)
+        and promotion_window_net_minutes > 0
+        and mean_promotion_window_net_minutes is not None
+        and math.isfinite(mean_promotion_window_net_minutes)
+        and mean_promotion_window_net_minutes > 0
+    )
+    promotion = reliability_gate and value_gate
+
     if promotion:
         next_action = "package_owner_review_offer_from_verified_pilot"
+        next_command = f"local-ai.cmd automate pilot-status {workflow['name']}"
+    elif reliability_gate and not value_gate:
+        next_action = "redesign_or_reject_nonpositive_savings_workflow"
         next_command = f"local-ai.cmd automate pilot-status {workflow['name']}"
     elif pending_review is not None:
         next_action = "review_next_run"
@@ -727,7 +800,7 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
             f"--outcome correct --correction-minutes 0 --wrong-target-actions 0 "
             f'--confirm "{REVIEW_CONFIRMATION}"'
         )
-    elif invalid_receipts or invalid_anchors or invalid_reviews:
+    elif invalid_receipts or invalid_anchors or invalid_reviews or invalid_measurements:
         next_action = "inspect_integrity_failure_before_more_runs"
         next_command = f"local-ai.cmd automate pilot-status {workflow['name']}"
     else:
@@ -753,16 +826,50 @@ def workflow_pilot_status(company_home: Path, name: str) -> dict[str, object]:
         "invalidRunAnchors": len(invalid_anchors),
         "reviewedRuns": len(reviewed),
         "invalidReviews": len(invalid_reviews),
+        "invalidMeasurements": len(invalid_measurements),
         "acceptedRuns": len(accepted),
         "consecutivePassingRuns": consecutive,
         "requiredConsecutivePassingRuns": required_runs,
+        "reliabilityGatePassed": reliability_gate,
+        "valueGatePassed": value_gate,
         "promotionGatePassed": promotion,
         "commercialEvidenceStatus": "qualified" if promotion else "not_yet_proven",
+        "qualificationFailureReason": (
+            None
+            if promotion
+            else (
+                "non_positive_or_incomplete_verified_savings"
+                if reliability_gate
+                else "reliability_window_incomplete"
+            )
+        ),
         "metrics": {
             "measuredAutomationMinutes": round(automation_seconds / 60, 4),
             "measuredCorrectionMinutes": round(correction_minutes, 4),
             "verifiedCompletedBaselineMinutes": round(completed_baseline_minutes, 4),
             "verifiedNetMinutesSaved": round(verified_net_minutes, 4),
+            "verifiedPromotionWindowRunCount": len(promotion_window),
+            "verifiedPromotionWindowAutomationMinutes": round(
+                promotion_window_automation_seconds / 60, 4,
+            ),
+            "verifiedPromotionWindowCorrectionMinutes": round(
+                promotion_window_correction_minutes, 4,
+            ),
+            "verifiedPromotionWindowBaselineMinutes": round(
+                promotion_window_baseline_minutes, 4,
+            ),
+            "verifiedPromotionWindowNetMinutesSaved": (
+                round(promotion_window_net_minutes, 4)
+                if reliability_gate and promotion_window_measurements_complete
+                else None
+            ),
+            "meanVerifiedNetMinutesSavedPerRun": (
+                round(mean_promotion_window_net_minutes, 4)
+                if reliability_gate
+                and promotion_window_measurements_complete
+                and mean_promotion_window_net_minutes is not None
+                else None
+            ),
             "baselineObservedErrorRate": round(
                 int(pilot["baseline"]["observedErrors"])
                 / int(pilot["baseline"]["observedRuns"]), 6,

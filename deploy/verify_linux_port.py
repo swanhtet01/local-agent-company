@@ -457,23 +457,26 @@ def _fetch_ollama_models(host: str) -> list[str]:
     return sorted(names)
 
 
-def _loopback_ollama_host() -> str:
-    """The exact host string the readiness gate treats as "loopback_default"."""
+def _readiness_endpoint(host: str) -> str:
+    """Classify only endpoints admitted by the authoritative readiness gate."""
     try:
-        from local_company.core import LOOPBACK_OLLAMA_HOST
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-        return DEFAULT_OLLAMA_HOST
-    if type(LOOPBACK_OLLAMA_HOST) is not str or not LOOPBACK_OLLAMA_HOST:
-        return DEFAULT_OLLAMA_HOST
-    return LOOPBACK_OLLAMA_HOST
+        from local_company.core import COMPOSE_OLLAMA_HOST, LOOPBACK_OLLAMA_HOST
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise OllamaProbeError("runtime_policy_unavailable") from exc
+    if host == LOOPBACK_OLLAMA_HOST:
+        return "loopback_default"
+    if host == COMPOSE_OLLAMA_HOST:
+        return "configured_compose_sidecar"
+    return "nonlocal"
 
 
 def check_ollama(host: str, *, offline: bool) -> dict[str, object]:
     result: dict[str, object] = {
         "status": "skipped" if offline else "unavailable",
         "reason": "offline_requested" if offline else "none",
-        "host": host,
+        "host": None,
         "loopback_host": None,
+        "readiness_endpoint": None,
         "model_count": None,
         "supported_model_installed": None,
     }
@@ -483,14 +486,19 @@ def check_ollama(host: str, *, offline: bool) -> dict[str, object]:
         result["status"] = "unavailable"
         result["reason"] = exc.kind
         return result
+    try:
+        endpoint = _readiness_endpoint(validated)
+    except OllamaProbeError as exc:
+        result["status"] = "unavailable"
+        result["reason"] = exc.kind
+        return result
+    result["readiness_endpoint"] = endpoint
+    result["loopback_host"] = endpoint == "loopback_default"
+    if endpoint == "nonlocal":
+        result["status"] = "unavailable"
+        result["reason"] = "host_not_admitted_by_readiness"
+        return result
     result["host"] = validated
-    # dashboard.runtime_model_identity() labels any host other than
-    # core.LOOPBACK_OLLAMA_HOST "nonlocal", and check_readiness turns that into
-    # an endpoint_mismatch blocker. Compared against the live constant rather
-    # than a copy so this stays true if the constant moves. Surfaced so a
-    # container deployment is not surprised by a readiness failure it cannot
-    # explain: reaching Ollama by service name is exactly what trips it.
-    result["loopback_host"] = validated == _loopback_ollama_host()
     if offline:
         return result
 
@@ -536,17 +544,21 @@ def _import_probe(module_name: str) -> tuple[bool, str, str, list[str]]:
     return True, "none", "", []
 
 
-def check_windows_module() -> dict[str, object]:
-    """The WinAPI workcell must be inert on Linux - and must not drag the CLI down.
+def _windows_entrypoint_guarded() -> bool:
+    """Observe the non-Windows guard without controlling a desktop."""
+    try:
+        from local_company.computer_use import WindowsDesktopAdapter
+        WindowsDesktopAdapter().windows(limit=1)
+    except RuntimeError as exc:
+        return str(exc) == "computer_use_requires_windows"
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return False
+    return False
 
-    computer_use.py does `from ctypes import wintypes` at module scope.
-    ctypes.wintypes defines VARIANT_BOOL with _type_ = "v", a format code the
-    CPython _ctypes build only registers on Windows, so that import raises
-    ValueError on Linux. That is the CORRECT outcome for the module itself. It
-    is NOT correct for anything that imports it eagerly, which is why
-    cli_entrypoint is checked separately.
-    """
-    posix = os.name != "nt"
+
+def check_windows_module(*, target_os: str | None = None) -> dict[str, object]:
+    """Require import-safe computer use with a call-time guard on Linux."""
+    posix = (os.name if target_os is None else target_os) != "nt"
     imported, error, detail, frames = _import_probe("local_company.computer_use")
     result: dict[str, object] = {
         "status": "unavailable",
@@ -557,12 +569,16 @@ def check_windows_module() -> dict[str, object]:
         "failing_modules": frames,
     }
     if posix and not imported:
-        result["status"] = "excluded"
+        result["status"] = "import_failed_on_posix"
+        result["reason"] = "computer_use_import_failed_on_posix"
         return result
     if posix and imported:
-        # WinAPI call paths reachable on Linux means the platform guard is gone.
-        result["status"] = "unexpectedly_importable"
-        result["reason"] = "windows_module_importable_on_posix"
+        if _windows_entrypoint_guarded():
+            result["status"] = "excluded"
+            result["reason"] = "guarded_on_posix"
+            return result
+        result["status"] = "guard_missing_on_posix"
+        result["reason"] = "computer_use_guard_missing_on_posix"
         return result
     if not posix and imported:
         result["status"] = "present_on_windows"
@@ -573,13 +589,7 @@ def check_windows_module() -> dict[str, object]:
 
 
 def check_cli_entrypoint() -> dict[str, object]:
-    """The console entry point must import on the target platform.
-
-    cli.py imports .computer_use at module scope, so on Linux this is where the
-    ctypes.wintypes ValueError surfaces and takes down `local-company` in its
-    entirety - dashboard, queue, health, everything, including the subprocess
-    the MCP server spawns to execute a mission.
-    """
+    """The console entry point must import despite the guarded Windows module."""
     imported, error, detail, frames = _import_probe("local_company.cli")
     result: dict[str, object] = {
         "status": "importable" if imported else "import_failed",
@@ -646,9 +656,6 @@ def run_verification(*, ollama_host: str, offline: bool) -> tuple[dict[str, obje
         blockers.append("ollama_" + str(ollama.get("reason", "unavailable")))
     elif ollama.get("supported_model_installed") is not True:
         blockers.append("ollama_supported_model_not_installed")
-    if ollama.get("loopback_host") is False:
-        advisories.append("ollama_host_reports_nonlocal_to_readiness")
-
     if checks["windows_module"]["status"] not in {"excluded", "present_on_windows"}:
         blockers.append(str(checks["windows_module"].get("reason", "windows_module_invalid")))
     if checks["cli_entrypoint"]["status"] != "importable":
@@ -663,6 +670,10 @@ def run_verification(*, ollama_host: str, offline: bool) -> tuple[dict[str, obje
         action = "fix_posix_memory_observation_before_running_any_mission"
     elif any(item.startswith("company_home_") for item in blockers):
         action = "mount_a_writable_non_synced_state_volume"
+    elif "ollama_host_not_admitted_by_readiness" in blockers:
+        action = "configure_admitted_ollama_host"
+    elif "ollama_runtime_policy_unavailable" in blockers:
+        action = "inspect_runtime_policy"
     elif any(item.startswith("ollama_") for item in blockers):
         action = "start_ollama_and_pull_a_supported_model"
     elif blockers:

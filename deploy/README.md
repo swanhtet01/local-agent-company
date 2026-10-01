@@ -10,25 +10,60 @@ before you promise anything to anybody. This packaging makes the coordinator
 
 ---
 
+## Existing Windows VPS
+
+The founder's existing Contabo order identifies Windows Server, not Linux.
+Preserve its OS, applications and data. Do not run the Linux installation or
+reimage instructions on it. First inventory the target from an authenticated
+operator session using `deploy/inspect_windows_host.ps1`. The script reports
+capacity, tools on PATH, selected listener bindings and aggregate counts/memory
+for recognized MetaTrader executables; it installs
+nothing, starts no model, and does not collect credentials or command lines.
+Process inspection failure reports unavailable, never zero. A zero count does
+not establish an idle server: renamed executables and services may be missed.
+Do not pause trading or assume its current memory use is its peak requirement.
+Follow the host's script execution policy; do not weaken it to run this check.
+
+A local syntax check is not a remote inventory. An RDP port responding is not
+proof of login, free RAM, backup coverage or a usable worker. Confirm those on
+the server before selecting a native Windows worker versus a separately
+approved Linux host. Do not assume Docker Linux containers work on Windows Server.
+
 ## 1. The box
 
-| | Hetzner CX32 | Contabo VPS S |
-|---|---|---|
-| vCPU / RAM | 4 / 8 GB | 4 / 8 GB |
-| Disk | 80 GB NVMe | 200 GB NVMe |
-| Price | ~€6.80/mo | ~€6–9/mo |
-| Location | Nuremberg / Helsinki / Ashburn / Singapore | EU / US / Asia |
+Start with a private CPU VPS for the coordinator, queue and bounded inference.
+8 GiB is the existing Compose floor (2 GiB coordinator, 5 GiB Ollama, 1 GiB
+host reserve); 16 GiB is a planning target for headroom, not authorization to
+increase concurrency or admit larger models. Recheck the provider quote,
+region, tax, storage and backup charges before purchase. Old CX32/Contabo
+price estimates have been removed. Current provider references:
+[Hetzner plans](https://www.hetzner.com/cloud/cost-optimized/) and
+[2026 price changes](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/).
 
-**8 GB is the floor, not the target.** The compose file splits it 5 GB Ollama /
-2 GB coordinator / ~1 GB host. `llama3.2:1b` at q4 sits around 1.5 GB resident
-and fits comfortably; `llama3.2:3b` sits around 3.5 GB and fits, but only if
-nothing else on the box is doing anything. Those two are the only models
-`model_policy.py` will admit, so do not size for anything larger.
+### Operating architecture
 
-CPU-only inference. A 1b model on 4 shared vCPUs produces roughly 10–25
-tokens/sec — fine for the 512-token bounded completions this system issues,
-useless for anything interactive. Do not rent a GPU box for this; the
-bottleneck is the review loop, not the tokens.
+- Keep the Ally as the operator console and retain existing product hosting.
+- Put one coordinator, durable SQLite ledger, evidence store and one Ollama
+  worker on the private VPS. No public model/dashboard ports.
+- Engineering, QA, research and commercial roles share the queue; they are
+  task roles, not one resident model per employee. Deterministic jobs run
+  without inference; generated work stays draft until its acceptance checks pass.
+- Reuse OpenCode as the coding interface. The Windows launcher is not a proven
+  Linux coding worker: validate sandboxed file changes and protected tests on
+  Linux before assigning unattended coding jobs.
+- Start with the currently admitted 1B/3B model policy. Record task quality,
+  latency, peak memory and cost per accepted result before changing models or
+  adding a separate GPU inference host. No unmeasured throughput promises.
+- The Compose Ollama service sets `OLLAMA_NO_CLOUD=1`, disabling cloud models
+  and Ollama web search in addition to the coordinator's local-only policy.
+  Verify `Ollama cloud disabled: true` on the target after startup. This source
+  setting is not evidence that an existing Windows or VPS runtime has changed.
+- Keep customer product data and production credentials out of the worker by
+  default. Supply only task-scoped inputs; preserve explicit external-action gates.
+
+Self-hosted tools avoid per-token API billing; server, storage and backup costs
+remain. Cloud allocation, digest-pinned images, a restored state rehearsal and
+one accepted evidence-bound job are required before calling this operational.
 
 Pick Ubuntu 24.04 LTS. Add your SSH public key at provisioning time so the box
 never has a password-authenticated window.
@@ -111,6 +146,17 @@ usermod -aG docker founder     # log out and back in for this to take effect
 
 ## 3. Deploy
 
+Before starting containers, run `python3 deploy/inspect_linux_capacity.py` from
+an existing checkout on the target host, on the filesystem intended for state
+and model storage. This reads capacity only: no network calls, installs or model
+launches. Exit 0 means at least 8 GiB currently available RAM and 20 GiB free disk;
+exit 2 means insufficient capacity; exit 1 means inspection unavailable. An
+advertised 8 GiB server may fail because the OS already uses some memory. Do not
+lower the reserve merely to pass. Reconcile existing workload peaks, container
+limits, backup/restore and isolation separately. This receipt never accepts a
+deployment, and measurements inside a container do not qualify its host.
+
+
 ```bash
 su - founder
 git clone <your-remote> ~/local-agent-company
@@ -163,8 +209,10 @@ One JSON object, exit 0 on pass and 1 on anything else. It checks:
   container's ephemeral writable layer), and is not inside a cloud-sync
   directory;
 - the Ollama endpoint answers and has a policy-supported model installed;
-- `computer_use` is correctly *not* importable, and `local_company.cli` still
-  imports anyway.
+- `computer_use` and `local_company.cli` both import, but a desktop entrypoint
+  fails closed with `computer_use_requires_windows` before any UI operation;
+- the configured Ollama host is either exact loopback or the admitted Compose
+  sidecar (`http://ollama:11434`), not an arbitrary network endpoint.
 
 **Why the memory check is first among equals.** Before its POSIX branch landed,
 `observe_memory()` returned `{"status": "unavailable"}` on Linux. Nothing
@@ -202,13 +250,10 @@ Emits a `local-company.tests.v3` summary object; exit 0 on pass.
 
 Two things to expect:
 
-1. **`tests/test_computer_use.py`, `tests/test_workflow_pilot.py` and
-   `tests/test_browser_operator.py` currently fail at *import* on Linux**, not
-   at assertion — they import Windows-only modules at module scope with no
-   `skipUnless` guard, so unittest discovery raises before a single test runs.
-   Until those files grow platform guards, a green run on Linux is not
-   achievable and a red run is not necessarily a regression. Read the failure
-   list, do not just read the exit code.
+1. The Windows-only entrypoints must import safely and then fail closed at
+   call time. Repository Ubuntu CI has run the full suite, but that does not
+   verify this particular container, model sidecar, state volume, or mission.
+   Require exit 0 and inspect the reported test count on this exact build.
 2. `/app` is root-owned and read-only to the runtime user by design (the source
    tree is immutable so the build-manifest digest cannot drift). Tests write
    through `TMPDIR`, which is a 512 MB tmpfs. If a test ever needs to write to
@@ -317,15 +362,12 @@ approval, quality record, and export. `ollama-models` is regenerable from
 that restores clean and is missing the last transactions. Use the backup API:
 
 ```bash
-# Consistent hot snapshot, no service downtime, stdlib only.
-docker compose exec coordinator python - <<'EOF'
-import sqlite3
-source = sqlite3.connect("file:/state/company.db?mode=ro", uri=True)
-target = sqlite3.connect("/state/backup/company.db")
-with target:
-    source.backup(target)
-source.close(); target.close()
-EOF
+# Create a private destination, then a new verified snapshot (never overwrite).
+docker compose exec -T coordinator mkdir -p /state/backup
+docker compose exec -T coordinator python deploy/snapshot_database.py \
+  /state/company.db /state/backup/company-20260928.db
+# Choose a unique dated filename for each run. A PASS verifies SQLite integrity
+# only; outputs/evidence files still require the encrypted full-volume backup.
 ```
 
 **restic — full volume, off-box, encrypted:**
@@ -336,11 +378,23 @@ export RESTIC_REPOSITORY="s3:s3.eu-central-1.amazonaws.com/your-bucket/workcell"
 export RESTIC_PASSWORD_FILE=/root/.restic-pass   # chmod 600, and keep a copy
                                                  # somewhere that is not this box
 restic init
+# Before capture: finish active jobs, stop queue dispatch, and exclude other
+# CLI/operator writers. Do not interrupt an in-flight mission for a backup.
+(
+set -eu
+docker compose stop coordinator
+# Restore service on failure too. Run from the accepted Compose directory.
+trap 'docker compose start coordinator' EXIT
 restic backup /var/lib/docker/volumes/local-workcell_company-state/_data
-restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+)
+# Retain the snapshot ID printed by restic with the accepted image/source ID.
+# Prune only under an approved retention policy after a successful restore drill.
 ```
 
-Put it on a timer:
+Automate only after the drain/stop/capture/restart sequence and restore drill
+have passed on the target host. A timer calling only `restic backup` does not
+coordinate the database with output/evidence writes. The following is a timer
+example, not an installed or accepted backup service:
 
 ```bash
 # /etc/systemd/system/workcell-backup.timer -> OnCalendar=daily, Persistent=true
@@ -358,11 +412,23 @@ acceptable start.
 > archiving a torn database for six months. Once a month:
 >
 > ```bash
-> restic restore latest --target /tmp/restore-test
-> docker run --rm -v /tmp/restore-test:/state:ro local-workcell/coordinator:0.1.0 \
->     python /app/deploy/verify_linux_port.py --offline
-> docker run --rm -v /tmp/restore-test:/state:ro local-workcell/coordinator:0.1.0 \
+> (
+> set -eu
+> : "${RESTORE_SNAPSHOT_ID:?Set the exact accepted backup snapshot ID}"
+> restore_root=$(mktemp -d /tmp/workcell-restore.XXXXXX)
+> restic restore "$RESTORE_SNAPSHOT_ID" --target "$restore_root"
+> # Restic preserves the original absolute path beneath its target.
+> restored="$restore_root/var/lib/docker/volumes/local-workcell_company-state/_data"
+> scratch=$(mktemp -d /tmp/workcell-recovery.XXXXXX)
+> cp -a "$restored/." "$scratch/"
+> # Keep database, WAL and evidence from this same quiesced capture together.
+> # Never substitute an older database snapshot or discard its WAL.
+> sudo chown -R 10001:10001 "$scratch"
+> docker run --rm -v "$scratch:/state" local-workcell/coordinator:0.1.0 \
 >     local-company health
+> # Compare restored store identity and receipt/evidence references with the
+> # recorded source. Never point this drill at the live company-state volume.
+> )
 > ```
 >
 > A restore that does not produce a readable store with the identity you expect
@@ -495,19 +561,13 @@ Ordered by what stops you first.
    `http://ollama:11434`, which satisfies that validator. Verify with
    `docker compose exec coordinator python -c "from local_company.core import
    default_ollama_host; print(default_ollama_host())"`.
-3. **The readiness gate rejects a non-loopback Ollama host** — and gap 2
-   landing makes this the one that actually bites you now.
-   `dashboard.runtime_model_identity()` labels any host other than
-   `LOOPBACK_OLLAMA_HOST` as `"nonlocal"`, and
-   `check_readiness._runtime_status()` turns `"nonlocal"` into
-   `endpoint_mismatch` → blocker `service_runtime_endpoint_mismatch` →
-   `action_required`, exit 1. The gap-2 fix extracted the constant but did not
-   change that semantics, so a working compose deployment now *connects* to
-   Ollama and *fails readiness* for connecting to it. Either
-   `runtime_model_identity()` needs a third endpoint label for a validated
-   configured host, or `_runtime_status()` needs to accept it.
-   `verify_linux_port.py` flags this as the advisory
-   `ollama_host_reports_nonlocal_to_readiness` so it does not ambush you.
+3. ~~**The readiness gate rejects the Compose Ollama sidecar.**~~ **Landed
+   (`local-build-20260914.1`).** Runtime attestation now distinguishes exact
+   `http://ollama:11434` from arbitrary nonlocal hosts. The readiness checker
+   requires its local configuration to agree with that live attestation and
+   probes the same sidecar instead of its old hard-coded loopback. The Linux
+   port verifier no longer emits the obsolete mismatch advisory. These are
+   contract tests, not a passed mission in a real Linux container.
 4. **The dashboard has no authentication and cannot safely be exposed.** Its
    mutation token is in the HTML; read access is write access whenever a
    service token is set. SSH tunnel or Tailscale only, read-only mode only. A
@@ -517,14 +577,22 @@ Ordered by what stops you first.
    outside the container's netns even for legitimate local access. A
    `LOCAL_COMPANY_DASHBOARD_BIND` env var (defaulting to `127.0.0.1`, with the
    Host allowlist extended to match the configured authority) is the clean fix.
-6. **The test suite cannot go green on Linux** until the three Windows-only
-   test modules get platform guards. You currently cannot prove a Linux build
-   is good with the tool that exists to prove builds are good.
+6. **The exact Linux container still needs a full acceptance run.** The
+   import guards and Ubuntu CI are in place; run the full suite, Linux port
+   verifier, authoritative readiness, and one evidence-bound queued mission
+   against this specific built image before calling it an Ally replacement.
 7. **Browser QA acceptance must be re-rehearsed** on the replacement substrate
    before anything produced by it is sold. See §9.
-8. **`ollama/ollama:latest` is unpinned.** Pin a digest before you call any of
-   this production; a silent base-image bump is a silent change to the thing
-   generating customer deliverables.
+8. **Ollama is pinned, but target runtime acceptance remains outstanding.**
+   Compose uses registry index
+   `sha256:8262851b2846b87c649eddf3e76beb270c52f4d1bc94559f47efde16b0841551`,
+   resolved from the official `ollama/ollama` repository on 2026-09-28 and
+   re-fetched by digest; the index includes Linux amd64 and arm64. This
+   verifies the reference, not runtime compatibility or image security.
+   For upgrades, resolve and inspect a new immutable digest, retain the old
+   reference for rollback, then verify cloud-disabled startup, model loading,
+   idle unload and one accepted queued mission on the target host before
+   promotion. Never replace this reference with `latest` for unattended updates.
 9. **No restore has been tested yet.** Until you have restored into a scratch
    container and seen `local-company health` come back with the identity you
    expect, you do not have backups. See §7.

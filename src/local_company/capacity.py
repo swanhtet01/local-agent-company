@@ -17,6 +17,7 @@ from .service import service_status
 MACHINE_CAPACITY_SCHEMA = "local-company.machine-capacity.v1"
 LISTENER_PORTS = (5173, 8765, 8788, 11434)
 MIN_AVAILABLE_MEMORY_BYTES = 1024 * 1024 * 1024
+LOCAL_1B_MIN_AVAILABLE_MEMORY_BYTES = 5 * 1024**3 // 2
 _MAX_NETSTAT_BYTES = 256 * 1024
 _MAX_OLLAMA_RESPONSE_BYTES = 32 * 1024
 _MAX_MEMINFO_BYTES = 64 * 1024
@@ -330,6 +331,14 @@ def build_capacity_snapshot(
 
     return {
         "schema": MACHINE_CAPACITY_SCHEMA,
+        "status_scope": "coordinator_capacity_not_model_acceptance",
+        "local_1b_memory": {
+            "status": ("unknown" if memory.get("status") != "ready" or type(available_memory) is not int
+                       else "sufficient" if available_memory >= LOCAL_1B_MIN_AVAILABLE_MEMORY_BYTES else "insufficient"),
+            "required_available_bytes": LOCAL_1B_MIN_AVAILABLE_MEMORY_BYTES,
+            "scope": "observed_host_or_container_only_not_remote_inference",
+            "model_execution_authorized": False,
+        },
         "status": status,
         "focus": {
             "enabled": focus.get("enabled"),

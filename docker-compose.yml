@@ -31,11 +31,9 @@ services:
       # which validates scheme, host and port and rejects paths and embedded
       # credentials - "http://ollama:11434" satisfies it.
       #
-      # CAVEAT: dashboard.runtime_model_identity() still labels anything other
-      # than LOOPBACK_OLLAMA_HOST as "nonlocal", which check_readiness turns
-      # into a service_runtime_endpoint_mismatch blocker. The stack will reach
-      # the model and still fail readiness until that is reconciled. See
-      # deploy/README.md, "Known gaps", item 3.
+      # Readiness admits this exact Compose sidecar address only when the
+      # running service and verifier agree. Other configured hosts fail closed.
+      # This is code-level support, not proof of a live Linux deployment.
       LOCAL_COMPANY_OLLAMA_HOST: http://ollama:11434
       TMPDIR: /tmp
     volumes:
@@ -69,15 +67,17 @@ services:
         max-file: "5"
 
   ollama:
-    # Pin a digest before you call this production:
-    #   image: ollama/ollama@sha256:<digest>
-    image: ollama/ollama:latest
+    # Registry index verified 2026-09-28 (linux/amd64 and linux/arm64).
+    # Upgrade explicitly after target-host acceptance; see deploy/README.md.
+    image: ollama/ollama@sha256:8262851b2846b87c649eddf3e76beb270c52f4d1bc94559f47efde16b0841551
     hostname: ollama
     environment:
       # Bind all interfaces INSIDE the container so `ollama:11434` is reachable
       # from the coordinator. This is safe only because no port is published
       # and the network is not routable from outside the host.
       OLLAMA_HOST: 0.0.0.0:11434
+      # Enforce local inference at the runtime as well as in the coordinator.
+      OLLAMA_NO_CLOUD: "1"
       # Mirror the single-runtime discipline in AGENTS.md: one model resident,
       # one request in flight, scale to zero quickly.
       OLLAMA_KEEP_ALIVE: 30s
